@@ -23,15 +23,34 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <csignal>
 
 namespace {
+
 using namespace neta;
+
+volatile std::sig_atomic_t g_stop_requested = 0;
+void handle_stop_signal(int) { g_stop_requested = 1; }
 
 struct Target {
     std::string host;
     std::uint16_t port{443};
     std::set<std::string> ips;
 };
+
+struct Tracked {
+    std::int64_t db_id;
+    TcpSnapshot last_seen;
+    TcpSnapshot last_persisted;
+    std::uint64_t last_persist_ns;
+    bool present;
+};
+
+void finalize_observe_cmd(const std::unordered_map<std::string, Tracked>& tracked,
+                        HistoryStore& store,
+                        const std::optional<Baseline>& baseline,
+                        const std::optional<TlsObservation>& tls,
+                        std::optional<std::int64_t> tls_id);
 
 std::filesystem::path default_db_path() { return "neta.db"; }
 
@@ -222,6 +241,9 @@ void cmd_capabilities() {
 }
 
 void cmd_observe(int argc, char** argv) {
+    g_stop_requested = 0;
+    const auto previous_sigint = std::signal(SIGINT, handle_stop_signal);
+    const auto previous_sigterm = std::signal(SIGTERM, handle_stop_signal);
     const auto db = arg_value(argc, argv, "--db", default_db_path().string());
     const auto target = parse_target(arg_value(argc, argv, "--target"));
     const auto ca = arg_value(argc, argv, "--ca");
@@ -245,19 +267,13 @@ void cmd_observe(int argc, char** argv) {
     }
     const auto baseline = store.baseline_for(target.host, target.port);
 
-    struct Tracked {
-        std::int64_t db_id;
-        TcpSnapshot last_seen;
-        TcpSnapshot last_persisted;
-        std::uint64_t last_persist_ns;
-        bool present;
-    };
     std::unordered_map<std::string, Tracked> tracked;
     std::unordered_map<std::uint64_t, std::optional<ProcessIdentity>> process_cache;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration);
     std::size_t observed = 0;
 
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (std::chrono::steady_clock::now() < deadline && !g_stop_requested) 
+    {
         for (auto& [unused, tracked_connection] : tracked) {
             static_cast<void>(unused);
             tracked_connection.present = false;
@@ -294,7 +310,7 @@ void cmd_observe(int argc, char** argv) {
             }
         }
 
-        for (auto& [unused, tracked_connection] : tracked) {
+          for (auto& [unused, tracked_connection] : tracked) {
             static_cast<void>(unused);
             if (!tracked_connection.present) {
                 store.touch_connection(tracked_connection.db_id,
@@ -305,18 +321,52 @@ void cmd_observe(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
     }
 
-    for (auto& [unused, tracked_connection] : tracked) {
+    finalize_observe_cmd(tracked, store, baseline, tls, tls_id);
+
+    store.prune_to_budget(max_db_mb * 1024ULL * 1024ULL);
+
+    std::signal(SIGINT, previous_sigint);
+    std::signal(SIGTERM, previous_sigterm);
+
+    std::cout << "Observed " << observed << " matching connection(s). History: " << db << "\n";
+}
+
+void finalize_observe_cmd(const std::unordered_map<std::string, Tracked>& tracked,
+                        HistoryStore& store,
+                        const std::optional<Baseline>& baseline,
+                        const std::optional<TlsObservation>& tls,
+                        std::optional<std::int64_t> tls_id) 
+{
+    for (auto& [unused, tracked_connection] : tracked) 
+    {
         static_cast<void>(unused);
-        store.touch_connection(tracked_connection.db_id, tracked_connection.last_seen.observed_ns,
-                               "DISAPPEARED");
+        const char* final_state =
+            tracked_connection.present
+                ? "OBSERVATION_ENDED"
+                : "DISAPPEARED";
+
+        store.touch_connection(
+            tracked_connection.db_id,
+            tracked_connection.last_seen.observed_ns,
+            final_state);
+
         if (baseline) {
-            const auto samples = store.samples_for_connection(tracked_connection.db_id);
-            const auto verdict = evaluate(*baseline, aggregate_metrics(samples), tls);
-            store.save_verdict(tracked_connection.db_id, verdict, tls_id);
+            const auto samples =
+                store.samples_for_connection(
+                    tracked_connection.db_id);
+
+            const auto verdict =
+                evaluate(
+                    *baseline,
+                    aggregate_metrics(samples),
+                    tls);
+
+            store.save_verdict(
+                tracked_connection.db_id,
+                verdict,
+                tls_id);
         }
     }
-    store.prune_to_budget(max_db_mb * 1024ULL * 1024ULL);
-    std::cout << "Observed " << observed << " matching connection(s). History: " << db << "\n";
 }
 
 void cmd_history(int argc, char** argv) {
