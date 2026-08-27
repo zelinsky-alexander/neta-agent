@@ -1,0 +1,51 @@
+#pragma once
+
+#include "neta/model.hpp"
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace neta::platform {
+
+struct PlatformCapabilities {
+    bool connection_discovery{false};
+    bool process_attribution{false};
+    bool tcp_rtt{false};
+    bool tcp_rtt_variance{false};
+    bool tcp_retransmissions{false};
+    bool tcp_cwnd{false};
+    bool route_observation{false};
+    bool connection_lifecycle_events{false};
+    bool exact_dns_observation{false};
+    bool exact_tls_observation{false};
+};
+
+class ConnectionObserver {
+public:
+    virtual ~ConnectionObserver() = default;
+    virtual std::vector<SocketObservation> snapshot() = 0;
+};
+
+class ProcessResolver {
+public:
+    virtual ~ProcessResolver() = default;
+    virtual std::optional<ProcessIdentity> resolve(std::uint64_t socket_inode) = 0;
+};
+
+class RouteObserver {
+public:
+    virtual ~RouteObserver() = default;
+    virtual std::optional<RouteObservation> route_to(const std::string& destination) = 0;
+};
+
+HostEnvironment host_environment();
+PlatformCapabilities capabilities();
+
+std::unique_ptr<ConnectionObserver> make_connection_observer();
+std::unique_ptr<ProcessResolver> make_process_resolver();
+std::unique_ptr<RouteObserver> make_route_observer();
+
+} // namespace neta::platform
