@@ -44,6 +44,11 @@ public:
 HostEnvironment host_environment();
 PlatformCapabilities capabilities();
 
+// Platform-specific admission policy for a socket first seen by the polling
+// observer. The collector still returns all TCP states so already-tracked
+// connections may retain lifecycle-tail evidence.
+bool eligible_for_new_connection(const SocketObservation& socket);
+
 std::unique_ptr<ConnectionObserver> make_connection_observer();
 std::unique_ptr<ProcessResolver> make_process_resolver();
 std::unique_ptr<RouteObserver> make_route_observer();
