@@ -611,19 +611,22 @@ void HistoryStore::prune_to_budget(std::uint64_t max_bytes) {
     auto bytes = sqlite_total_size(path_);
     if (bytes <= max_bytes) return;
 
-    // First eliminate transient WAL growth. The hard budget is measured as
-    // main database + WAL, so a checkpoint may be sufficient by itself.
-    exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    bytes = sqlite_total_size(path_);
-    if (bytes <= max_bytes) return;
-
     // Crossing the configured hard cap triggers cleanup to 90% of the cap.
     // The default 200 MiB budget therefore cleans down to <= 180 MiB.
     const auto target_bytes = max_bytes - (max_bytes / 10ULL);
 
+    // First eliminate transient WAL growth. If the checkpoint itself restores
+    // enough headroom, no evidence has to be deleted.
+    exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    bytes = sqlite_total_size(path_);
+    if (bytes <= target_bytes) return;
+
     const auto compact_and_measure = [&]() {
         prune_orphans(db_);
-        exec("PRAGMA incremental_vacuum(512);");
+        // Under storage pressure, drain the current freelist before measuring
+        // again. This avoids deleting additional history simply because freed
+        // pages have not yet been returned to the filesystem.
+        exec("PRAGMA incremental_vacuum;");
         exec("PRAGMA wal_checkpoint(TRUNCATE);");
         return sqlite_total_size(path_);
     };
