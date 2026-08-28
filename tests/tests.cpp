@@ -251,6 +251,9 @@ void test_bounded_retention_policy() {
 
     {
         HistoryStore store(path);
+        checkpoint_db(path);
+        const auto sqlite_floor_bytes = store.status(1).bytes;
+        assert(sqlite_floor_bytes > 0);
 
         Baseline obsolete;
         obsolete.target_host = "retention.example";
@@ -327,11 +330,14 @@ void test_bounded_retention_policy() {
 
         checkpoint_db(path);
         const auto before = store.status(1);
-        assert(before.bytes > 0);
+        assert(before.bytes > sqlite_floor_bytes);
 
-        const auto max_bytes = before.bytes * 3ULL / 4ULL;
+        const auto retained_data_bytes = before.bytes - sqlite_floor_bytes;
+        const auto desired_target_bytes = sqlite_floor_bytes + retained_data_bytes * 2ULL / 3ULL;
+        const auto max_bytes = desired_target_bytes * 10ULL / 9ULL;
         const auto target_bytes = max_bytes - (max_bytes / 10ULL);
-        assert(max_bytes > 0);
+        assert(before.bytes > max_bytes);
+        assert(target_bytes >= sqlite_floor_bytes);
 
         store.prune_to_budget(max_bytes);
 
