@@ -26,6 +26,7 @@ add_library(neta_core
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/history_store.cpp
+    src/core/connection_admission.cpp
     src/platform/linux/environment.cpp
     src/platform/linux/socket_diag.cpp
     src/platform/linux/process_resolver.cpp
@@ -53,4 +54,9 @@ if(NETA_ENABLE_TESTS)
     target_link_libraries(neta_tests PRIVATE neta_core)
     target_compile_options(neta_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME neta_tests COMMAND neta_tests)
+
+    add_executable(neta_ms0_tests tests/ms0_tests.cpp)
+    target_link_libraries(neta_ms0_tests PRIVATE neta_core)
+    target_compile_options(neta_ms0_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_ms0_tests COMMAND neta_ms0_tests)
 endif()
