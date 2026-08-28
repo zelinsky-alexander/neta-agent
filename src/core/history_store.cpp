@@ -71,6 +71,51 @@ TcpSnapshot sample_from_row(sqlite3_stmt* stmt) {
     return s;
 }
 
+void prune_orphans(sqlite3* db) {
+    {
+        Statement stmt(db, R"SQL(
+DELETE FROM processes
+WHERE NOT EXISTS (
+    SELECT 1 FROM connections WHERE connections.process_id = processes.id
+);
+)SQL");
+        stmt.step_done();
+    }
+
+    {
+        Statement stmt(db, R"SQL(
+DELETE FROM tls_observations
+WHERE NOT EXISTS (
+    SELECT 1 FROM verdicts WHERE verdicts.tls_observation_id = tls_observations.id
+);
+)SQL");
+        stmt.step_done();
+    }
+
+    // Keep every baseline referenced by retained verdict evidence, plus the newest
+    // baseline for each target even if no verdict references it yet. Older,
+    // unreferenced baselines are obsolete history and may be reclaimed.
+    {
+        Statement stmt(db, R"SQL(
+DELETE FROM baselines AS candidate
+WHERE NOT EXISTS (
+    SELECT 1 FROM verdicts WHERE verdicts.baseline_hash = candidate.sha256
+)
+AND EXISTS (
+    SELECT 1
+    FROM baselines AS newer
+    WHERE newer.target_host = candidate.target_host
+      AND newer.target_port = candidate.target_port
+      AND (
+          newer.created_ns > candidate.created_ns
+          OR (newer.created_ns = candidate.created_ns AND newer.id > candidate.id)
+      )
+);
+)SQL");
+        stmt.step_done();
+    }
+}
+
 } // namespace
 
 HistoryStore::HistoryStore(std::filesystem::path path) : path_(std::move(path)) {
@@ -562,22 +607,81 @@ StorageStatus HistoryStore::status(std::uint64_t max_bytes) const {
 
 void HistoryStore::prune_to_budget(std::uint64_t max_bytes) {
     if (max_bytes == 0) return;
-    exec("PRAGMA wal_checkpoint(TRUNCATE);");
+
     auto bytes = sqlite_total_size(path_);
     if (bytes <= max_bytes) return;
-    const auto target = max_bytes * 9 / 10;
-    while (bytes > target) {
-        Statement del(db_, "DELETE FROM connections WHERE id IN (SELECT id FROM connections WHERE trust_state NOT IN ('CHANGED','SUSPICIOUS') AND performance_state!='DEGRADED' ORDER BY first_seen_ns ASC LIMIT 500);");
-        del.step_done();
-        if (sqlite3_changes(db_) == 0) {
-            Statement fallback(db_, "DELETE FROM connections WHERE id IN (SELECT id FROM connections ORDER BY first_seen_ns ASC LIMIT 100);");
-            fallback.step_done();
-            if (sqlite3_changes(db_) == 0) break;
-        }
+
+    // First eliminate transient WAL growth. The hard budget is measured as
+    // main database + WAL, so a checkpoint may be sufficient by itself.
+    exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    bytes = sqlite_total_size(path_);
+    if (bytes <= max_bytes) return;
+
+    // Crossing the configured hard cap triggers cleanup to 90% of the cap.
+    // The default 200 MiB budget therefore cleans down to <= 180 MiB.
+    const auto target_bytes = max_bytes - (max_bytes / 10ULL);
+
+    const auto compact_and_measure = [&]() {
+        prune_orphans(db_);
+        exec("PRAGMA incremental_vacuum(512);");
         exec("PRAGMA wal_checkpoint(TRUNCATE);");
-        bytes = sqlite_total_size(path_);
+        return sqlite_total_size(path_);
+    };
+
+    bytes = compact_and_measure();
+
+    while (bytes > target_bytes) {
+        int removed = 0;
+
+        // Primary retention tier: reclaim the oldest non-anomalous history.
+        // DEGRADED, FAILED, CHANGED, and SUSPICIOUS are protected here.
+        {
+            Statement del(db_, R"SQL(
+DELETE FROM connections
+WHERE id IN (
+    SELECT id
+    FROM connections
+    WHERE performance_state NOT IN ('DEGRADED','FAILED')
+      AND trust_state NOT IN ('CHANGED','SUSPICIOUS')
+    ORDER BY first_seen_ns ASC, id ASC
+    LIMIT 64
+);
+)SQL");
+            del.step_done();
+            removed = sqlite3_changes(db_);
+        }
+
+        // Protection is priority rather than immortality: if only anomalous
+        // history remains and storage is still above the cleanup target, use
+        // a smaller emergency batch so the configured hard cap remains
+        // enforceable instead of allowing unbounded growth.
+        if (removed == 0) {
+            Statement emergency(db_, R"SQL(
+DELETE FROM connections
+WHERE id IN (
+    SELECT id
+    FROM connections
+    WHERE performance_state IN ('DEGRADED','FAILED')
+       OR trust_state IN ('CHANGED','SUSPICIOUS')
+    ORDER BY first_seen_ns ASC, id ASC
+    LIMIT 8
+);
+)SQL");
+            emergency.step_done();
+            removed = sqlite3_changes(db_);
+        }
+
+        if (removed == 0) break;
+
+        // Reclaim dependent/orphaned metadata and physical pages between
+        // every bounded deletion batch before deciding whether more history
+        // must be removed.
+        bytes = compact_and_measure();
     }
-    exec("PRAGMA incremental_vacuum(200);");
+
+    if (bytes > max_bytes) {
+        throw std::runtime_error("SQLite history cannot satisfy configured storage cap");
+    }
 }
 
 } // namespace neta
