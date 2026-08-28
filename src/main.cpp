@@ -272,7 +272,7 @@ void cmd_observe(int argc, char** argv) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration);
     std::size_t observed = 0;
 
-    while (std::chrono::steady_clock::now() < deadline && !g_stop_requested) 
+    while (std::chrono::steady_clock::now() < deadline && !g_stop_requested)
     {
         for (auto& [unused, tracked_connection] : tracked) {
             static_cast<void>(unused);
@@ -284,6 +284,8 @@ void cmd_observe(int argc, char** argv) {
             const auto key = key_for(socket);
             auto it = tracked.find(key);
             if (it == tracked.end()) {
+                if (!platform::eligible_for_new_connection(socket)) continue;
+
                 auto cached = process_cache.find(socket.socket_inode);
                 if (cached == process_cache.end()) {
                     cached = process_cache.emplace(socket.socket_inode, resolver->resolve(socket.socket_inode)).first;
@@ -310,7 +312,7 @@ void cmd_observe(int argc, char** argv) {
             }
         }
 
-          for (auto& [unused, tracked_connection] : tracked) {
+        for (auto& [unused, tracked_connection] : tracked) {
             static_cast<void>(unused);
             if (!tracked_connection.present) {
                 store.touch_connection(tracked_connection.db_id,
@@ -335,9 +337,9 @@ void finalize_observe_cmd(const std::unordered_map<std::string, Tracked>& tracke
                         HistoryStore& store,
                         const std::optional<Baseline>& baseline,
                         const std::optional<TlsObservation>& tls,
-                        std::optional<std::int64_t> tls_id) 
+                        std::optional<std::int64_t> tls_id)
 {
-    for (auto& [unused, tracked_connection] : tracked) 
+    for (auto& [unused, tracked_connection] : tracked)
     {
         static_cast<void>(unused);
         const char* final_state =
@@ -481,14 +483,82 @@ void cmd_evidence(int argc, char** argv) {
     if (argc < 3) throw std::runtime_error("evidence requires connection ID");
     HistoryStore store(arg_value(argc, argv, "--db", default_db_path().string()));
     const auto id = std::stoll(argv[2]);
-    auto data = store.export_data(id);
+    const auto data = store.export_data(id);
+
     std::cout << "Connection CONN-" << id << "\n"
-              << "  TCP samples (EXACT): " << data.samples.size() << "\n";
-    if (data.route) {
-        std::cout << "  Route (STRONGLY_CORRELATED): " << data.route->sha256 << "\n";
+              << "  Process: "
+              << (data.connection.process.comm.empty() ? "<unattributed>" : data.connection.process.comm)
+              << '[' << data.connection.process.pid << "]\n"
+              << "  Path: " << data.connection.local_ip << ':' << data.connection.local_port
+              << " -> " << data.connection.remote_ip << ':' << data.connection.remote_port << "\n"
+              << "  Lifecycle: " << data.connection.lifecycle_state << "\n\n"
+              << "TCP samples (EXACT): " << data.samples.size() << "\n";
+
+    if (!data.samples.empty()) {
+        const auto start_ns = data.samples.front().observed_ns;
+        std::cout << std::right
+                  << std::setw(10) << "offset_ms"
+                  << std::setw(8) << "state"
+                  << std::setw(11) << "rtt_ms"
+                  << std::setw(12) << "rttvar_ms"
+                  << std::setw(10) << "retrans"
+                  << std::setw(8) << "lost"
+                  << std::setw(10) << "unacked"
+                  << std::setw(8) << "cwnd"
+                  << std::setw(12) << "ssthresh"
+                  << std::setw(10) << "snd_mss"
+                  << std::setw(10) << "rcv_mss"
+                  << std::setw(12) << "send_q"
+                  << std::setw(12) << "recv_q" << '\n';
+
+        for (const auto& sample : data.samples) {
+            const auto offset_ms = (sample.observed_ns - start_ns) / 1'000'000ULL;
+            std::cout << std::right
+                      << std::setw(10) << offset_ms
+                      << std::setw(8) << static_cast<unsigned>(sample.state)
+                      << std::setw(11) << std::fixed << std::setprecision(3)
+                      << static_cast<double>(sample.rtt_us) / 1000.0
+                      << std::setw(12) << static_cast<double>(sample.rtt_variance_us) / 1000.0
+                      << std::setw(10) << sample.total_retrans
+                      << std::setw(8) << sample.lost
+                      << std::setw(10) << sample.unacked
+                      << std::setw(8) << sample.snd_cwnd
+                      << std::setw(12) << sample.snd_ssthresh
+                      << std::setw(10) << sample.snd_mss
+                      << std::setw(10) << sample.rcv_mss
+                      << std::setw(12) << sample.send_queue_bytes
+                      << std::setw(12) << sample.recv_queue_bytes << '\n';
+        }
     }
+
+    if (data.route) {
+        const auto& route = *data.route;
+        std::cout << "\nRoute (STRONGLY_CORRELATED)\n"
+                  << "  Destination: " << route.destination << '\n'
+                  << "  Source:      " << route.source << '\n'
+                  << "  Gateway:     " << (route.gateway.empty() ? "<direct>" : route.gateway) << '\n'
+                  << "  Interface:   " << route.interface_name << " (index "
+                  << route.interface_index << ")\n"
+                  << "  Observed ns: " << route.observed_ns << '\n'
+                  << "  SHA-256:     " << route.sha256 << '\n';
+    }
+
     if (data.tls) {
-        std::cout << "  TLS active probe (SUPPORTING): " << data.tls->sha256 << "\n";
+        const auto& tls = *data.tls;
+        std::cout << "\nTLS active probe (SUPPORTING)\n"
+                  << "  Target:         " << tls.target_host << ':' << tls.target_port << '\n'
+                  << "  Version:        " << tls.tls_version << '\n'
+                  << "  Cipher:         " << tls.cipher << '\n'
+                  << "  ALPN:           " << (tls.alpn.empty() ? "<none>" : tls.alpn) << '\n'
+                  << "  Chain valid:    " << (tls.chain_valid ? "yes" : "no") << '\n'
+                  << "  Hostname valid: " << (tls.hostname_valid ? "yes" : "no") << '\n'
+                  << "  Leaf SHA-256:   " << tls.leaf_sha256 << '\n'
+                  << "  SPKI SHA-256:   " << tls.spki_sha256 << '\n'
+                  << "  Subject:        " << tls.subject << '\n'
+                  << "  Issuer:         " << tls.issuer << '\n'
+                  << "  Not before:     " << tls.not_before << '\n'
+                  << "  Not after:      " << tls.not_after << '\n'
+                  << "  Evidence hash:  " << tls.sha256 << '\n';
     }
 }
 
