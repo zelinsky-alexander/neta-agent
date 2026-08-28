@@ -95,6 +95,11 @@ WHERE NOT EXISTS (
 DELETE FROM tls_observations
 WHERE NOT EXISTS (
     SELECT 1 FROM verdicts WHERE verdicts.tls_observation_id = tls_observations.id
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM connection_tls_observations
+    WHERE connection_tls_observations.tls_observation_id = tls_observations.id
 );
 )SQL");
         stmt.step_done();
@@ -234,6 +239,15 @@ CREATE TABLE IF NOT EXISTS tls_observations(
  sha256 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tls_target ON tls_observations(target_host,target_port,observed_ns DESC);
+CREATE TABLE IF NOT EXISTS connection_tls_observations(
+ connection_id INTEGER PRIMARY KEY,
+ tls_observation_id INTEGER NOT NULL,
+ relation TEXT NOT NULL,
+ fidelity TEXT NOT NULL,
+ FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE,
+ FOREIGN KEY(tls_observation_id) REFERENCES tls_observations(id)
+);
+CREATE INDEX IF NOT EXISTS idx_connection_tls_observation ON connection_tls_observations(tls_observation_id);
 CREATE TABLE IF NOT EXISTS baselines(
  id INTEGER PRIMARY KEY,
  target_host TEXT NOT NULL,
@@ -295,7 +309,17 @@ std::int64_t HistoryStore::begin_connection(const SocketObservation& s,
     sqlite3_bind_int64(stmt.get(), 10, static_cast<sqlite3_int64>(first_seen_ns));
     sqlite3_bind_int64(stmt.get(), 11, static_cast<sqlite3_int64>(first_seen_ns));
     stmt.step_done();
-    return sqlite3_last_insert_rowid(db_);
+
+    const auto connection_id = sqlite3_last_insert_rowid(db_);
+    if (pending_tls_id_ && pending_tls_host_ == target_host && pending_tls_port_ == s.remote_port) {
+        Statement link(db_, "INSERT OR REPLACE INTO connection_tls_observations(connection_id,tls_observation_id,relation,fidelity) VALUES(?,?,?,?);");
+        sqlite3_bind_int64(link.get(), 1, connection_id);
+        sqlite3_bind_int64(link.get(), 2, *pending_tls_id_);
+        sqlite3_bind_text(link.get(), 3, "contemporaneous_check_for", -1, SQLITE_STATIC);
+        sqlite3_bind_text(link.get(), 4, "SUPPORTING", -1, SQLITE_STATIC);
+        link.step_done();
+    }
+    return connection_id;
 }
 
 void HistoryStore::touch_connection(std::int64_t id, std::uint64_t last_seen_ns, const std::string& lifecycle_state) {
@@ -362,7 +386,12 @@ std::int64_t HistoryStore::add_tls(const TlsObservation& t) {
     sqlite3_bind_int(stmt.get(), i++, t.hostname_valid ? 1 : 0);
     sqlite3_bind_text(stmt.get(), i, t.sha256.c_str(), -1, SQLITE_TRANSIENT);
     stmt.step_done();
-    return sqlite3_last_insert_rowid(db_);
+
+    const auto tls_id = sqlite3_last_insert_rowid(db_);
+    pending_tls_id_ = tls_id;
+    pending_tls_host_ = t.target_host;
+    pending_tls_port_ = t.target_port;
+    return tls_id;
 }
 
 void HistoryStore::save_baseline(const Baseline& b) {
@@ -575,9 +604,19 @@ ExportData HistoryStore::export_data(std::int64_t id) const {
         }
     }
 
-    Statement link(db_, "SELECT tls_observation_id FROM verdicts WHERE connection_id=?;");
+    Statement link(db_, R"SQL(
+SELECT tls_observation_id
+FROM verdicts
+WHERE connection_id=? AND tls_observation_id IS NOT NULL
+UNION ALL
+SELECT tls_observation_id
+FROM connection_tls_observations
+WHERE connection_id=?
+LIMIT 1;
+)SQL");
     sqlite3_bind_int64(link.get(), 1, id);
-    if (sqlite3_step(link.get()) == SQLITE_ROW && sqlite3_column_type(link.get(), 0) != SQLITE_NULL) {
+    sqlite3_bind_int64(link.get(), 2, id);
+    if (sqlite3_step(link.get()) == SQLITE_ROW) {
         const auto tls_id = sqlite3_column_int64(link.get(), 0);
         Statement t(db_, "SELECT target_host,target_port,observed_ns,tls_version,cipher,alpn,leaf_sha256,spki_sha256,subject,issuer,not_before,not_after,chain_valid,hostname_valid,sha256 FROM tls_observations WHERE id=?;");
         sqlite3_bind_int64(t.get(), 1, tls_id);
