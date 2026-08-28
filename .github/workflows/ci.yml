@@ -10,13 +10,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ libssl-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ libssl-dev libsqlite3-dev iproute2 curl openssl
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - name: Build
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: MS0 controlled TLS/netem acceptance
+        run: bash tests/ms0_acceptance.sh ./build/neta-agent
       - name: CLI capability smoke
         run: ./build/neta-agent capabilities
       - name: SQLite on-demand creation smoke
