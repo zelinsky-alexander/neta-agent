@@ -30,6 +30,15 @@ retain bounded evidence that can be inspected, exported, and replayed
 
 The project is intentionally **endpoint-centered**. It is not a router, gateway, proxy, packet-forwarder, VPN, generic ping/traceroute utility, or traffic decryption system.
 
+The long-term product scope includes eligible connections in **both directions**:
+
+```text
+OUTBOUND: local process  -> remote peer
+INBOUND:  remote peer    -> local service/process
+```
+
+POC1 is currently outbound-target-scoped for controlled validation; outbound-only observation is not a product-level restriction.
+
 ## 2. Architectural invariants
 
 The following rules are intended to remain true as the project grows.
@@ -148,6 +157,12 @@ portable model / storage / rules / CLI
 
 Linux UAPI details are confined to `src/platform/linux/`.
 
+Connection direction is also a portable semantic property. Once bidirectional observation is introduced, the core model should represent it explicitly rather than inferring direction from conventional port numbers:
+
+```text
+ConnectionDirection = OUTBOUND | INBOUND | UNKNOWN
+```
+
 ## 3. Connection identity model
 
 The connection/socket is the primary runtime unit.
@@ -156,6 +171,7 @@ The connection/socket is the primary runtime unit.
 HOST
  `-- PROCESS
       `-- CONNECTION / SOCKET
+           |-- direction
            |-- transport observations
            |-- route observation
            |-- DNS identity        [future/exact where available]
@@ -175,6 +191,8 @@ POC1 combines the strongest available identifiers, including:
 - process identity when resolved
 - observation time
 - network namespace / host context where available
+
+Future all-connection observation must also record connection direction explicitly.
 
 ## 4. Current POC1 implementation
 
@@ -254,7 +272,7 @@ This is marked **STRONGLY_CORRELATED**, not proof of the exact packet path taken
 
 This is an independent contemporaneous check, not application-session interception.
 
-### 4.5 Target-scoped observation
+### 4.5 Target-scoped outbound observation
 
 Current POC1 requires a target:
 
@@ -262,9 +280,9 @@ Current POC1 requires a target:
 --target host:port
 ```
 
-The hostname is resolved and the observer records matching destination IPs + port only.
+The hostname is resolved and the observer records matching destination IPs + port only. In the current POC this is an **outbound** observation model: a local process connects to the configured remote target.
 
-This is intentional for POC1 so unrelated endpoint traffic does not flood the history while the evidence model is being validated.
+This is intentional for POC1 so unrelated endpoint traffic does not flood the history while the evidence model is being validated. It is not intended to restrict later versions to outbound traffic.
 
 ### 4.6 TCP lifecycle admission hardening
 
@@ -289,6 +307,8 @@ unknown socket first seen in TIME_WAIT
 ```
 
 The admission decision lives in the Linux platform backend rather than leaking Linux TCP constants into portable code.
+
+A listening socket is not itself a per-connection assurance object. In future inbound observation, the accepted sockets created from a listener are the connection records of interest; the listening socket may be retained separately as service/discovery metadata.
 
 ### 4.7 Graceful observation stop
 
@@ -407,9 +427,11 @@ SOCK_DIAG snapshots are currently polled. A connection that begins and ends betw
 
 A `/proc` inode-to-process match only works while the process still exposes the socket fd. Very short-lived connections remain the hardest case until lifecycle events are captured directly.
 
-### Target-scoped only
+### Target-scoped and outbound-only in POC1
 
-POC1 does not yet observe all endpoint traffic. `--target` is required.
+POC1 does not yet observe all endpoint traffic. `--target` is required, and the current matching model observes local processes connecting outbound to the configured remote target.
+
+**Inbound connection assurance is a required later capability, not an excluded product scope.** It is explicitly required by Milestone 2 after Linux lifecycle attribution has been strengthened.
 
 ### TLS evidence is not exact application-session identity
 
@@ -497,30 +519,63 @@ Planned capabilities:
 - embedded BPF object in the single executable where practical
 - CO-RE/BTF-based portability discipline across supported kernels
 
+`accept` lifecycle coverage is important preparation for inbound observation in Milestone 2.
+
 SOCK_DIAG remains useful; eBPF complements it rather than replacing the detailed TCP-state collector.
 
-### Milestone 2 — All-connection endpoint observation and optional service mode
+### Milestone 2 — Bidirectional all-connection endpoint observation and optional service mode
 
-Goal: evolve from a target-specific test observer into a real endpoint agent while retaining on-demand operation.
+Goal: evolve from a target-specific outbound test observer into a real endpoint agent that can observe eligible TCP connections in **both outbound and inbound directions**, while retaining on-demand operation.
+
+#### Required traffic-direction capability
+
+**Milestone 2 MUST support both outbound and inbound TCP connection assurance.** `--all` must mean all eligible endpoint connections in both directions; it must not mean outbound-only traffic.
+
+The portable connection model must record direction explicitly:
+
+```text
+OUTBOUND | INBOUND | UNKNOWN
+```
+
+Required behavior:
+
+- discover and track outbound connections initiated by local processes
+- discover and track inbound accepted connections owned by local server processes
+- attribute inbound accepted sockets to the owning local process/service with the strongest native evidence available
+- treat each accepted inbound socket as a connection assurance object
+- do not create ordinary per-connection history rows for a bare `LISTEN` socket; listener state may be represented separately as service/discovery metadata
+- collect the same available exact TCP transport metrics for inbound and outbound sockets
+- correlate the response route toward the remote peer for inbound connections, with fidelity stated honestly
+- keep trust logic direction-aware: outbound server identity and inbound peer/client identity are different trust questions
+- do not reuse the current outbound active TLS probe as if it were exact evidence for an inbound application's TLS session
+- preserve bounded CPU, RAM, and SQLite behavior when both traffic directions are enabled
 
 Planned CLI/operation model:
 
 ```text
-neta-agent observe --target host:443
-neta-agent observe --all
-neta-agent run            # optional long-lived service mode
+neta-agent observe --target host:443              # current targeted outbound mode
+neta-agent observe --outbound [filters...]         # outbound-only endpoint observation
+neta-agent observe --inbound [--local-port 443]    # inbound-only endpoint observation
+neta-agent observe --all                           # outbound + inbound
+neta-agent run                                     # optional long-lived service mode
 ```
+
+Exact CLI spelling may evolve, but explicit direction selection and a truly bidirectional `--all` mode are requirements.
 
 Planned controls:
 
 - include/exclude process
-- destination/CIDR/port filters
+- local/remote CIDR and port filters
+- direction filters
+- service/listener filters for inbound workloads
 - adaptive sampling
 - anomaly-triggered higher-resolution evidence bursts
 - strict CPU/RAM/DB budgets
 - service/systemd integration while preserving the single-binary design
 
 On-demand mode remains supported even after service mode exists.
+
+Exit criterion: on native Linux, `neta-agent` can concurrently observe a controlled outbound client connection and an accepted inbound server connection, attribute each to the correct local process, label direction correctly, persist bounded transport/route evidence for both, and avoid treating the listening socket itself as a normal connection-history entry.
 
 ### Milestone 3 — Stronger connection identity and exact application context where available
 
@@ -530,6 +585,7 @@ Planned areas:
 
 - event-correlated DNS observations
 - exact TLS identity only where a supported OS/application mechanism can provide it honestly
+- direction-aware TLS/client identity evidence, including inbound client identity where mechanisms such as mTLS expose it reliably
 - HTTP/RPC/span correlation as optional higher-layer evidence, not as a requirement for transport assurance
 - richer host/network-environment identity
 
@@ -537,7 +593,7 @@ Evidence fidelity remains explicit when exact attribution is not available.
 
 ### Milestone 4 — Windows backend
 
-Goal: emit the same semantic evidence model from native Windows facilities.
+Goal: emit the same semantic evidence model from native Windows facilities, including the bidirectional connection model established on Linux.
 
 Candidate native mechanisms include:
 
@@ -546,11 +602,11 @@ Candidate native mechanisms include:
 - IP Helper route APIs
 - ETW/WFP where lifecycle or attribution requires them
 
-The Windows backend should advertise capabilities rather than pretending unavailable fields exist.
+The Windows backend should advertise capabilities rather than pretending unavailable fields exist. Where the OS exposes enough evidence, both outbound and inbound accepted connections are in scope.
 
 ### Milestone 5 — macOS backend
 
-Goal: support the same high-level assurance model using macOS-supported native facilities.
+Goal: support the same high-level assurance model using macOS-supported native facilities, including connection direction where the OS APIs provide sufficient evidence.
 
 This milestone must account for Network Extension/entitlement constraints and may not have metric-for-metric parity with Linux.
 
@@ -599,6 +655,8 @@ Possible contextual evidence:
 
 These remain separate evidence classes. For example, `RPKI INVALID` is an observation; `possible route hijack` would be a hypothesis, not a directly observed fact.
 
+Direction matters here as well: the relevant remote peer and trust expectations for an inbound service connection may differ from those for an outbound client connection.
+
 ### Milestone 8 — Protocol expansion
 
 Potential later work:
@@ -634,11 +692,11 @@ The distinctive value should remain:
 
 | Milestone | Primary proof |
 |---|---|
-| POC1 | Targeted Linux connection -> evidence -> baseline -> deterministic verdict -> replay |
-| Linux eBPF | Short-lived lifecycle/process attribution without depending on snapshot timing |
-| All-connections/service | Bounded always-on endpoint observation without becoming a telemetry firehose |
-| Exact context | Honest DNS/TLS/application correlation with explicit fidelity |
-| Windows | Same semantic assurance model using native Windows collectors |
+| POC1 | Targeted outbound Linux connection -> evidence -> baseline -> deterministic verdict -> replay |
+| Linux eBPF | Short-lived connect/accept/close lifecycle and process attribution without depending on snapshot timing |
+| Bidirectional all-connections/service | Bounded concurrent outbound + inbound endpoint observation; correct direction/process attribution; accepted inbound sockets are tracked while bare listeners do not become connection-history rows |
+| Exact context | Honest direction-aware DNS/TLS/application correlation with explicit fidelity |
+| Windows | Same semantic assurance model, including inbound/outbound direction where supported, using native Windows collectors |
 | macOS | Useful semantic parity within macOS entitlement/API constraints |
 | Fleet | Explicit bounded upload modes; SQLite remains endpoint-local |
 | External trust | Contextual routing/trust evidence without overclaiming causality |
