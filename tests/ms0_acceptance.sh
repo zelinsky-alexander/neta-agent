@@ -11,7 +11,7 @@ if [[ ! -x "$BIN" ]]; then
     exit 2
 fi
 
-for command in openssl curl tc sed grep; do
+for command in openssl curl tc sed grep awk seq; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "MS0 acceptance: required command missing: $command" >&2
         exit 2
@@ -19,7 +19,7 @@ for command in openssl curl tc sed grep; do
 done
 
 if [[ ${EUID} -ne 0 ]]; then
-    exec sudo -E "$0" "$@"
+    exec sudo -E bash "$0" "$@"
 fi
 
 TMP_DIR="$(mktemp -d -t neta-ms0-XXXXXX)"
@@ -181,8 +181,8 @@ prebaseline_evidence="$("$BIN" evidence "$baseline_id" --db "$DB")"
 grep -Fq "TLS active probe (SUPPORTING)" <<<"$prebaseline_evidence" \
     || fail "pre-baseline connection is missing supporting TLS evidence"
 
-a="$($BIN baseline capture --target "$TARGET" --db "$DB" --ca "$CA_CERT")"
-[[ "$a" == *"Captured baseline"* ]] || fail "baseline capture failed"
+baseline_output="$("$BIN" baseline capture --target "$TARGET" --db "$DB" --ca "$CA_CERT")"
+[[ "$baseline_output" == *"Captured baseline"* ]] || fail "baseline capture failed"
 
 # Certificate B: same hostname and CA, different key/SPKI. Transport conditions
 # remain the same, so the required result is NORMAL / CHANGED.
