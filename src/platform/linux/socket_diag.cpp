@@ -143,6 +143,17 @@ private:
 
 } // namespace
 
+bool eligible_for_new_connection(const SocketObservation& socket) {
+    switch (socket.transport.state) {
+        case TCP_TIME_WAIT:
+        case TCP_CLOSE:
+        case TCP_LISTEN:
+            return false;
+        default:
+            return true;
+    }
+}
+
 std::unique_ptr<ConnectionObserver> make_connection_observer() {
     return std::make_unique<LinuxConnectionObserver>();
 }
