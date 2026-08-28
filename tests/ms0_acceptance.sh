@@ -11,7 +11,7 @@ if [[ ! -x "$BIN" ]]; then
     exit 2
 fi
 
-for command in openssl curl tc sed grep awk seq; do
+for command in openssl tc sed grep awk seq sleep; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "MS0 acceptance: required command missing: $command" >&2
         exit 2
@@ -125,20 +125,19 @@ run_observation() {
         >"$TMP_DIR/$label.observe.log" 2>&1 &
     local observer_pid=$!
 
+    # Keep a real validated TLS client socket open long enough for POC1's
+    # intentionally sparse (~1 Hz unchanged) persistence to collect 5+ samples.
     sleep 1
-    set +e
-    curl --silent --show-error \
-        --cacert "$CA_CERT" \
-        --resolve "localhost:$PORT:127.0.0.1" \
-        --max-time 7 \
-        "https://localhost:$PORT/" \
-        -o /dev/null
-    local curl_rc=$?
-    set -e
-
-    if [[ $curl_rc -ne 0 && $curl_rc -ne 28 && $curl_rc -ne 52 ]]; then
+    if ! sleep 7 | openssl s_client -quiet \
+        -connect "127.0.0.1:$PORT" \
+        -servername localhost \
+        -CAfile "$CA_CERT" \
+        -verify_return_error \
+        -verify_hostname localhost \
+        >"$TMP_DIR/$label.client.log" 2>&1; then
+        cat "$TMP_DIR/$label.client.log" >&2 || true
         cat "$TMP_DIR/$label.observe.log" >&2 || true
-        fail "curl failed unexpectedly in $label with rc=$curl_rc"
+        fail "long-lived TLS client failed in $label"
     fi
 
     if ! wait "$observer_pid"; then
