@@ -116,19 +116,23 @@ start_server() {
 
 run_observation() {
     local label="$1"
+    local duration="${2:-6}"
+    local hold="${3:-4}"
+
     "$BIN" observe \
         --target "$TARGET" \
-        --duration 10 \
+        --duration "$duration" \
         --poll-ms 50 \
         --db "$DB" \
         --ca "$CA_CERT" \
         >"$TMP_DIR/$label.observe.log" 2>&1 &
     local observer_pid=$!
 
-    # Keep a real validated TLS client socket open long enough for POC1's
-    # intentionally sparse (~1 Hz unchanged) persistence to collect 5+ samples.
+    # Keep a real validated TLS client socket open while the polling observer
+    # samples it. Baseline setup may repeat observations until the unchanged
+    # sparse sampler has actually persisted the required 5+ rows.
     sleep 1
-    if ! sleep 7 | openssl s_client -quiet \
+    if ! sleep "$hold" | openssl s_client -quiet \
         -connect "127.0.0.1:$PORT" \
         -servername localhost \
         -CAfile "$CA_CERT" \
@@ -151,6 +155,11 @@ latest_id() {
         | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'
 }
 
+sample_count() {
+    "$BIN" storage status --db "$DB" \
+        | sed -n 's/^Transport samples: \([0-9][0-9]*\)$/\1/p'
+}
+
 assert_replay_matches() {
     local id="$1"
     local label="$2"
@@ -170,7 +179,20 @@ assert_replay_matches() {
 tc qdisc replace dev lo root netem delay 20ms
 
 start_server cert-a
-run_observation baseline-a
+baseline_attempt=1
+while :; do
+    run_observation "baseline-a-$baseline_attempt"
+    samples="$(sample_count)"
+    [[ -n "$samples" ]] || fail "could not read persisted sample count"
+    if (( samples >= 5 )); then
+        break
+    fi
+    if (( baseline_attempt >= 4 )); then
+        fail "baseline setup persisted only $samples samples after $baseline_attempt observations"
+    fi
+    baseline_attempt=$((baseline_attempt + 1))
+done
+
 baseline_id="$(latest_id)"
 [[ -n "$baseline_id" ]] || fail "baseline observation produced no connection"
 
@@ -216,6 +238,7 @@ assert_replay_matches "$combined_id" cert-b-degraded
 echo "MS0 acceptance PASS"
 echo "  cert A SPKI: $spki_a"
 echo "  cert B SPKI: $spki_b"
+echo "  baseline samples: $(sample_count)"
 echo "  NORMAL / CHANGED: CONN-$changed_id"
 echo "  DEGRADED / CHANGED: CONN-$combined_id"
 echo "  replay: MATCH / MATCH / MATCH for both cases"
