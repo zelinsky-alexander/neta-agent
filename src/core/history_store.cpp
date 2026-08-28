@@ -71,6 +71,14 @@ TcpSnapshot sample_from_row(sqlite3_stmt* stmt) {
     return s;
 }
 
+int auto_vacuum_mode(sqlite3* db) {
+    Statement stmt(db, "PRAGMA auto_vacuum;");
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        throw std::runtime_error(sqlite3_errmsg(db));
+    }
+    return sqlite3_column_int(stmt.get(), 0);
+}
+
 void prune_orphans(sqlite3* db) {
     {
         Statement stmt(db, R"SQL(
@@ -124,10 +132,13 @@ HistoryStore::HistoryStore(std::filesystem::path path) : path_(std::move(path)) 
         throw std::runtime_error("failed to open SQLite DB: " + std::string(sqlite3_errmsg(db_)));
     sqlite3_busy_timeout(db_, 5000);
     exec("PRAGMA foreign_keys=ON;");
+    // For a new database this must be selected before WAL/schema creation.
+    // Existing databases created by older builds are migrated lazily under
+    // actual storage pressure in prune_to_budget().
+    exec("PRAGMA auto_vacuum=INCREMENTAL;");
     exec("PRAGMA journal_mode=WAL;");
     exec("PRAGMA synchronous=NORMAL;");
     exec("PRAGMA temp_store=MEMORY;");
-    exec("PRAGMA auto_vacuum=INCREMENTAL;");
     initialize_schema();
 }
 
@@ -623,10 +634,18 @@ void HistoryStore::prune_to_budget(std::uint64_t max_bytes) {
 
     const auto compact_and_measure = [&]() {
         prune_orphans(db_);
-        // Under storage pressure, drain the current freelist before measuring
-        // again. This avoids deleting additional history simply because freed
-        // pages have not yet been returned to the filesystem.
-        exec("PRAGMA incremental_vacuum;");
+
+        if (auto_vacuum_mode(db_) == 2) {
+            // New/current databases can return free pages incrementally.
+            exec("PRAGMA incremental_vacuum;");
+        } else {
+            // Older databases were created after WAL had already fixed the
+            // database format, so auto_vacuum remained NONE. A full VACUUM
+            // both compacts the file and migrates it to incremental mode.
+            exec("PRAGMA auto_vacuum=INCREMENTAL;");
+            exec("VACUUM;");
+        }
+
         exec("PRAGMA wal_checkpoint(TRUNCATE);");
         return sqlite_total_size(path_);
     };
