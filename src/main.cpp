@@ -268,7 +268,7 @@ void cmd_observe(int argc, char** argv) {
     const auto baseline = store.baseline_for(target.host, target.port);
 
     std::unordered_map<std::string, Tracked> tracked;
-    std::unordered_map<std::uint64_t, std::optional<ProcessIdentity>> process_cache;
+    
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration);
     std::size_t observed = 0;
 
@@ -286,20 +286,23 @@ void cmd_observe(int argc, char** argv) {
             if (it == tracked.end()) {
                 if (!platform::eligible_for_new_connection(socket)) continue;
 
-                auto cached = process_cache.find(socket.socket_inode);
-                if (cached == process_cache.end()) {
-                    cached = process_cache.emplace(socket.socket_inode, resolver->resolve(socket.socket_inode)).first;
+                const auto process = resolver->resolve(socket.socket_inode);
+                if (!process) {
+                    // Do not create misleading anonymous history.
+                    // Retry naturally on the next SOCK_DIAG poll.
+                    continue;
                 }
-                const auto id = store.begin_connection(socket, cached->second, target.host,
-                                                       socket.transport.observed_ns);
+
+                const auto id = store.begin_connection(socket, process, target.host, socket.transport.observed_ns);
+
                 store.add_tcp_sample(id, socket.transport);
                 if (auto route_observation = route->route_to(socket.remote_ip)) {
                     store.add_route(id, *route_observation);
                 }
-                tracked.emplace(key, Tracked{id, socket.transport, socket.transport,
-                                             socket.transport.observed_ns, true});
+                tracked.emplace(key, Tracked{id, socket.transport, socket.transport, socket.transport.observed_ns, true});
                 ++observed;
-            } else {
+            } 
+            else {
                 it->second.present = true;
                 it->second.last_seen = socket.transport;
                 store.touch_connection(it->second.db_id, socket.transport.observed_ns, "ACTIVE");

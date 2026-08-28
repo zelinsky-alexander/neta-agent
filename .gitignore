@@ -1,7 +1,4 @@
 /build*/
-*.sqlite
-*.sqlite-wal
-*.sqlite-shm
-neta.db
 compile_commands.json
-neta2.db
+db/
+
