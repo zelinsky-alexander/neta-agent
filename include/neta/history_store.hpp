@@ -76,6 +76,13 @@ private:
 
     std::filesystem::path path_;
     sqlite3* db_{nullptr};
+
+    // add_tls() records the current command/session probe. Connections opened
+    // afterwards in the same HistoryStore instance are linked to that probe as
+    // SUPPORTING evidence even if no baseline/verdict exists yet.
+    std::optional<std::int64_t> pending_tls_id_;
+    std::string pending_tls_host_;
+    std::uint16_t pending_tls_port_{0};
 };
 
 } // namespace neta
