@@ -1,0 +1,22 @@
+#include "neta/connection_admission.hpp"
+
+namespace neta {
+
+std::optional<std::int64_t> begin_attributed_connection(
+    HistoryStore& store,
+    platform::ProcessResolver& resolver,
+    const SocketObservation& socket,
+    const std::string& target_host) {
+    if (!platform::eligible_for_new_connection(socket)) return std::nullopt;
+
+    const auto process = resolver.resolve(socket.socket_inode);
+    if (!process) return std::nullopt;
+
+    return store.begin_connection(
+        socket,
+        process,
+        target_host,
+        socket.transport.observed_ns);
+}
+
+} // namespace neta
