@@ -1,0 +1,16 @@
+if(NOT DEFINED INPUT OR NOT DEFINED OUTPUT)
+    message(FATAL_ERROR "EmbedBinary.cmake requires INPUT and OUTPUT")
+endif()
+
+file(READ "${INPUT}" object_hex HEX)
+string(LENGTH "${object_hex}" object_hex_length)
+set(bytes "")
+if(object_hex_length GREATER 0)
+    math(EXPR last_offset "${object_hex_length} - 2")
+    foreach(offset RANGE 0 ${last_offset} 2)
+        string(SUBSTRING "${object_hex}" ${offset} 2 byte)
+        string(APPEND bytes "0x${byte},")
+    endforeach()
+endif()
+
+file(WRITE "${OUTPUT}" "#pragma once\n#include <cstddef>\nnamespace neta::platform::linux_ebpf {\ninline constexpr unsigned char kLifecycleBpfObject[] = {${bytes}};\ninline constexpr std::size_t kLifecycleBpfObjectSize = sizeof(kLifecycleBpfObject);\n}\n")

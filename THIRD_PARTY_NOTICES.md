@@ -1,6 +1,10 @@
 # Third-party notices
 
-`neta-agent` POC1 intentionally keeps the dependency surface small.
+`neta-agent` intentionally keeps the dependency surface small.
+
+## libbpf (optional Linux lifecycle build/runtime library)
+
+libbpf is dual-licensed under BSD-2-Clause or LGPL-2.1. It is used for CO-RE/BTF relocation, BPF program/link management, and ring-buffer consumption. Polling-only builds do not link it. Static distributors must review and include notices for libbpf and its transitive static dependencies.
 
 ## SQLite
 

@@ -1,6 +1,6 @@
-#include "neta/connection_admission.hpp"
 #include "neta/crypto.hpp"
 #include "neta/history_store.hpp"
+#include "neta/observation_session.hpp"
 #include "neta/platform.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/verdict.hpp"
@@ -17,12 +17,10 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 #include <csignal>
 
@@ -33,21 +31,7 @@ using namespace neta;
 volatile std::sig_atomic_t g_stop_requested = 0;
 void handle_stop_signal(int) { g_stop_requested = 1; }
 
-struct Target {
-    std::string host;
-    std::uint16_t port{443};
-    std::set<std::string> ips;
-};
-
-struct Tracked {
-    std::int64_t db_id;
-    TcpSnapshot last_seen;
-    TcpSnapshot last_persisted;
-    std::uint64_t last_persist_ns;
-    bool present;
-};
-
-void finalize_observe_cmd(const std::unordered_map<std::string, Tracked>& tracked,
+void finalize_observe_cmd(const std::vector<std::int64_t>& connection_ids,
                         HistoryStore& store,
                         const std::optional<Baseline>& baseline,
                         const std::optional<TlsObservation>& tls,
@@ -75,9 +59,9 @@ bool has_arg(int argc, char** argv, const std::string& key) {
     return false;
 }
 
-Target parse_target(const std::string& value) {
+ObservationTarget parse_target(const std::string& value) {
     if (value.empty()) throw std::runtime_error("--target host:port is required");
-    Target target;
+    ObservationTarget target;
     const auto pos = value.rfind(':');
     if (pos == std::string::npos) {
         target.host = value;
@@ -106,35 +90,11 @@ Target parse_target(const std::string& value) {
             address = &reinterpret_cast<sockaddr_in6*>(ai->ai_addr)->sin6_addr;
         }
         if (address && inet_ntop(ai->ai_family, address, buffer, sizeof(buffer))) {
-            target.ips.insert(buffer);
+            target.addresses.insert(buffer);
         }
     }
     freeaddrinfo(result);
     return target;
-}
-
-std::string key_for(const SocketObservation& socket) {
-    if (socket.socket_cookie != 0 && socket.socket_cookie != 0xFFFFFFFFFFFFFFFFULL) {
-        return "c:" + std::to_string(socket.socket_cookie);
-    }
-    return "i:" + std::to_string(socket.socket_inode) + "|" + socket.local_ip + ":" +
-           std::to_string(socket.local_port) + "->" + socket.remote_ip + ":" +
-           std::to_string(socket.remote_port);
-}
-
-bool meaningful_change(const TcpSnapshot& previous, const TcpSnapshot& current,
-                       std::uint64_t last_persist_ns) {
-    if (current.total_retrans != previous.total_retrans || current.lost != previous.lost) return true;
-    if (current.state != previous.state) return true;
-
-    const auto material = [](std::uint32_t a, std::uint32_t b, double ratio,
-                             std::uint32_t floor) {
-        const auto diff = a > b ? a - b : b - a;
-        return diff >= floor && (a == 0 || static_cast<double>(diff) / static_cast<double>(a) >= ratio);
-    };
-    if (material(previous.rtt_us, current.rtt_us, 0.25, 2000)) return true;
-    if (material(previous.rtt_variance_us, current.rtt_variance_us, 0.50, 2000)) return true;
-    return current.observed_ns - last_persist_ns >= 1'000'000'000ULL;
 }
 
 std::uint64_t median(std::vector<std::uint64_t> values) {
@@ -207,11 +167,11 @@ bool json_bool_value(const std::string& text, const std::string& key) {
 }
 
 void print_usage() {
-    std::cout << R"USAGE(neta-agent POC1
+    std::cout << R"USAGE(neta-agent Milestone 1
 
 Usage:
   neta-agent capabilities
-  neta-agent observe --target host:port [--duration 30] [--poll-ms 100] [--db neta.db] [--ca file] [--max-db-mb 200]
+  neta-agent observe --target host:port [--duration 30] [--poll-ms interval] [--db neta.db] [--ca file] [--max-db-mb 200]
   neta-agent history [--limit 50] [--db neta.db] [--json]
   neta-agent history show ID [--db neta.db] [--json]
   neta-agent baseline capture --target host:port [--db neta.db] [--ca file]
@@ -236,9 +196,22 @@ void cmd_capabilities() {
               << "TCP retransmissions        " << (capabilities.tcp_retransmissions ? "YES" : "NO") << "\n"
               << "TCP cwnd                   " << (capabilities.tcp_cwnd ? "YES" : "NO") << "\n"
               << "Route observation          " << (capabilities.route_observation ? "YES" : "NO") << "\n"
-              << "Connection lifecycle       " << (capabilities.connection_lifecycle_events ? "YES" : "NO (POC polling)") << "\n"
+              << "eBPF lifecycle built in    " << (capabilities.ebpf_built_in ? "YES" : "NO") << "\n"
+              << "BTF/CO-RE runtime          " << (capabilities.btf_core_runtime ? "YES" : "NO") << "\n"
+              << "eBPF lifecycle             " << (capabilities.connection_lifecycle_events ? "YES" : "NO") << "\n"
+              << "TCP connect events         " << (capabilities.ebpf_connect_events ? "YES" : "NO") << "\n"
+              << "TCP accept events          " << (capabilities.ebpf_accept_events ? "YES" : "NO") << "\n"
+              << "TCP close events           " << (capabilities.ebpf_close_events ? "YES" : "NO") << "\n"
               << "Exact TLS identity         " << (capabilities.exact_tls_observation ? "YES" : "NO (active probe is SUPPORTING)") << "\n"
               << "Exact DNS attribution      " << (capabilities.exact_dns_observation ? "YES" : "NO") << "\n";
+    if (!capabilities.connection_lifecycle_events) {
+        const bool outbound_lifecycle = capabilities.ebpf_connect_events &&
+                                        capabilities.ebpf_close_events;
+        std::cout << "Lifecycle mode             "
+                  << (outbound_lifecycle ? "OUTBOUND eBPF (partial)" : "POLLING") << "\n"
+                  << "Lifecycle unavailable      "
+                  << capabilities.lifecycle_unavailable_reason << "\n";
+    }
 }
 
 void cmd_observe(int argc, char** argv) {
@@ -249,7 +222,7 @@ void cmd_observe(int argc, char** argv) {
     const auto target = parse_target(arg_value(argc, argv, "--target"));
     const auto ca = arg_value(argc, argv, "--ca");
     const int duration = std::stoi(arg_value(argc, argv, "--duration", "30"));
-    const int poll_ms = std::stoi(arg_value(argc, argv, "--poll-ms", "100"));
+    const auto requested_poll_ms = arg_value(argc, argv, "--poll-ms");
     const auto max_db_mb = std::stoull(arg_value(argc, argv, "--max-db-mb", "200"));
 
     HistoryStore store(db);
@@ -267,91 +240,41 @@ void cmd_observe(int argc, char** argv) {
         std::cerr << "TLS supporting probe unavailable: " << error.what() << "\n";
     }
     const auto baseline = store.baseline_for(target.host, target.port);
-
-    std::unordered_map<std::string, Tracked> tracked;
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration);
-    std::size_t observed = 0;
-
-    while (std::chrono::steady_clock::now() < deadline && !g_stop_requested)
-    {
-        for (auto& [unused, tracked_connection] : tracked) {
-            static_cast<void>(unused);
-            tracked_connection.present = false;
-        }
-
-        for (const auto& socket : observer->snapshot()) {
-            if (socket.remote_port != target.port || !target.ips.contains(socket.remote_ip)) continue;
-            const auto key = key_for(socket);
-            auto it = tracked.find(key);
-            if (it == tracked.end()) {
-                const auto id = begin_attributed_connection(store, *resolver, socket, target.host);
-                if (!id) continue;
-
-                store.add_tcp_sample(*id, socket.transport);
-                if (auto route_observation = route->route_to(socket.remote_ip)) {
-                    store.add_route(*id, *route_observation);
-                }
-                tracked.emplace(key, Tracked{*id, socket.transport, socket.transport,
-                                             socket.transport.observed_ns, true});
-                ++observed;
-            } else {
-                it->second.present = true;
-                it->second.last_seen = socket.transport;
-                store.touch_connection(it->second.db_id, socket.transport.observed_ns, "ACTIVE");
-                if (meaningful_change(it->second.last_persisted, socket.transport,
-                                      it->second.last_persist_ns)) {
-                    store.add_tcp_sample(it->second.db_id, socket.transport);
-                    it->second.last_persisted = socket.transport;
-                    it->second.last_persist_ns = socket.transport.observed_ns;
-                }
-            }
-        }
-
-        for (auto& [unused, tracked_connection] : tracked) {
-            static_cast<void>(unused);
-            if (!tracked_connection.present) {
-                store.touch_connection(tracked_connection.db_id,
-                                       tracked_connection.last_seen.observed_ns,
-                                       "DISAPPEARED");
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+    auto lifecycle = platform::make_lifecycle_observer();
+    const bool lifecycle_active = lifecycle->capability().outbound_available();
+    const int poll_ms = std::stoi(requested_poll_ms.empty()
+        ? (lifecycle_active ? "1000" : "100") : requested_poll_ms);
+    if (duration < 0 || poll_ms <= 0) throw std::runtime_error("duration and poll interval must be positive");
+    if (!lifecycle_active) {
+        std::cerr << "Lifecycle eBPF unavailable; using polling discovery: "
+                  << lifecycle->capability().unavailable_reason << "\n";
     }
 
-    finalize_observe_cmd(tracked, store, baseline, tls, tls_id);
+    ObservationSession session(store, *observer, *lifecycle, *resolver, *route, target);
+    const auto result = session.run(std::chrono::seconds(duration),
+                                    std::chrono::milliseconds(poll_ms),
+                                    [] { return g_stop_requested != 0; });
+
+    finalize_observe_cmd(result.connection_ids, store, baseline, tls, tls_id);
 
     store.prune_to_budget(max_db_mb * 1024ULL * 1024ULL);
 
     std::signal(SIGINT, previous_sigint);
     std::signal(SIGTERM, previous_sigterm);
 
-    std::cout << "Observed " << observed << " matching connection(s). History: " << db << "\n";
+    std::cout << "Observed " << result.admitted_connections
+              << " matching connection(s). History: " << db << "\n";
 }
 
-void finalize_observe_cmd(const std::unordered_map<std::string, Tracked>& tracked,
+void finalize_observe_cmd(const std::vector<std::int64_t>& connection_ids,
                         HistoryStore& store,
                         const std::optional<Baseline>& baseline,
                         const std::optional<TlsObservation>& tls,
                         std::optional<std::int64_t> tls_id)
 {
-    for (auto& [unused, tracked_connection] : tracked)
-    {
-        static_cast<void>(unused);
-        const char* final_state =
-            tracked_connection.present
-                ? "OBSERVATION_ENDED"
-                : "DISAPPEARED";
-
-        store.touch_connection(
-            tracked_connection.db_id,
-            tracked_connection.last_seen.observed_ns,
-            final_state);
-
+    for (const auto connection_id : connection_ids) {
         if (baseline) {
-            const auto samples =
-                store.samples_for_connection(
-                    tracked_connection.db_id);
+            const auto samples = store.samples_for_connection(connection_id);
 
             const auto verdict =
                 evaluate(
@@ -359,10 +282,7 @@ void finalize_observe_cmd(const std::unordered_map<std::string, Tracked>& tracke
                     aggregate_metrics(samples),
                     tls);
 
-            store.save_verdict(
-                tracked_connection.db_id,
-                verdict,
-                tls_id);
+            store.save_verdict(connection_id, verdict, tls_id);
         }
     }
 }
@@ -487,8 +407,22 @@ void cmd_evidence(int argc, char** argv) {
               << '[' << data.connection.process.pid << "]\n"
               << "  Path: " << data.connection.local_ip << ':' << data.connection.local_port
               << " -> " << data.connection.remote_ip << ':' << data.connection.remote_port << "\n"
-              << "  Lifecycle: " << data.connection.lifecycle_state << "\n\n"
-              << "TCP samples (EXACT): " << data.samples.size() << "\n";
+              << "  Lifecycle: " << data.connection.lifecycle_state << "\n\n";
+
+    std::cout << "Lifecycle observations (eBPF observation, not verdict): "
+              << data.lifecycle_events.size() << "\n";
+    for (const auto& event : data.lifecycle_events) {
+        std::cout << "  " << to_string(event.type) << " ns=" << event.timestamp_ns
+                  << " provenance=" << to_string(event.provenance)
+                  << " agent_tgid=" << (event.process.agent_visible.tgid
+                      ? std::to_string(*event.process.agent_visible.tgid) : "<unavailable>")
+                  << " kernel_tgid=" << (event.process.kernel.tgid
+                      ? std::to_string(*event.process.kernel.tgid) : "<unavailable>")
+                  << " cookie=" << (event.socket_cookie
+                      ? std::to_string(*event.socket_cookie) : "<unavailable>") << '\n';
+    }
+
+    std::cout << "\nTCP samples (EXACT): " << data.samples.size() << "\n";
 
     if (!data.samples.empty()) {
         const auto start_ns = data.samples.front().observed_ns;

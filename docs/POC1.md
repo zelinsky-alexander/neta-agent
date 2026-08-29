@@ -1,5 +1,7 @@
 # POC1 design contract
 
+> Historical MS0 contract: Milestone 1 now adds optional event-driven eBPF lifecycle observation while preserving every fallback and verdict/replay invariant described here. See [`MILESTONE1_EBPF.md`](MILESTONE1_EBPF.md).
+
 POC1 proves one claim: for a real outbound Linux TCP connection, `neta-agent` can identify the process/socket, record immutable/sparse transport and trust evidence, compare it with an explicit baseline, and produce a replayable Performance + Trust verdict.
 
 ## Data path

@@ -44,7 +44,15 @@ PlatformCapabilities capabilities() {
     c.tcp_retransmissions = true;
     c.tcp_cwnd = true;
     c.route_observation = true;
-    c.connection_lifecycle_events = false;
+    const auto lifecycle = make_lifecycle_observer();
+    const auto& lifecycle_capability = lifecycle->capability();
+    c.connection_lifecycle_events = lifecycle_capability.available();
+    c.ebpf_connect_events = lifecycle_capability.connect_events;
+    c.ebpf_accept_events = lifecycle_capability.accept_events;
+    c.ebpf_close_events = lifecycle_capability.close_events;
+    c.btf_core_runtime = lifecycle_capability.btf_core_runtime;
+    c.ebpf_built_in = lifecycle_capability.built_in;
+    c.lifecycle_unavailable_reason = lifecycle_capability.unavailable_reason;
     c.exact_dns_observation = false;
     c.exact_tls_observation = false;
     return c;

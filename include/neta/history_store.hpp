@@ -1,5 +1,6 @@
 #pragma once
 
+#include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 
 #include <cstdint>
@@ -23,6 +24,7 @@ struct StorageStatus {
 struct ExportData {
     ConnectionSummary connection;
     std::vector<TcpSnapshot> samples;
+    std::vector<ConnectionLifecycleEvent> lifecycle_events;
     std::optional<RouteObservation> route;
     std::optional<TlsObservation> tls;
     std::optional<Baseline> baseline;
@@ -45,6 +47,8 @@ public:
     void touch_connection(std::int64_t connection_id, std::uint64_t last_seen_ns,
                           const std::string& lifecycle_state);
     std::int64_t add_tcp_sample(std::int64_t connection_id, const TcpSnapshot& sample);
+    std::int64_t add_lifecycle_event(std::int64_t connection_id,
+                                     const ConnectionLifecycleEvent& event);
     std::int64_t add_route(std::int64_t connection_id, const RouteObservation& route);
     std::int64_t add_tls(const TlsObservation& tls);
     void save_baseline(const Baseline& baseline);
@@ -56,6 +60,8 @@ public:
     std::vector<ConnectionSummary> recent_connections(std::size_t limit) const;
     std::optional<ConnectionSummary> connection(std::int64_t id) const;
     std::vector<TcpSnapshot> samples_for_connection(std::int64_t id) const;
+    std::vector<ConnectionLifecycleEvent> lifecycle_events_for_connection(
+        std::int64_t id) const;
     std::vector<TcpSnapshot> recent_samples_for_target(const std::string& host,
                                                        std::uint16_t port,
                                                        std::size_t limit) const;

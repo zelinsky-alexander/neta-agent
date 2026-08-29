@@ -2,7 +2,7 @@
 
 _Last updated: 2026-08-28_
 
-This document summarizes the current `neta-agent` architecture, what POC1 implements today, the known limitations, and the planned evolution from a targeted Linux proof-of-concept into a cross-platform endpoint connection assurance agent.
+This document summarizes the current `neta-agent` architecture after Milestone 1 and the planned evolution from a targeted Linux proof-of-concept into a cross-platform endpoint connection assurance agent.
 
 The normative POC1 constraints remain in [`POC1.md`](POC1.md). This document is a broader design/status/roadmap view.
 
@@ -400,7 +400,7 @@ SQLite remains an implementation detail behind `HistoryStore`; raw SQL is not th
 
 ## 6. Current dependencies and deployment model
 
-POC1 intentionally keeps the dependency set small.
+The project intentionally keeps the dependency set small.
 
 ### SQLite
 
@@ -413,19 +413,25 @@ POC1 intentionally keeps the dependency set small.
 - license: Apache-2.0
 - role: TLS probe, validation, certificate/SPKI hashing, SHA-256
 
+### libbpf (optional)
+
+- license: BSD-2-Clause or LGPL-2.1
+- role: CO-RE relocation, lifecycle-program attachment, and ring-buffer delivery
+- absent from deliberate polling-only builds
+
 The long-term packaging goal is **one self-contained executable per OS/architecture**. SQLite and OpenSSL may be statically linked for release builds. A fully static Linux artifact should preferably use a musl-based release toolchain.
 
-## 7. Known POC1 limitations
+## 7. Current limitations
 
 Current limitations are deliberate and should not be hidden by the product language.
 
-### Polling can miss short-lived connections
+### Fallback polling can miss short-lived connections
 
-SOCK_DIAG snapshots are currently polled. A connection that begins and ends between polls can be missed, or first seen only after ownership information is gone.
+When runtime eBPF is unavailable, SOCK_DIAG polling retains the MS0 limitation: a connection that begins and ends between polls can be missed. Capability output distinguishes this unavailable evidence from an absence of lifecycle events.
 
 ### Process attribution is race-sensitive
 
-A `/proc` inode-to-process match only works while the process still exposes the socket fd. Very short-lived connections remain the hardest case until lifecycle events are captured directly.
+A `/proc` inode-to-process match only works while the process still exposes the socket fd. Event-time PID/TGID/UID/comm now covers this race when lifecycle eBPF is active; the limitation remains on the fallback path.
 
 ### Target-scoped and outbound-only in POC1
 
@@ -499,7 +505,7 @@ Planned work:
 
 Exit criterion: POC1 acceptance scenarios are reproducible and the DB remains bounded under stress.
 
-### Milestone 1 — Event-driven Linux lifecycle with eBPF
+### Milestone 1 — Event-driven Linux lifecycle with eBPF (implemented)
 
 Goal: stop relying on polling to discover when connections begin/end.
 
@@ -521,7 +527,7 @@ Planned capabilities:
 
 `accept` lifecycle coverage is important preparation for inbound observation in Milestone 2.
 
-SOCK_DIAG remains useful; eBPF complements it rather than replacing the detailed TCP-state collector.
+SOCK_DIAG remains the detailed TCP-state collector; eBPF complements it with connect/accept/close timing, event-time process context, and socket-cookie correlation. Runtime load/attach failures are reported and retain the MS0 polling fallback. See [`MILESTONE1_EBPF.md`](MILESTONE1_EBPF.md).
 
 ### Milestone 2 — Bidirectional all-connection endpoint observation and optional service mode
 

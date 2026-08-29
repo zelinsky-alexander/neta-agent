@@ -12,6 +12,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(NETA_ENABLE_TESTS "Build tests" ON)
 option(NETA_STATIC_DEPS "Prefer static OpenSSL/SQLite and static C++ runtime when available" OFF)
 option(NETA_FULL_STATIC "Request a fully static executable (intended for musl release builds)" OFF)
+set(NETA_EBPF "AUTO" CACHE STRING "Build lifecycle eBPF support: AUTO, ON, or OFF")
+set_property(CACHE NETA_EBPF PROPERTY STRINGS AUTO ON OFF)
+if(NOT NETA_EBPF MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "NETA_EBPF must be AUTO, ON, or OFF")
+endif()
 
 if(NETA_STATIC_DEPS)
     set(OPENSSL_USE_STATIC_LIBS TRUE)
@@ -20,21 +25,108 @@ endif()
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(SQLite3 REQUIRED)
 
+set(NETA_HAVE_EBPF FALSE)
+if(NOT NETA_EBPF STREQUAL "OFF")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBBPF QUIET IMPORTED_TARGET libbpf)
+    endif()
+    find_program(NETA_CLANG_EXECUTABLE NAMES clang)
+    if(LIBBPF_FOUND AND NETA_CLANG_EXECUTABLE)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/neta_bpf_compiler_check.c" "int x;\n")
+        execute_process(
+            COMMAND "${NETA_CLANG_EXECUTABLE}" -target bpf -c
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/neta_bpf_compiler_check.c"
+                    -o "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/neta_bpf_compiler_check.o"
+            RESULT_VARIABLE NETA_BPF_COMPILER_RESULT
+            OUTPUT_QUIET ERROR_QUIET
+        )
+        if(NETA_BPF_COMPILER_RESULT EQUAL 0)
+            set(NETA_HAVE_EBPF TRUE)
+        endif()
+    elseif(NETA_EBPF STREQUAL "ON")
+        message(FATAL_ERROR "NETA_EBPF=ON requires clang and libbpf development files")
+    endif()
+    if(NETA_EBPF STREQUAL "ON" AND NOT NETA_HAVE_EBPF)
+        message(FATAL_ERROR "NETA_EBPF=ON requires a clang compiler with the BPF target")
+    endif()
+    if(NETA_EBPF STREQUAL "AUTO" AND NOT NETA_HAVE_EBPF)
+        message(STATUS "Lifecycle eBPF build support unavailable; building polling fallback")
+    endif()
+endif()
+
+set(NETA_PLATFORM_SOURCES
+    src/platform/linux/environment.cpp
+    src/platform/linux/socket_diag.cpp
+    src/platform/linux/process_resolver.cpp
+    src/platform/linux/route_observer.cpp
+    src/platform/linux/ebpf/lifecycle_decoder.cpp
+)
+
+if(NETA_HAVE_EBPF)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        set(NETA_BPF_ARCH x86)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(NETA_BPF_ARCH arm64)
+    else()
+        message(FATAL_ERROR "Lifecycle eBPF currently supports x86_64 and arm64 release targets")
+    endif()
+
+    set(NETA_BPF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/ebpf")
+    set(NETA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    set(NETA_BPF_OBJECT "${NETA_GENERATED_DIR}/lifecycle.bpf.o")
+    set(NETA_BPF_BYTES "${NETA_GENERATED_DIR}/lifecycle_bpf_bytes.inc")
+    file(MAKE_DIRECTORY "${NETA_GENERATED_DIR}")
+    set(NETA_BPF_INCLUDE_ARGS "-I${NETA_BPF_DIR}" -I/usr/include)
+    if(CMAKE_LIBRARY_ARCHITECTURE)
+        list(APPEND NETA_BPF_INCLUDE_ARGS "-I/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}")
+    endif()
+    add_custom_command(
+        OUTPUT "${NETA_BPF_OBJECT}"
+        COMMAND "${NETA_CLANG_EXECUTABLE}" -g -O2 -target bpf
+                "-fdebug-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=."
+                -D__TARGET_ARCH_${NETA_BPF_ARCH} ${NETA_BPF_INCLUDE_ARGS}
+                -c "${NETA_BPF_DIR}/lifecycle.bpf.c" -o "${NETA_BPF_OBJECT}"
+        DEPENDS
+            "${NETA_BPF_DIR}/lifecycle.bpf.c"
+            "${NETA_BPF_DIR}/lifecycle_wire.h"
+            "${NETA_BPF_DIR}/vmlinux_min.h"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${NETA_BPF_BYTES}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${NETA_BPF_OBJECT}" "-DOUTPUT=${NETA_BPF_BYTES}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS "${NETA_BPF_OBJECT}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        VERBATIM
+    )
+    set_source_files_properties(src/platform/linux/ebpf/lifecycle_loader.cpp
+        PROPERTIES OBJECT_DEPENDS "${NETA_BPF_BYTES}")
+    list(APPEND NETA_PLATFORM_SOURCES src/platform/linux/ebpf/lifecycle_loader.cpp)
+else()
+    list(APPEND NETA_PLATFORM_SOURCES src/platform/linux/ebpf/lifecycle_loader_stub.cpp)
+endif()
+
 add_library(neta_core
     src/core/model.cpp
+    src/core/lifecycle.cpp
     src/core/crypto.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/history_store.cpp
     src/core/connection_admission.cpp
-    src/platform/linux/environment.cpp
-    src/platform/linux/socket_diag.cpp
-    src/platform/linux/process_resolver.cpp
-    src/platform/linux/route_observer.cpp
+    src/core/connection_tracker.cpp
+    src/core/observation_session.cpp
+    ${NETA_PLATFORM_SOURCES}
 )
 
-target_include_directories(neta_core PUBLIC include)
+target_include_directories(neta_core PUBLIC include PRIVATE src/platform/linux/ebpf)
 target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3)
+if(NETA_HAVE_EBPF)
+    target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
+    target_link_libraries(neta_core PRIVATE PkgConfig::LIBBPF)
+endif()
 target_compile_options(neta_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 
 add_executable(neta-agent src/main.cpp)
@@ -52,6 +144,7 @@ if(NETA_ENABLE_TESTS)
     enable_testing()
     add_executable(neta_tests tests/tests.cpp)
     target_link_libraries(neta_tests PRIVATE neta_core)
+    target_include_directories(neta_tests PRIVATE src/platform/linux/ebpf)
     target_compile_options(neta_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME neta_tests COMMAND neta_tests)
 
@@ -59,4 +152,17 @@ if(NETA_ENABLE_TESTS)
     target_link_libraries(neta_ms0_tests PRIVATE neta_core)
     target_compile_options(neta_ms0_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME neta_ms0_tests COMMAND neta_ms0_tests)
+
+    add_executable(neta_ms1_tests tests/ms1_tests.cpp)
+    target_link_libraries(neta_ms1_tests PRIVATE neta_core)
+    target_include_directories(neta_ms1_tests PRIVATE src/platform/linux/ebpf)
+    target_compile_options(neta_ms1_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_ms1_tests COMMAND neta_ms1_tests)
+
+    add_executable(neta_ms1_ebpf_integration tests/ms1_ebpf_integration.cpp)
+    target_link_libraries(neta_ms1_ebpf_integration PRIVATE neta_core)
+    target_compile_options(neta_ms1_ebpf_integration PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_ms1_ebpf_integration COMMAND neta_ms1_ebpf_integration)
+    set_tests_properties(neta_ms1_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
 endif()

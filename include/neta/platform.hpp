@@ -1,5 +1,6 @@
 #pragma once
 
+#include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 
 #include <cstdint>
@@ -19,6 +20,12 @@ struct PlatformCapabilities {
     bool tcp_cwnd{false};
     bool route_observation{false};
     bool connection_lifecycle_events{false};
+    bool ebpf_connect_events{false};
+    bool ebpf_accept_events{false};
+    bool ebpf_close_events{false};
+    bool btf_core_runtime{false};
+    bool ebpf_built_in{false};
+    std::string lifecycle_unavailable_reason;
     bool exact_dns_observation{false};
     bool exact_tls_observation{false};
 };
@@ -50,6 +57,7 @@ PlatformCapabilities capabilities();
 bool eligible_for_new_connection(const SocketObservation& socket);
 
 std::unique_ptr<ConnectionObserver> make_connection_observer();
+std::unique_ptr<LifecycleObserver> make_lifecycle_observer();
 std::unique_ptr<ProcessResolver> make_process_resolver();
 std::unique_ptr<RouteObserver> make_route_observer();
 

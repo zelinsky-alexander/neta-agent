@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace neta {
 namespace {
@@ -129,6 +130,28 @@ AND EXISTS (
     }
 }
 
+bool table_has_column(sqlite3* db, const char* table, const char* column) {
+    const std::string query = "PRAGMA table_info(" + std::string(table) + ");";
+    Statement stmt(db, query.c_str());
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        if (text_col(stmt.get(), 1) == column) return true;
+    }
+    return false;
+}
+
+void ensure_column(sqlite3* db, const char* table, const char* column,
+                   const char* definition) {
+    if (table_has_column(db, table, column)) return;
+    const std::string sql = "ALTER TABLE " + std::string(table) + " ADD COLUMN " +
+                            definition + ";";
+    char* error = nullptr;
+    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error) != SQLITE_OK) {
+        const std::string message = error ? error : "SQLite schema migration error";
+        sqlite3_free(error);
+        throw std::runtime_error(message);
+    }
+}
+
 } // namespace
 
 HistoryStore::HistoryStore(std::filesystem::path path) : path_(std::move(path)) {
@@ -188,6 +211,34 @@ CREATE TABLE IF NOT EXISTS connections(
 );
 CREATE INDEX IF NOT EXISTS idx_connections_recent ON connections(first_seen_ns DESC);
 CREATE INDEX IF NOT EXISTS idx_connections_target ON connections(target_host,remote_port,first_seen_ns DESC);
+CREATE TABLE IF NOT EXISTS lifecycle_events(
+ id INTEGER PRIMARY KEY,
+ connection_id INTEGER NOT NULL,
+ event_type TEXT NOT NULL,
+ observed_ns INTEGER NOT NULL,
+ provenance TEXT NOT NULL,
+ agent_pid INTEGER,
+ agent_tgid INTEGER,
+ kernel_pid INTEGER,
+ kernel_tgid INTEGER,
+ agent_pid_namespace_device INTEGER,
+ agent_pid_namespace_inode INTEGER,
+ uid INTEGER,
+ process_start_ticks INTEGER,
+ comm TEXT,
+ network_namespace_inode INTEGER,
+ address_family INTEGER NOT NULL,
+ protocol INTEGER NOT NULL,
+ local_ip TEXT,
+ local_port INTEGER,
+ remote_ip TEXT,
+ remote_port INTEGER,
+ socket_cookie INTEGER,
+ tcp_state INTEGER,
+ UNIQUE(connection_id,event_type,observed_ns),
+ FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_connection ON lifecycle_events(connection_id,observed_ns);
 CREATE TABLE IF NOT EXISTS transport_samples(
  id INTEGER PRIMARY KEY,
  connection_id INTEGER NOT NULL,
@@ -277,6 +328,14 @@ CREATE TABLE IF NOT EXISTS verdicts(
  FOREIGN KEY(tls_observation_id) REFERENCES tls_observations(id)
 );
 )SQL");
+    ensure_column(db_, "lifecycle_events", "agent_pid", "agent_pid INTEGER");
+    ensure_column(db_, "lifecycle_events", "agent_tgid", "agent_tgid INTEGER");
+    ensure_column(db_, "lifecycle_events", "kernel_pid", "kernel_pid INTEGER");
+    ensure_column(db_, "lifecycle_events", "kernel_tgid", "kernel_tgid INTEGER");
+    ensure_column(db_, "lifecycle_events", "agent_pid_namespace_device",
+                  "agent_pid_namespace_device INTEGER");
+    ensure_column(db_, "lifecycle_events", "agent_pid_namespace_inode",
+                  "agent_pid_namespace_inode INTEGER");
 }
 
 std::int64_t HistoryStore::upsert_process(const ProcessIdentity& p) {
@@ -349,6 +408,87 @@ std::int64_t HistoryStore::add_tcp_sample(std::int64_t id, const TcpSnapshot& s)
     sqlite3_bind_int64(stmt.get(), i++, s.send_queue_bytes);
     sqlite3_bind_int64(stmt.get(), i++, s.recv_queue_bytes);
     sqlite3_bind_text(stmt.get(), i, hash.c_str(), -1, SQLITE_TRANSIENT);
+    stmt.step_done();
+    return sqlite3_last_insert_rowid(db_);
+}
+
+std::int64_t HistoryStore::add_lifecycle_event(std::int64_t id,
+                                               const ConnectionLifecycleEvent& event) {
+    Statement stmt(db_, R"SQL(
+INSERT OR IGNORE INTO lifecycle_events(
+ connection_id,event_type,observed_ns,provenance,agent_pid,agent_tgid,kernel_pid,kernel_tgid,
+ agent_pid_namespace_device,agent_pid_namespace_inode,uid,process_start_ticks,comm,
+ network_namespace_inode,address_family,protocol,local_ip,local_port,remote_ip,remote_port,
+ socket_cookie,tcp_state)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+)SQL");
+    int index = 1;
+    sqlite3_bind_int64(stmt.get(), index++, id);
+    const auto event_type = to_string(event.type);
+    sqlite3_bind_text(stmt.get(), index++, event_type.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt.get(), index++, static_cast<sqlite3_int64>(event.timestamp_ns));
+    const auto provenance = to_string(event.provenance);
+    sqlite3_bind_text(stmt.get(), index++, provenance.c_str(), -1, SQLITE_TRANSIENT);
+    if (event.process.agent_visible.pid) {
+        sqlite3_bind_int64(stmt.get(), index, *event.process.agent_visible.pid);
+    }
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.agent_visible.tgid) {
+        sqlite3_bind_int64(stmt.get(), index, *event.process.agent_visible.tgid);
+    }
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.kernel.pid) sqlite3_bind_int64(stmt.get(), index, *event.process.kernel.pid);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.kernel.tgid) sqlite3_bind_int64(stmt.get(), index, *event.process.kernel.tgid);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.agent_pid_namespace) {
+        sqlite3_bind_int64(stmt.get(), index, static_cast<sqlite3_int64>(
+            event.process.agent_pid_namespace->device));
+    } else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.agent_pid_namespace) {
+        sqlite3_bind_int64(stmt.get(), index, static_cast<sqlite3_int64>(
+            event.process.agent_pid_namespace->inode));
+    } else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.uid) sqlite3_bind_int64(stmt.get(), index, *event.process.uid);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.start_ticks) {
+        sqlite3_bind_int64(stmt.get(), index, static_cast<sqlite3_int64>(*event.process.start_ticks));
+    } else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.process.comm) sqlite3_bind_text(stmt.get(), index, event.process.comm->c_str(), -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.network_namespace_inode) {
+        sqlite3_bind_int64(stmt.get(), index, static_cast<sqlite3_int64>(*event.network_namespace_inode));
+    } else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    sqlite3_bind_int(stmt.get(), index++, static_cast<int>(event.address_family));
+    sqlite3_bind_int(stmt.get(), index++, static_cast<int>(event.protocol));
+    if (event.local) sqlite3_bind_text(stmt.get(), index, event.local->address.c_str(), -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.local && event.local->port) sqlite3_bind_int(stmt.get(), index, *event.local->port);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.remote) sqlite3_bind_text(stmt.get(), index, event.remote->address.c_str(), -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.remote && event.remote->port) sqlite3_bind_int(stmt.get(), index, *event.remote->port);
+    else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.socket_cookie) {
+        sqlite3_bind_int64(stmt.get(), index, static_cast<sqlite3_int64>(*event.socket_cookie));
+    } else sqlite3_bind_null(stmt.get(), index);
+    ++index;
+    if (event.tcp_state) sqlite3_bind_int(stmt.get(), index, *event.tcp_state);
+    else sqlite3_bind_null(stmt.get(), index);
     stmt.step_done();
     return sqlite3_last_insert_rowid(db_);
 }
@@ -510,6 +650,59 @@ std::vector<TcpSnapshot> HistoryStore::samples_for_connection(std::int64_t id) c
     return out;
 }
 
+std::vector<ConnectionLifecycleEvent> HistoryStore::lifecycle_events_for_connection(
+    std::int64_t id) const {
+    Statement stmt(db_, R"SQL(
+SELECT event_type,observed_ns,provenance,agent_pid,agent_tgid,kernel_pid,kernel_tgid,
+       agent_pid_namespace_device,agent_pid_namespace_inode,uid,process_start_ticks,comm,
+       network_namespace_inode,address_family,protocol,local_ip,local_port,remote_ip,
+       remote_port,socket_cookie,tcp_state
+FROM lifecycle_events WHERE connection_id=? ORDER BY observed_ns,id;
+)SQL");
+    sqlite3_bind_int64(stmt.get(), 1, id);
+    std::vector<ConnectionLifecycleEvent> events;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        ConnectionLifecycleEvent event;
+        const auto type = text_col(stmt.get(), 0);
+        event.type = type == "ACCEPT" ? ConnectionLifecycleEventType::Accept :
+                     type == "CLOSE" ? ConnectionLifecycleEventType::Close :
+                                       ConnectionLifecycleEventType::Connect;
+        event.timestamp_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 1));
+        event.provenance = text_col(stmt.get(), 2) == "DETERMINISTIC_TEST"
+            ? LifecycleProvenance::DeterministicTest : LifecycleProvenance::EbpfCore;
+        if (sqlite3_column_type(stmt.get(), 3) != SQLITE_NULL) event.process.agent_visible.pid = sqlite3_column_int64(stmt.get(), 3);
+        if (sqlite3_column_type(stmt.get(), 4) != SQLITE_NULL) event.process.agent_visible.tgid = sqlite3_column_int64(stmt.get(), 4);
+        if (sqlite3_column_type(stmt.get(), 5) != SQLITE_NULL) event.process.kernel.pid = sqlite3_column_int64(stmt.get(), 5);
+        if (sqlite3_column_type(stmt.get(), 6) != SQLITE_NULL) event.process.kernel.tgid = sqlite3_column_int64(stmt.get(), 6);
+        if (sqlite3_column_type(stmt.get(), 7) != SQLITE_NULL &&
+            sqlite3_column_type(stmt.get(), 8) != SQLITE_NULL) {
+            event.process.agent_pid_namespace = ProcessNamespaceIdentity{
+                static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 7)),
+                static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 8))};
+        }
+        if (sqlite3_column_type(stmt.get(), 9) != SQLITE_NULL) event.process.uid = static_cast<std::uint32_t>(sqlite3_column_int64(stmt.get(), 9));
+        if (sqlite3_column_type(stmt.get(), 10) != SQLITE_NULL) event.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 10));
+        if (sqlite3_column_type(stmt.get(), 11) != SQLITE_NULL) event.process.comm = text_col(stmt.get(), 11);
+        if (sqlite3_column_type(stmt.get(), 12) != SQLITE_NULL) event.network_namespace_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 12));
+        event.address_family = static_cast<NetworkAddressFamily>(sqlite3_column_int(stmt.get(), 13));
+        event.protocol = static_cast<TransportProtocol>(sqlite3_column_int(stmt.get(), 14));
+        if (sqlite3_column_type(stmt.get(), 15) != SQLITE_NULL) {
+            NetworkEndpoint endpoint{text_col(stmt.get(), 15), std::nullopt};
+            if (sqlite3_column_type(stmt.get(), 16) != SQLITE_NULL) endpoint.port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 16));
+            event.local = std::move(endpoint);
+        }
+        if (sqlite3_column_type(stmt.get(), 17) != SQLITE_NULL) {
+            NetworkEndpoint endpoint{text_col(stmt.get(), 17), std::nullopt};
+            if (sqlite3_column_type(stmt.get(), 18) != SQLITE_NULL) endpoint.port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 18));
+            event.remote = std::move(endpoint);
+        }
+        if (sqlite3_column_type(stmt.get(), 19) != SQLITE_NULL) event.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 19));
+        if (sqlite3_column_type(stmt.get(), 20) != SQLITE_NULL) event.tcp_state = static_cast<std::uint8_t>(sqlite3_column_int(stmt.get(), 20));
+        events.push_back(std::move(event));
+    }
+    return events;
+}
+
 std::vector<TcpSnapshot> HistoryStore::recent_samples_for_target(const std::string& host, std::uint16_t port, std::size_t limit) const {
     Statement stmt(db_, "SELECT s.observed_ns,s.tcp_state,s.rtt_us,s.rttvar_us,s.total_retrans,s.lost,s.unacked,s.snd_cwnd,s.snd_ssthresh,s.snd_mss,s.rcv_mss,s.send_queue_bytes,s.recv_queue_bytes FROM transport_samples s JOIN connections c ON c.id=s.connection_id WHERE c.target_host=? AND c.remote_port=? ORDER BY s.observed_ns DESC LIMIT ?;");
     sqlite3_bind_text(stmt.get(), 1, host.c_str(), -1, SQLITE_TRANSIENT);
@@ -583,6 +776,7 @@ ExportData HistoryStore::export_data(std::int64_t id) const {
     if (!c) throw std::runtime_error("connection not found");
     data.connection = *c;
     data.samples = samples_for_connection(id);
+    data.lifecycle_events = lifecycle_events_for_connection(id);
     data.route = route_for_connection(id);
     data.verdict = verdict_for_connection(id);
 

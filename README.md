@@ -2,7 +2,7 @@
 
 **Endpoint connection assurance agent for per-connection performance, trust, and replayable evidence-based diagnostics.**
 
-`neta-agent` observes real endpoint TCP connections without proxying or redirecting application traffic. POC1 is an on-demand Linux implementation: it identifies sockets and processes, reads exact TCP transport state through `NETLINK_SOCK_DIAG` / `INET_DIAG_INFO`, records sparse bounded evidence in a local SQLite history, performs a separate supporting TLS identity probe, compares observations with an explicitly accepted baseline, and produces deterministic Performance + Trust verdicts that can be exported and replayed.
+`neta-agent` observes real endpoint TCP connections without proxying or redirecting application traffic. Milestone 1 adds optional CO-RE eBPF connect/accept/close lifecycle observation while retaining `NETLINK_SOCK_DIAG` / `INET_DIAG_INFO` as the exact detailed TCP-state collector. The on-demand Linux agent records sparse bounded evidence in SQLite, performs a separate supporting TLS identity probe, compares observations with an explicitly accepted baseline, and produces deterministic Performance + Trust verdicts that can be exported and replayed.
 
 ## POC1 principles
 
@@ -13,9 +13,9 @@
 - **Evidence fidelity is explicit.** TCP socket state is `EXACT`; local route is `STRONGLY_CORRELATED`; the independent TLS probe is `SUPPORTING` and is never claimed to be the certificate used by the application socket.
 - **Deterministic verdicts.** POC1 rule set is `neta-rules/0.1.0`; rules and input hashes are persisted/exported.
 - **Cross-platform architecture, Linux implementation.** Platform-neutral model/storage/verdict interfaces are separated from `src/platform/linux/`.
-- **Single-binary deployment target.** SQLite and TLS libraries can be statically linked. `NETA_FULL_STATIC=ON` is intended for a musl release toolchain.
+- **Single-binary deployment target.** The compiled BPF object is embedded in the executable; no runtime `.bpf.o`, script, Python process, or companion daemon is required.
 
-POC1 intentionally excludes eBPF, packet capture, HTTP inspection, DNS interception, QUIC, STAMP, BGP/RPKI feeds, RIPE Atlas, a remote agent, web UI, AI, cloud/fleet collection, Windows/macOS backends, Wi-Fi analysis, and generic ping/speed-test functionality.
+Milestone 1 intentionally excludes full inbound assurance/product mode, packet capture, HTTP inspection, DNS interception, QUIC, service mode, Windows/macOS, and the other later-roadmap features.
 
 ## Dependencies
 
@@ -23,6 +23,7 @@ Only two substantial runtime libraries are used:
 
 - **SQLite** — Public Domain. Used as the embedded endpoint-local longitudinal evidence store. Mature and actively maintained. The C API is wrapped behind `HistoryStore`; other code does not call SQLite directly.
 - **OpenSSL 3.x** — Apache-2.0. Used for TLS handshake, certificate/hostname validation, SPKI/certificate SHA-256, and evidence hashing. Security-sensitive; production builds should track supported OpenSSL releases.
+- **libbpf (optional build dependency)** — dual BSD-2-Clause/LGPL-2.1. It provides the small, maintained CO-RE relocation, BTF, program-attach, and ring-buffer loader surface. It is not a daemon and is not required by polling-only builds. Static releases must also provide libbpf's static transitive dependencies.
 
 The repository itself is Apache-2.0 licensed. Perform normal dependency/license/security review before public production distribution, especially for statically linked release artifacts.
 
@@ -31,13 +32,15 @@ The repository itself is Apache-2.0 licensed. Perform normal dependency/license/
 Ubuntu/WSL development build:
 
 ```bash
-sudo apt install build-essential cmake libsqlite3-dev libssl-dev
+sudo apt install build-essential cmake clang libbpf-dev libsqlite3-dev libssl-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
 Strict C++20 is required (`CMAKE_CXX_EXTENSIONS=OFF`).
+
+`NETA_EBPF=AUTO` is the default: build eBPF when clang and libbpf are available, otherwise build the safe polling fallback. `NETA_EBPF=ON` makes missing build prerequisites an error; `NETA_EBPF=OFF` deliberately produces a fallback-only binary.
 
 For a release toolchain where static archives are available:
 
@@ -78,13 +81,13 @@ sudo ./build/neta-agent observe \
   --db ./neta.db
 ```
 
-Generate a sufficiently long-lived connection from another terminal (large transfer/persistent request). POC1 polling may miss very short-lived sockets; lifecycle eBPF is deliberately deferred.
+When lifecycle eBPF loads successfully, new target connections are admitted from kernel events and enriched immediately through SOCK_DIAG. When it cannot load, the command reports the reason and uses the validated MS0 polling path.
 
 ## CLI
 
 ```text
 neta-agent capabilities
-neta-agent observe --target host:port [--duration 30] [--poll-ms 100] [--db neta.db]
+neta-agent observe --target host:port [--duration 30] [--poll-ms interval] [--db neta.db]
 neta-agent history [--limit 50] [--json]
 neta-agent history show ID [--json]
 neta-agent baseline capture --target host:port [--ca file]
@@ -149,4 +152,4 @@ Finally:
 
 must report matching rule set, evidence-input hash, and verdict.
 
-See [docs/POC1.md](docs/POC1.md) for the exact scope and design constraints.
+See [docs/MILESTONE1_EBPF.md](docs/MILESTONE1_EBPF.md) for architecture, requirements, fallback semantics, and integration testing. [docs/POC1.md](docs/POC1.md) remains the MS0 design contract.
