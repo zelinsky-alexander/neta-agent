@@ -1,6 +1,9 @@
 if(NOT DEFINED INPUT OR NOT DEFINED OUTPUT)
     message(FATAL_ERROR "EmbedBinary.cmake requires INPUT and OUTPUT")
 endif()
+if(NOT DEFINED SYMBOL)
+    set(SYMBOL "Lifecycle")
+endif()
 
 file(READ "${INPUT}" object_hex HEX)
 string(LENGTH "${object_hex}" object_hex_length)
@@ -13,4 +16,4 @@ if(object_hex_length GREATER 0)
     endforeach()
 endif()
 
-file(WRITE "${OUTPUT}" "#pragma once\n#include <cstddef>\nnamespace neta::platform::linux_ebpf {\ninline constexpr unsigned char kLifecycleBpfObject[] = {${bytes}};\ninline constexpr std::size_t kLifecycleBpfObjectSize = sizeof(kLifecycleBpfObject);\n}\n")
+file(WRITE "${OUTPUT}" "#pragma once\n#include <cstddef>\nnamespace neta::platform::linux_ebpf {\ninline constexpr unsigned char k${SYMBOL}BpfObject[] = {${bytes}};\ninline constexpr std::size_t k${SYMBOL}BpfObjectSize = sizeof(k${SYMBOL}BpfObject);\n}\n")
