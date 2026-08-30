@@ -1,10 +1,9 @@
 #include "neta/history_store.hpp"
 
-#include "neta/crypto.hpp"
+#include "history_schema.hpp"
 
 #include <sqlite3.h>
 
-#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -49,6 +48,7 @@ CREATE TABLE IF NOT EXISTS connection_name_resolution_evidence(
  query_name TEXT NOT NULL,
  canonical_name TEXT,
  source TEXT NOT NULL,
+ result_code INTEGER,
  observation_fidelity TEXT NOT NULL,
  correlation_fidelity TEXT NOT NULL,
  relation TEXT NOT NULL,
@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS connection_name_resolution_addresses(
  FOREIGN KEY(evidence_id) REFERENCES connection_name_resolution_evidence(id) ON DELETE CASCADE
 );
 )SQL");
+    history_schema::ensure_column(db, "connection_name_resolution_evidence", "result_code",
+                                  "result_code INTEGER");
 }
 
 std::string text_column(sqlite3_stmt* stmt, int column) {
@@ -88,40 +90,6 @@ EvidenceFidelity fidelity_from_string(const std::string& value) {
     return EvidenceFidelity::Contextual;
 }
 
-std::string evidence_hash(const NameResolutionEvidence& evidence) {
-    std::vector<std::string> addresses;
-    addresses.reserve(evidence.observation.addresses.size());
-    for (const auto& address : evidence.observation.addresses) {
-        addresses.push_back(std::to_string(static_cast<int>(address.family)) + ":" + address.address);
-    }
-    std::sort(addresses.begin(), addresses.end());
-
-    std::string material = std::to_string(evidence.observation.started_ns) + "|" +
-        std::to_string(evidence.observation.completed_ns) + "|" +
-        to_string(evidence.observation.query_kind) + "|" +
-        to_string(evidence.observation.mechanism) + "|" + evidence.observation.query_name + "|" +
-        evidence.observation.canonical_name.value_or("") + "|" + evidence.observation.source + "|" +
-        to_string(evidence.observation.fidelity) + "|" + to_string(evidence.correlation_fidelity) + "|" +
-        to_string(evidence.relation) + "|";
-    if (evidence.observation.process.agent_visible.pid) {
-        material += std::to_string(*evidence.observation.process.agent_visible.pid);
-    }
-    material += "|";
-    if (evidence.observation.process.agent_visible.tgid) {
-        material += std::to_string(*evidence.observation.process.agent_visible.tgid);
-    }
-    material += "|";
-    if (evidence.observation.process.start_ticks) {
-        material += std::to_string(*evidence.observation.process.start_ticks);
-    }
-    material += "|";
-    if (evidence.observation.network_namespace_inode) {
-        material += std::to_string(*evidence.observation.network_namespace_inode);
-    }
-    for (const auto& address : addresses) material += "|" + address;
-    return sha256_hex(material);
-}
-
 void bind_optional_int64(sqlite3_stmt* stmt, int index, const std::optional<std::int64_t>& value) {
     if (value) sqlite3_bind_int64(stmt, index, static_cast<sqlite3_int64>(*value));
     else sqlite3_bind_null(stmt, index);
@@ -134,6 +102,11 @@ void bind_optional_u64(sqlite3_stmt* stmt, int index, const std::optional<std::u
 
 void bind_optional_u32(sqlite3_stmt* stmt, int index, const std::optional<std::uint32_t>& value) {
     if (value) sqlite3_bind_int64(stmt, index, static_cast<sqlite3_int64>(*value));
+    else sqlite3_bind_null(stmt, index);
+}
+
+void bind_optional_int(sqlite3_stmt* stmt, int index, const std::optional<int>& value) {
+    if (value) sqlite3_bind_int(stmt, index, *value);
     else sqlite3_bind_null(stmt, index);
 }
 
@@ -157,6 +130,11 @@ std::optional<std::uint32_t> optional_u32_column(sqlite3_stmt* stmt, int column)
     return static_cast<std::uint32_t>(sqlite3_column_int64(stmt, column));
 }
 
+std::optional<int> optional_int_column(sqlite3_stmt* stmt, int column) {
+    if (sqlite3_column_type(stmt, column) == SQLITE_NULL) return std::nullopt;
+    return sqlite3_column_int(stmt, column);
+}
+
 std::optional<std::string> optional_text_column(sqlite3_stmt* stmt, int column) {
     if (sqlite3_column_type(stmt, column) == SQLITE_NULL) return std::nullopt;
     return text_column(stmt, column);
@@ -171,14 +149,15 @@ std::int64_t HistoryStore::add_name_resolution_evidence(
     Statement insert(db_, R"SQL(
 INSERT INTO connection_name_resolution_evidence(
  connection_id,started_ns,completed_ns,query_kind,mechanism,query_name,canonical_name,source,
- observation_fidelity,correlation_fidelity,relation,agent_pid,agent_tgid,kernel_pid,kernel_tgid,
- uid,process_start_ticks,comm,network_namespace_inode,sha256)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ result_code,observation_fidelity,correlation_fidelity,relation,agent_pid,agent_tgid,kernel_pid,
+ kernel_tgid,uid,process_start_ticks,comm,network_namespace_inode,sha256)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(connection_id,completed_ns,query_name,source,relation) DO UPDATE SET
  started_ns=excluded.started_ns,
  query_kind=excluded.query_kind,
  mechanism=excluded.mechanism,
  canonical_name=excluded.canonical_name,
+ result_code=excluded.result_code,
  observation_fidelity=excluded.observation_fidelity,
  correlation_fidelity=excluded.correlation_fidelity,
  agent_pid=excluded.agent_pid,
@@ -203,6 +182,7 @@ RETURNING id;
     sqlite3_bind_text(insert.get(), index++, evidence.observation.query_name.c_str(), -1, SQLITE_TRANSIENT);
     bind_optional_text(insert.get(), index++, evidence.observation.canonical_name);
     sqlite3_bind_text(insert.get(), index++, evidence.observation.source.c_str(), -1, SQLITE_TRANSIENT);
+    bind_optional_int(insert.get(), index++, evidence.observation.result_code);
     const auto observation_fidelity = to_string(evidence.observation.fidelity);
     sqlite3_bind_text(insert.get(), index++, observation_fidelity.c_str(), -1, SQLITE_TRANSIENT);
     const auto link_fidelity = to_string(evidence.correlation_fidelity);
@@ -217,7 +197,7 @@ RETURNING id;
     bind_optional_u64(insert.get(), index++, evidence.observation.process.start_ticks);
     bind_optional_text(insert.get(), index++, evidence.observation.process.comm);
     bind_optional_u64(insert.get(), index++, evidence.observation.network_namespace_inode);
-    const auto hash = evidence_hash(evidence);
+    const auto hash = name_resolution_evidence_hash(evidence);
     sqlite3_bind_text(insert.get(), index, hash.c_str(), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step(insert.get()) != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(db_));
@@ -249,7 +229,7 @@ std::vector<NameResolutionEvidence> HistoryStore::name_resolution_evidence_for_c
     std::int64_t connection_id) const {
     ensure_name_resolution_schema(db_);
     Statement rows(db_, R"SQL(
-SELECT id,started_ns,completed_ns,query_kind,mechanism,query_name,canonical_name,source,
+SELECT id,started_ns,completed_ns,query_kind,mechanism,query_name,canonical_name,source,result_code,
  observation_fidelity,correlation_fidelity,relation,agent_pid,agent_tgid,kernel_pid,kernel_tgid,
  uid,process_start_ticks,comm,network_namespace_inode
 FROM connection_name_resolution_evidence
@@ -268,17 +248,18 @@ ORDER BY completed_ns,id;
         evidence.observation.query_name = text_column(rows.get(), 5);
         evidence.observation.canonical_name = optional_text_column(rows.get(), 6);
         evidence.observation.source = text_column(rows.get(), 7);
-        evidence.observation.fidelity = fidelity_from_string(text_column(rows.get(), 8));
-        evidence.correlation_fidelity = fidelity_from_string(text_column(rows.get(), 9));
-        evidence.relation = name_resolution_relation_from_string(text_column(rows.get(), 10));
-        evidence.observation.process.agent_visible.pid = optional_i64_column(rows.get(), 11);
-        evidence.observation.process.agent_visible.tgid = optional_i64_column(rows.get(), 12);
-        evidence.observation.process.kernel.pid = optional_i64_column(rows.get(), 13);
-        evidence.observation.process.kernel.tgid = optional_i64_column(rows.get(), 14);
-        evidence.observation.process.uid = optional_u32_column(rows.get(), 15);
-        evidence.observation.process.start_ticks = optional_u64_column(rows.get(), 16);
-        evidence.observation.process.comm = optional_text_column(rows.get(), 17);
-        evidence.observation.network_namespace_inode = optional_u64_column(rows.get(), 18);
+        evidence.observation.result_code = optional_int_column(rows.get(), 8);
+        evidence.observation.fidelity = fidelity_from_string(text_column(rows.get(), 9));
+        evidence.correlation_fidelity = fidelity_from_string(text_column(rows.get(), 10));
+        evidence.relation = name_resolution_relation_from_string(text_column(rows.get(), 11));
+        evidence.observation.process.agent_visible.pid = optional_i64_column(rows.get(), 12);
+        evidence.observation.process.agent_visible.tgid = optional_i64_column(rows.get(), 13);
+        evidence.observation.process.kernel.pid = optional_i64_column(rows.get(), 14);
+        evidence.observation.process.kernel.tgid = optional_i64_column(rows.get(), 15);
+        evidence.observation.process.uid = optional_u32_column(rows.get(), 16);
+        evidence.observation.process.start_ticks = optional_u64_column(rows.get(), 17);
+        evidence.observation.process.comm = optional_text_column(rows.get(), 18);
+        evidence.observation.network_namespace_inode = optional_u64_column(rows.get(), 19);
 
         Statement addresses(db_, R"SQL(
 SELECT address_family,address

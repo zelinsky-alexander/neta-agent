@@ -2,6 +2,7 @@
 
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
+#include "neta/name_resolution.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -29,6 +30,11 @@ struct PlatformCapabilities {
     bool btf_core_runtime{false};
     bool ebpf_built_in{false};
     std::string lifecycle_unavailable_reason;
+    bool application_name_resolution_events{false};
+    bool name_resolution_drop_counter{false};
+    std::optional<std::uint64_t> name_resolution_dropped_events;
+    std::string name_resolution_source;
+    std::string name_resolution_unavailable_reason;
     bool exact_dns_observation{false};
     bool exact_tls_observation{false};
 };
@@ -56,6 +62,7 @@ PlatformCapabilities capabilities();
 
 std::unique_ptr<ConnectionObserver> make_connection_observer();
 std::unique_ptr<LifecycleObserver> make_lifecycle_observer();
+std::unique_ptr<NameResolutionObserver> make_name_resolution_observer();
 std::unique_ptr<ProcessResolver> make_process_resolver();
 std::unique_ptr<RouteObserver> make_route_observer();
 

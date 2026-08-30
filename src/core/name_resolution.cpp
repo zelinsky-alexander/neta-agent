@@ -1,7 +1,8 @@
 #include "neta/name_resolution.hpp"
 
+#include "neta/crypto.hpp"
+
 #include <algorithm>
-#include <utility>
 
 namespace neta {
 namespace {
@@ -24,6 +25,7 @@ bool is_candidate(const ConnectionSummary& connection,
                   const NameResolutionCorrelationPolicy& policy) {
     if (connection.direction != ConnectionDirection::Outbound) return false;
     if (observation.query_kind != NameResolutionQueryKind::Forward) return false;
+    if (observation.result_code && *observation.result_code != 0) return false;
     if (connection.first_seen_ns == 0 || observation.completed_ns == 0) return false;
     if (observation.started_ns != 0 && observation.started_ns > observation.completed_ns) return false;
     if (observation.completed_ns > connection.first_seen_ns) return false;
@@ -68,6 +70,18 @@ EvidenceFidelity correlation_fidelity(const ConnectionSummary& connection,
     return durable_process && same_network_namespace
         ? EvidenceFidelity::StronglyCorrelated
         : EvidenceFidelity::Supporting;
+}
+
+std::string optional_i64(const std::optional<std::int64_t>& value) {
+    return value ? std::to_string(*value) : std::string{};
+}
+
+std::string optional_u64(const std::optional<std::uint64_t>& value) {
+    return value ? std::to_string(*value) : std::string{};
+}
+
+std::string optional_u32(const std::optional<std::uint32_t>& value) {
+    return value ? std::to_string(*value) : std::string{};
 }
 
 } // namespace
@@ -161,6 +175,49 @@ NameResolutionCorrelationResult correlate_name_resolution(
     evidence.correlation_fidelity = correlation_fidelity(connection, *match);
     result.evidence = std::move(evidence);
     return result;
+}
+
+std::string name_resolution_evidence_hash(const NameResolutionEvidence& evidence) {
+    std::vector<std::string> addresses;
+    addresses.reserve(evidence.observation.addresses.size());
+    for (const auto& address : evidence.observation.addresses) {
+        addresses.push_back(std::to_string(static_cast<int>(address.family)) + ":" + address.address);
+    }
+    std::sort(addresses.begin(), addresses.end());
+
+    std::string material = std::to_string(evidence.observation.started_ns) + "|" +
+        std::to_string(evidence.observation.completed_ns) + "|" +
+        to_string(evidence.observation.query_kind) + "|" +
+        to_string(evidence.observation.mechanism) + "|" + evidence.observation.query_name + "|" +
+        evidence.observation.canonical_name.value_or("") + "|" + evidence.observation.source + "|" +
+        (evidence.observation.result_code ? std::to_string(*evidence.observation.result_code) : "") + "|" +
+        to_string(evidence.observation.fidelity) + "|" + to_string(evidence.correlation_fidelity) + "|" +
+        to_string(evidence.relation) + "|" +
+        optional_i64(evidence.observation.process.agent_visible.pid) + "|" +
+        optional_i64(evidence.observation.process.agent_visible.tgid) + "|" +
+        optional_i64(evidence.observation.process.kernel.pid) + "|" +
+        optional_i64(evidence.observation.process.kernel.tgid) + "|" +
+        optional_u32(evidence.observation.process.uid) + "|" +
+        optional_u64(evidence.observation.process.start_ticks) + "|" +
+        evidence.observation.process.comm.value_or("") + "|" +
+        optional_u64(evidence.observation.network_namespace_inode);
+    for (const auto& address : addresses) material += "|" + address;
+    return sha256_hex(material);
+}
+
+std::string name_resolution_evidence_set_hash(
+    const std::vector<NameResolutionEvidence>& evidence) {
+    if (evidence.empty()) return {};
+    std::vector<std::string> hashes;
+    hashes.reserve(evidence.size());
+    for (const auto& item : evidence) hashes.push_back(name_resolution_evidence_hash(item));
+    std::sort(hashes.begin(), hashes.end());
+    std::string material;
+    for (const auto& hash : hashes) {
+        if (!material.empty()) material.push_back('|');
+        material += hash;
+    }
+    return sha256_hex(material);
 }
 
 } // namespace neta

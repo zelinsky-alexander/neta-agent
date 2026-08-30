@@ -44,6 +44,7 @@ PlatformCapabilities capabilities() {
     c.tcp_retransmissions = true;
     c.tcp_cwnd = true;
     c.route_observation = true;
+
     const auto lifecycle = make_lifecycle_observer();
     const auto& lifecycle_capability = lifecycle->capability();
     c.connection_lifecycle_events = lifecycle_capability.available();
@@ -57,6 +58,17 @@ PlatformCapabilities capabilities() {
     c.btf_core_runtime = lifecycle_capability.btf_core_runtime;
     c.ebpf_built_in = lifecycle_capability.built_in;
     c.lifecycle_unavailable_reason = lifecycle_capability.unavailable_reason;
+
+    const auto name_resolution = make_name_resolution_observer();
+    const auto& name_capability = name_resolution->capability();
+    c.application_name_resolution_events = name_capability.available();
+    c.name_resolution_drop_counter = name_capability.drop_counter;
+    c.name_resolution_dropped_events = name_resolution->health().dropped_events;
+    c.name_resolution_source = name_capability.source;
+    c.name_resolution_unavailable_reason = name_capability.unavailable_reason;
+
+    // The glibc collector observes an exact application resolver API event. It does not prove
+    // that a network DNS transaction occurred because NSS/cache/hosts may satisfy getaddrinfo().
     c.exact_dns_observation = false;
     c.exact_tls_observation = false;
     return c;
