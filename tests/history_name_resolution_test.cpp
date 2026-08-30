@@ -54,8 +54,9 @@ neta::NameResolutionEvidence evidence_for_connection() {
         {neta::NetworkAddressFamily::IPv4, "192.0.2.44"});
     evidence.observation.addresses.push_back(
         {neta::NetworkAddressFamily::IPv6, "2001:db8::44"});
+    evidence.observation.result_code = 0;
     evidence.observation.fidelity = neta::EvidenceFidelity::Exact;
-    evidence.observation.source = "deterministic-test-resolver";
+    evidence.observation.source = "glibc:getaddrinfo";
     evidence.relation = neta::NameResolutionRelation::ResolvedAddressForOutboundConnection;
     evidence.correlation_fidelity = neta::EvidenceFidelity::StronglyCorrelated;
     return evidence;
@@ -95,6 +96,7 @@ void round_trip_and_cascade_are_bounded() {
         assert(stored.size() == 1);
         assert(stored.front().observation.query_name == "service.example.test");
         assert(stored.front().observation.canonical_name == "edge.example.test");
+        assert(stored.front().observation.result_code == 0);
         assert(stored.front().observation.process.agent_visible.tgid == 7000);
         assert(stored.front().observation.process.start_ticks == 88);
         assert(stored.front().observation.network_namespace_inode == 55);
