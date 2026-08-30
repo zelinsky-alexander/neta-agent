@@ -117,3 +117,11 @@ sudo bash tests/ms1_ebpf_integration.sh ./build/neta-agent
 ```
 
 CTest marks return code 77 as an explicit skip when build/runtime eBPF capability is unavailable. A skip is not an integration pass.
+
+## ARM64 runtime validation
+
+Native ARM64 runtime validation is complete as of 2026-08-29. The strict Milestone 1 eBPF path was validated on Ubuntu Server 24.04 LTS running on an AWS Graviton2 `t4g.small` host (`aarch64` / `arm64`, kernel `6.17.0-1017-aws`).
+
+The runtime capability probe reported BTF/CO-RE, full eBPF lifecycle, and TCP connect/accept/close support. The privileged integration test passed with short-lived process attribution, CONNECT/CLOSE socket-cookie correlation, ACCEPT fallback correlation, and no fabricated ACCEPT cookie. The Milestone 0 regression/acceptance suite also passed.
+
+See [`ARM64_RUNTIME_VALIDATION.md`](ARM64_RUNTIME_VALIDATION.md) for the exact environment, commands, and observed acceptance results.
