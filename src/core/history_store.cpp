@@ -7,6 +7,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -44,6 +45,11 @@ std::string tcp_sample_hash(const TcpSnapshot& s) {
                       std::to_string(s.snd_ssthresh) + "|" + std::to_string(s.snd_mss) + "|" +
                       std::to_string(s.rcv_mss) + "|" + std::to_string(s.send_queue_bytes) + "|" +
                       std::to_string(s.recv_queue_bytes));
+}
+
+std::uint64_t capture_now_ns() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 TcpSnapshot sample_from_row(sqlite3_stmt* stmt) {
@@ -118,6 +124,7 @@ CREATE TABLE IF NOT EXISTS connections(
  lifecycle_state TEXT NOT NULL,
  first_seen_ns INTEGER NOT NULL,
  last_seen_ns INTEGER NOT NULL,
+ captured_at_ns INTEGER,
  performance_state TEXT NOT NULL DEFAULT 'INSUFFICIENT_EVIDENCE',
  trust_state TEXT NOT NULL DEFAULT 'UNVERIFIED',
  direction TEXT NOT NULL DEFAULT 'UNKNOWN',
@@ -252,6 +259,8 @@ CREATE TABLE IF NOT EXISTS verdicts(
                                   "direction TEXT NOT NULL DEFAULT 'UNKNOWN'");
     history_schema::ensure_column(db_, "connections", "network_namespace_inode",
                                   "network_namespace_inode INTEGER");
+    history_schema::ensure_column(db_, "connections", "captured_at_ns",
+                                  "captured_at_ns INTEGER");
     history_schema::ensure_column(db_, "routes", "relation",
                                   "relation TEXT NOT NULL DEFAULT 'UNKNOWN'");
     history_schema::ensure_column(db_, "lifecycle_events", "agent_pid", "agent_pid INTEGER");
@@ -299,7 +308,7 @@ std::int64_t HistoryStore::begin_connection(const SocketObservation& s,
                                             ConnectionDirection direction) {
     std::optional<std::int64_t> process_id;
     if (process) process_id = upsert_process(*process);
-    Statement stmt(db_, "INSERT INTO connections(socket_cookie,socket_inode,process_id,local_ip,local_port,remote_ip,remote_port,target_host,lifecycle_state,first_seen_ns,last_seen_ns,direction,network_namespace_inode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);");
+    Statement stmt(db_, "INSERT INTO connections(socket_cookie,socket_inode,process_id,local_ip,local_port,remote_ip,remote_port,target_host,lifecycle_state,first_seen_ns,last_seen_ns,captured_at_ns,direction,network_namespace_inode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);");
     sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(s.socket_cookie));
     sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(s.socket_inode));
     if (process_id) sqlite3_bind_int64(stmt.get(), 3, *process_id); else sqlite3_bind_null(stmt.get(), 3);
@@ -311,13 +320,14 @@ std::int64_t HistoryStore::begin_connection(const SocketObservation& s,
     sqlite3_bind_text(stmt.get(), 9, "ACTIVE", -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt.get(), 10, static_cast<sqlite3_int64>(first_seen_ns));
     sqlite3_bind_int64(stmt.get(), 11, static_cast<sqlite3_int64>(first_seen_ns));
+    sqlite3_bind_int64(stmt.get(), 12, static_cast<sqlite3_int64>(capture_now_ns()));
     const auto direction_text = to_string(direction);
-    sqlite3_bind_text(stmt.get(), 12, direction_text.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt.get(), 13, direction_text.c_str(), -1, SQLITE_TRANSIENT);
     if (s.network_namespace_inode) {
-        sqlite3_bind_int64(stmt.get(), 13,
+        sqlite3_bind_int64(stmt.get(), 14,
                            static_cast<sqlite3_int64>(*s.network_namespace_inode));
     } else {
-        sqlite3_bind_null(stmt.get(), 13);
+        sqlite3_bind_null(stmt.get(), 14);
     }
     stmt.step_done();
 
@@ -563,7 +573,7 @@ void HistoryStore::save_verdict(std::int64_t connection_id, const AssuranceVerdi
 }
 
 std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limit) const {
-    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id ORDER BY c.first_seen_ns DESC LIMIT ?;)SQL");
+    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,c.captured_at_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id ORDER BY c.first_seen_ns DESC LIMIT ?;)SQL");
     sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(limit));
     std::vector<ConnectionSummary> out;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
@@ -571,27 +581,30 @@ std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limi
         c.id = sqlite3_column_int64(stmt.get(), 0);
         c.first_seen_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 1));
         c.last_seen_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 2));
-        c.process.pid = sqlite3_column_int64(stmt.get(), 3);
-        c.process.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt.get(), 4));
-        if (sqlite3_column_type(stmt.get(), 5) != SQLITE_NULL) {
-            c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 5));
+        if (sqlite3_column_type(stmt.get(), 3) != SQLITE_NULL) {
+            c.captured_at_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 3));
         }
-        c.process.comm = text_col(stmt.get(), 6);
-        c.process.executable_path = text_col(stmt.get(), 7);
-        c.local_ip = text_col(stmt.get(), 8);
-        c.local_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 9));
-        c.remote_ip = text_col(stmt.get(), 10);
-        c.remote_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 11));
-        c.target_host = text_col(stmt.get(), 12);
-        c.lifecycle_state = text_col(stmt.get(), 13);
-        c.performance = performance_state_from_string(text_col(stmt.get(), 14));
-        c.trust = trust_state_from_string(text_col(stmt.get(), 15));
-        c.direction = connection_direction_from_string(text_col(stmt.get(), 16));
-        c.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 17));
-        c.socket_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 18));
-        if (sqlite3_column_type(stmt.get(), 19) != SQLITE_NULL) {
+        c.process.pid = sqlite3_column_int64(stmt.get(), 4);
+        c.process.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt.get(), 5));
+        if (sqlite3_column_type(stmt.get(), 6) != SQLITE_NULL) {
+            c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 6));
+        }
+        c.process.comm = text_col(stmt.get(), 7);
+        c.process.executable_path = text_col(stmt.get(), 8);
+        c.local_ip = text_col(stmt.get(), 9);
+        c.local_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 10));
+        c.remote_ip = text_col(stmt.get(), 11);
+        c.remote_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 12));
+        c.target_host = text_col(stmt.get(), 13);
+        c.lifecycle_state = text_col(stmt.get(), 14);
+        c.performance = performance_state_from_string(text_col(stmt.get(), 15));
+        c.trust = trust_state_from_string(text_col(stmt.get(), 16));
+        c.direction = connection_direction_from_string(text_col(stmt.get(), 17));
+        c.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 18));
+        c.socket_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 19));
+        if (sqlite3_column_type(stmt.get(), 20) != SQLITE_NULL) {
             c.network_namespace_inode = static_cast<std::uint64_t>(
-                sqlite3_column_int64(stmt.get(), 19));
+                sqlite3_column_int64(stmt.get(), 20));
         }
         out.push_back(std::move(c));
     }
@@ -599,34 +612,37 @@ std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limi
 }
 
 std::optional<ConnectionSummary> HistoryStore::connection(std::int64_t id) const {
-    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id WHERE c.id=?;)SQL");
+    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,c.captured_at_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id WHERE c.id=?;)SQL");
     sqlite3_bind_int64(stmt.get(), 1, id);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) return std::nullopt;
     ConnectionSummary c;
     c.id = sqlite3_column_int64(stmt.get(), 0);
     c.first_seen_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 1));
     c.last_seen_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 2));
-    c.process.pid = sqlite3_column_int64(stmt.get(), 3);
-    c.process.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt.get(), 4));
-    if (sqlite3_column_type(stmt.get(), 5) != SQLITE_NULL) {
-        c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 5));
+    if (sqlite3_column_type(stmt.get(), 3) != SQLITE_NULL) {
+        c.captured_at_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 3));
     }
-    c.process.comm = text_col(stmt.get(), 6);
-    c.process.executable_path = text_col(stmt.get(), 7);
-    c.local_ip = text_col(stmt.get(), 8);
-    c.local_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 9));
-    c.remote_ip = text_col(stmt.get(), 10);
-    c.remote_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 11));
-    c.target_host = text_col(stmt.get(), 12);
-    c.lifecycle_state = text_col(stmt.get(), 13);
-    c.performance = performance_state_from_string(text_col(stmt.get(), 14));
-    c.trust = trust_state_from_string(text_col(stmt.get(), 15));
-    c.direction = connection_direction_from_string(text_col(stmt.get(), 16));
-    c.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 17));
-    c.socket_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 18));
-    if (sqlite3_column_type(stmt.get(), 19) != SQLITE_NULL) {
+    c.process.pid = sqlite3_column_int64(stmt.get(), 4);
+    c.process.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt.get(), 5));
+    if (sqlite3_column_type(stmt.get(), 6) != SQLITE_NULL) {
+        c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 6));
+    }
+    c.process.comm = text_col(stmt.get(), 7);
+    c.process.executable_path = text_col(stmt.get(), 8);
+    c.local_ip = text_col(stmt.get(), 9);
+    c.local_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 10));
+    c.remote_ip = text_col(stmt.get(), 11);
+    c.remote_port = static_cast<std::uint16_t>(sqlite3_column_int(stmt.get(), 12));
+    c.target_host = text_col(stmt.get(), 13);
+    c.lifecycle_state = text_col(stmt.get(), 14);
+    c.performance = performance_state_from_string(text_col(stmt.get(), 15));
+    c.trust = trust_state_from_string(text_col(stmt.get(), 16));
+    c.direction = connection_direction_from_string(text_col(stmt.get(), 17));
+    c.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 18));
+    c.socket_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 19));
+    if (sqlite3_column_type(stmt.get(), 20) != SQLITE_NULL) {
         c.network_namespace_inode = static_cast<std::uint64_t>(
-            sqlite3_column_int64(stmt.get(), 19));
+            sqlite3_column_int64(stmt.get(), 20));
     }
     return c;
 }

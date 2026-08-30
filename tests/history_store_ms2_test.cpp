@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -60,6 +61,7 @@ INSERT INTO connections VALUES(1,77,88,1,'127.0.0.1',40000,'127.0.0.2',443,
         assert(connection->direction == neta::ConnectionDirection::Unknown);
         assert(connection->process.start_ticks == 123);
         assert(!connection->network_namespace_inode);
+        assert(!connection->captured_at_ns);
     }
     {
         neta::HistoryStore reopened(path);
@@ -84,10 +86,29 @@ void direction_and_missing_start_are_preserved() {
         process.pid = 9000;
         process.uid = 1000;
         process.comm = "missing-start";
+        constexpr std::uint64_t first_seen_ns = 1;
+        const auto before_capture = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
         const auto id = store.begin_connection(
-            socket, process, "", 1, neta::ConnectionDirection::Inbound);
+            socket, process, "", first_seen_ns, neta::ConnectionDirection::Inbound);
+        const auto after_capture = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
         const auto connection = store.connection(id);
         assert(connection);
+        assert(connection->first_seen_ns == first_seen_ns);
+        assert(connection->last_seen_ns == first_seen_ns);
+        assert(connection->captured_at_ns);
+        const auto captured_at_ns = *connection->captured_at_ns;
+        assert(captured_at_ns >= before_capture);
+        assert(captured_at_ns <= after_capture);
+        store.touch_connection(id, 999, "CLOSED");
+        const auto touched = store.connection(id);
+        assert(touched);
+        assert(touched->first_seen_ns == first_seen_ns);
+        assert(touched->last_seen_ns == 999);
+        assert(touched->captured_at_ns == captured_at_ns);
         assert(connection->direction == neta::ConnectionDirection::Inbound);
         assert(connection->network_namespace_inode == 42);
         assert(!connection->process.start_ticks);

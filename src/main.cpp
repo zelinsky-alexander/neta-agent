@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -29,6 +30,27 @@ std::filesystem::path default_db_path() { return "neta.db"; }
 std::uint64_t wall_now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+std::tm local_time(std::time_t timestamp) {
+    std::tm result{};
+    localtime_r(&timestamp, &result);
+    return result;
+}
+
+std::string format_capture_time(const std::optional<std::uint64_t>& timestamp_ns,
+                                bool include_timezone) {
+    if (!timestamp_ns) return include_timezone ? "UNKNOWN" : "-";
+    const auto timestamp = static_cast<std::time_t>(*timestamp_ns / 1'000'000'000ULL);
+    const auto local = local_time(timestamp);
+    std::ostringstream out;
+    out << std::put_time(&local, include_timezone ? "%Y-%m-%dT%H:%M:%S%z"
+                                                  : "%Y-%m-%d %H:%M:%S");
+    auto formatted = out.str();
+    if (include_timezone && formatted.size() >= 5) {
+        formatted.insert(formatted.size() - 2, ":");
+    }
+    return formatted;
 }
 
 std::string arg_value(int argc, char** argv, const std::string& key,
@@ -183,7 +205,9 @@ void cmd_history(int argc, char** argv) {
                       << json_escape(connection->local_ip) << ':' << connection->local_port
                       << "\",\"remote\":\"" << json_escape(connection->remote_ip) << ':'
                       << connection->remote_port << "\",\"target\":\""
-                      << json_escape(connection->target_host) << "\",\"direction\":\""
+                      << json_escape(connection->target_host) << "\",\"captured_at\":\""
+                      << format_capture_time(connection->captured_at_ns, true)
+                      << "\",\"direction\":\""
                       << to_string(connection->direction) << "\",\"performance\":\""
                       << to_string(connection->performance) << "\",\"trust\":\""
                       << to_string(connection->trust) << "\"}\n";
@@ -193,7 +217,9 @@ void cmd_history(int argc, char** argv) {
                       << connection->local_port << " -> " << connection->remote_ip << ':'
                       << connection->remote_port << "  " << to_string(connection->direction)
                       << "  " << to_string(connection->performance)
-                      << " / " << to_string(connection->trust) << "\n";
+                      << " / " << to_string(connection->trust)
+                      << "\nCaptured: " << format_capture_time(connection->captured_at_ns, false)
+                      << "\n";
         }
         return;
     }
@@ -207,16 +233,19 @@ void cmd_history(int argc, char** argv) {
             std::cout << "{\"id\":" << connection.id << ",\"process\":\""
                       << json_escape(connection.process.comm) << "\",\"remote\":\""
                       << json_escape(connection.remote_ip) << ':' << connection.remote_port
+                      << "\",\"captured_at\":\""
+                      << format_capture_time(connection.captured_at_ns, true)
                       << "\",\"direction\":\"" << to_string(connection.direction)
                       << "\",\"performance\":\"" << to_string(connection.performance)
                       << "\",\"trust\":\"" << to_string(connection.trust) << "\"}";
         }
         std::cout << "]\n";
     } else {
-        std::cout << "ID       PROCESS          DIRECTION  REMOTE                         PERF                  TRUST\n";
+        std::cout << "ID       PROCESS          CAPTURED             DIRECTION  REMOTE                         PERF                  TRUST\n";
         for (const auto& connection : rows) {
             std::cout << "CONN-" << std::left << std::setw(6) << connection.id
                       << std::setw(17) << connection.process.comm
+                      << std::setw(21) << format_capture_time(connection.captured_at_ns, false)
                       << std::setw(11) << to_string(connection.direction)
                       << std::setw(31) << (connection.remote_ip + ':' + std::to_string(connection.remote_port))
                       << std::setw(22) << to_string(connection.performance)

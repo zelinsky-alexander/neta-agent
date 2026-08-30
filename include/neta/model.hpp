@@ -124,6 +124,7 @@ struct ConnectionSummary {
     std::int64_t id{0};
     std::uint64_t first_seen_ns{0};
     std::uint64_t last_seen_ns{0};
+    std::optional<std::uint64_t> captured_at_ns;
     ConnectionDirection direction{ConnectionDirection::Unknown};
     std::uint64_t socket_cookie{0};
     std::uint64_t socket_inode{0};

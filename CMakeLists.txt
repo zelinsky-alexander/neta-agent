@@ -177,6 +177,12 @@ if(NETA_ENABLE_TESTS)
     add_test(NAME neta_ms1_ebpf_integration COMMAND neta_ms1_ebpf_integration)
     set_tests_properties(neta_ms1_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
 
+    add_executable(neta_history_cli_test tests/history_cli_test.cpp)
+    target_link_libraries(neta_history_cli_test PRIVATE neta_core)
+    target_compile_options(neta_history_cli_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_history_cli_test COMMAND neta_history_cli_test $<TARGET_FILE:neta-agent>)
+
     foreach(NETA_MS2_TEST IN ITEMS
             connection_direction
             connection_admission_policy
