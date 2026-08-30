@@ -17,6 +17,12 @@ jobs:
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Configure without eBPF
+        run: cmake -S . -B build-no-ebpf -G Ninja -DCMAKE_BUILD_TYPE=Debug -DNETA_EBPF=OFF
+      - name: Build without eBPF
+        run: cmake --build build-no-ebpf
+      - name: Test without eBPF
+        run: ctest --test-dir build-no-ebpf --output-on-failure
       - name: MS0 controlled TLS/netem acceptance
         run: bash tests/ms0_acceptance.sh ./build/neta-agent
       - name: CLI capability smoke
