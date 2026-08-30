@@ -1,4 +1,7 @@
 #include "neta/platform.hpp"
+#include "neta/connection_admission_policy.hpp"
+#include "neta/connection_tracker.hpp"
+#include "neta/history_store.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -9,6 +12,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -16,6 +20,31 @@
 #include <vector>
 
 namespace {
+
+class NoProcessResolver final : public neta::platform::ProcessResolver {
+public:
+    std::optional<neta::ProcessIdentity> resolve(std::uint64_t) override {
+        return std::nullopt;
+    }
+};
+
+class TemporaryDatabase {
+public:
+    TemporaryDatabase()
+        : path_(std::filesystem::temp_directory_path() /
+                ("neta-ms2-integration-" + std::to_string(::getpid()) + ".sqlite")) {
+        cleanup();
+    }
+    ~TemporaryDatabase() { cleanup(); }
+    const std::filesystem::path& path() const { return path_; }
+private:
+    void cleanup() const {
+        std::filesystem::remove(path_);
+        std::filesystem::remove(path_.string() + "-wal");
+        std::filesystem::remove(path_.string() + "-shm");
+    }
+    std::filesystem::path path_;
+};
 
 class Fd {
 public:
@@ -164,6 +193,7 @@ int main() {
         auto sockets = neta::platform::make_connection_observer()->snapshot();
         bool client_cookie_correlation = false;
         bool accept_fallback_correlation = false;
+        bool listener_classified = false;
         for (const auto& socket : sockets) {
             if (socket.socket_cookie == client_cookie && socket.remote_port == port) {
                 client_cookie_correlation = true;
@@ -171,6 +201,10 @@ int main() {
             if (socket.socket_cookie == accepted_cookie && socket.local_port == port &&
                 socket.remote_port == client_local_port) {
                 accept_fallback_correlation = true;
+            }
+            if (socket.local_port == port &&
+                socket.endpoint_kind == neta::TcpEndpointKind::Listener) {
+                listener_classified = true;
             }
         }
 
@@ -241,6 +275,106 @@ int main() {
 
         refresh_assertions();
 
+        bool ms2_outbound_tracked = false;
+        bool ms2_inbound_tracked = false;
+        bool ms2_accept_cookie_promoted = false;
+        bool ms2_outbound_enriched = false;
+        bool ms2_routes_correlated = false;
+        bool ms2_network_namespace_preserved = false;
+        bool ms2_listener_excluded = false;
+        bool ms2_close_finalized = false;
+        {
+            TemporaryDatabase database;
+            neta::HistoryStore store(database.path());
+            NoProcessResolver resolver;
+            auto route_observer = neta::platform::make_route_observer();
+            neta::ConnectionTracker tracker(store, resolver, "");
+            neta::AdmissionPolicyConfig policy_config;
+            policy_config.mode = neta::ObservationMode::All;
+            neta::ConnectionAdmissionPolicy policy(policy_config);
+            std::optional<std::int64_t> outbound_id;
+            std::optional<std::int64_t> inbound_id;
+
+            for (const auto& event : events) {
+                if (event.type == neta::ConnectionLifecycleEventType::Close ||
+                    event.process.agent_visible.tgid != ::getpid()) {
+                    continue;
+                }
+                const auto decision = policy.evaluate(event);
+                if (!decision.admit) continue;
+                const auto admission = tracker.observe_lifecycle(event, decision.direction);
+                if (!admission) continue;
+                if (admission->newly_admitted && event.remote) {
+                    if (auto route = route_observer->route_to(event.remote->address)) {
+                        route->relation = decision.direction == neta::ConnectionDirection::Outbound
+                            ? neta::RouteRelation::OutboundSelectedRoute
+                            : neta::RouteRelation::InboundResponseRoute;
+                        store.add_route(admission->connection_id, *route);
+                    }
+                }
+                if (event.type == neta::ConnectionLifecycleEventType::Connect &&
+                    event.socket_cookie == client_cookie) {
+                    outbound_id = admission->connection_id;
+                }
+                if (event.type == neta::ConnectionLifecycleEventType::Accept && event.local &&
+                    event.local->port == port && event.remote &&
+                    event.remote->port == client_local_port) {
+                    inbound_id = admission->connection_id;
+                }
+            }
+            for (const auto& socket : sockets) {
+                static_cast<void>(tracker.observe_socket(
+                    socket, neta::ConnectionDirection::Unknown, false));
+            }
+            for (const auto& event : events) {
+                if (event.type != neta::ConnectionLifecycleEventType::Close ||
+                    event.process.agent_visible.tgid != ::getpid()) {
+                    continue;
+                }
+                const auto decision = policy.evaluate(event);
+                static_cast<void>(tracker.observe_lifecycle(event, decision.direction));
+            }
+
+            if (outbound_id) {
+                const auto outbound = store.connection(*outbound_id);
+                ms2_outbound_tracked = outbound &&
+                    outbound->direction == neta::ConnectionDirection::Outbound &&
+                    outbound->process.pid == ::getpid() &&
+                    outbound->socket_cookie == client_cookie;
+                ms2_outbound_enriched =
+                    !store.samples_for_connection(*outbound_id).empty();
+            }
+            if (inbound_id) {
+                const auto inbound = store.connection(*inbound_id);
+                ms2_inbound_tracked = inbound &&
+                    inbound->direction == neta::ConnectionDirection::Inbound &&
+                    inbound->process.pid == ::getpid();
+                ms2_accept_cookie_promoted = inbound &&
+                    inbound->socket_cookie == accepted_cookie &&
+                    !store.samples_for_connection(*inbound_id).empty();
+            }
+            const auto persisted = store.recent_connections(20);
+            ms2_listener_excluded = listener_classified && persisted.size() == 4;
+            for (const auto& connection : persisted) {
+                ms2_listener_excluded = ms2_listener_excluded &&
+                    connection.lifecycle_state == "CLOSED" &&
+                    connection.remote_port != 0;
+            }
+            if (outbound_id && inbound_id) {
+                const auto outbound_route = store.route_for_connection(*outbound_id);
+                const auto inbound_route = store.route_for_connection(*inbound_id);
+                ms2_routes_correlated = outbound_route && inbound_route &&
+                    outbound_route->relation == neta::RouteRelation::OutboundSelectedRoute &&
+                    inbound_route->relation == neta::RouteRelation::InboundResponseRoute;
+                const auto outbound = store.connection(*outbound_id);
+                const auto inbound = store.connection(*inbound_id);
+                ms2_network_namespace_preserved = outbound && inbound &&
+                    outbound->network_namespace_inode && inbound->network_namespace_inode &&
+                    outbound->network_namespace_inode == inbound->network_namespace_inode;
+            }
+            ms2_close_finalized = tracker.connections().empty();
+        }
+
         std::cout << "client_connect_seen=" << client_connect_seen << '\n'
                   << "accept_seen=" << accept_seen << '\n'
                   << "client_close_seen=" << client_close_seen << '\n'
@@ -252,13 +386,27 @@ int main() {
                   << "short_lived_attributed=" << short_lived_attributed << '\n'
                   << "client_cookie_correlation=" << client_cookie_correlation << '\n'
                   << "accept_fallback_correlation=" << accept_fallback_correlation << '\n'
-                  << "accept_cookie_fabricated=" << accept_cookie_fabricated << '\n';
+                  << "accept_cookie_fabricated=" << accept_cookie_fabricated << '\n'
+                  << "ms2_outbound_tracked=" << ms2_outbound_tracked << '\n'
+                  << "ms2_inbound_tracked=" << ms2_inbound_tracked << '\n'
+                  << "ms2_accept_cookie_promoted=" << ms2_accept_cookie_promoted << '\n'
+                  << "ms2_outbound_enriched=" << ms2_outbound_enriched << '\n'
+                  << "ms2_routes_correlated=" << ms2_routes_correlated << '\n'
+                  << "ms2_network_namespace_preserved="
+                  << ms2_network_namespace_preserved << '\n'
+                  << "ms2_listener_excluded=" << ms2_listener_excluded << '\n'
+                  << "ms2_close_finalized=" << ms2_close_finalized << '\n';
 
         if (!client_connect_seen || !accept_seen || !client_close_seen ||
             !accepted_close_seen || !short_connect_seen || !short_accept_seen ||
             !short_client_close_seen || !short_accepted_close_seen ||
             !short_lived_attributed || !client_cookie_correlation ||
-            !accept_fallback_correlation || accept_cookie_fabricated) {
+            !accept_fallback_correlation || accept_cookie_fabricated ||
+            !ms2_outbound_tracked || !ms2_inbound_tracked ||
+            !ms2_accept_cookie_promoted || !ms2_outbound_enriched ||
+            !ms2_routes_correlated || !ms2_network_namespace_preserved ||
+            !ms2_listener_excluded ||
+            !ms2_close_finalized) {
             std::cerr << "MS1 eBPF integration assertions failed; events=" << events.size() << '\n'
                       << "integration process getpid()=" << ::getpid() << '\n'
                       << "client_cookie=" << client_cookie << '\n'

@@ -50,6 +50,7 @@ struct ConnectionLifecycleEvent {
     std::optional<std::uint64_t> network_namespace_inode;
     NetworkAddressFamily address_family{NetworkAddressFamily::Unknown};
     TransportProtocol protocol{TransportProtocol::Unknown};
+    TcpEndpointKind endpoint_kind{TcpEndpointKind::Unknown};
     std::optional<NetworkEndpoint> local;
     std::optional<NetworkEndpoint> remote;
     std::optional<std::uint64_t> socket_cookie;
@@ -62,6 +63,7 @@ struct LifecycleCapability {
     bool connect_events{false};
     bool accept_events{false};
     bool close_events{false};
+    bool drop_counter{false};
     std::string unavailable_reason;
 
     [[nodiscard]] bool available() const noexcept {
@@ -72,10 +74,19 @@ struct LifecycleCapability {
     }
 };
 
+struct LifecycleHealth {
+    std::optional<std::uint64_t> dropped_events;
+
+    [[nodiscard]] bool evidence_may_be_incomplete() const noexcept {
+        return dropped_events && *dropped_events != 0;
+    }
+};
+
 class LifecycleObserver {
 public:
     virtual ~LifecycleObserver() = default;
     [[nodiscard]] virtual const LifecycleCapability& capability() const noexcept = 0;
+    [[nodiscard]] virtual LifecycleHealth health() const = 0;
     virtual std::vector<ConnectionLifecycleEvent> poll(std::chrono::milliseconds timeout) = 0;
 };
 

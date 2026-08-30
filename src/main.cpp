@@ -1,12 +1,10 @@
 #include "neta/crypto.hpp"
+#include "neta/cli/observation_command.hpp"
+#include "neta/cli/observation_options.hpp"
 #include "neta/history_store.hpp"
-#include "neta/observation_session.hpp"
 #include "neta/platform.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/verdict.hpp"
-
-#include <arpa/inet.h>
-#include <netdb.h>
 
 #include <algorithm>
 #include <chrono>
@@ -20,22 +18,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
-#include <csignal>
 
 namespace {
 
 using namespace neta;
-
-volatile std::sig_atomic_t g_stop_requested = 0;
-void handle_stop_signal(int) { g_stop_requested = 1; }
-
-void finalize_observe_cmd(const std::vector<std::int64_t>& connection_ids,
-                        HistoryStore& store,
-                        const std::optional<Baseline>& baseline,
-                        const std::optional<TlsObservation>& tls,
-                        std::optional<std::int64_t> tls_id);
 
 std::filesystem::path default_db_path() { return "neta.db"; }
 
@@ -57,44 +44,6 @@ bool has_arg(int argc, char** argv, const std::string& key) {
         if (argv[i] == key) return true;
     }
     return false;
-}
-
-ObservationTarget parse_target(const std::string& value) {
-    if (value.empty()) throw std::runtime_error("--target host:port is required");
-    ObservationTarget target;
-    const auto pos = value.rfind(':');
-    if (pos == std::string::npos) {
-        target.host = value;
-        target.port = 443;
-    } else {
-        target.host = value.substr(0, pos);
-        target.port = static_cast<std::uint16_t>(std::stoul(value.substr(pos + 1)));
-    }
-
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* result = nullptr;
-    const auto service = std::to_string(target.port);
-    const int rc = getaddrinfo(target.host.c_str(), service.c_str(), &hints, &result);
-    if (rc != 0) {
-        throw std::runtime_error("target resolution failed: " + std::string(gai_strerror(rc)));
-    }
-
-    for (auto* ai = result; ai; ai = ai->ai_next) {
-        char buffer[INET6_ADDRSTRLEN]{};
-        const void* address = nullptr;
-        if (ai->ai_family == AF_INET) {
-            address = &reinterpret_cast<sockaddr_in*>(ai->ai_addr)->sin_addr;
-        } else if (ai->ai_family == AF_INET6) {
-            address = &reinterpret_cast<sockaddr_in6*>(ai->ai_addr)->sin6_addr;
-        }
-        if (address && inet_ntop(ai->ai_family, address, buffer, sizeof(buffer))) {
-            target.addresses.insert(buffer);
-        }
-    }
-    freeaddrinfo(result);
-    return target;
 }
 
 std::uint64_t median(std::vector<std::uint64_t> values) {
@@ -167,11 +116,13 @@ bool json_bool_value(const std::string& text, const std::string& key) {
 }
 
 void print_usage() {
-    std::cout << R"USAGE(neta-agent Milestone 1
+    std::cout << R"USAGE(neta-agent Milestone 2
 
 Usage:
   neta-agent capabilities
   neta-agent observe --target host:port [--duration 30] [--poll-ms interval] [--db neta.db] [--ca file] [--max-db-mb 200]
+  neta-agent observe --outbound|--inbound|--all [--local-port port] [--remote-port port] [--process name] [--exclude-process name] [--duration 30] [--db neta.db]
+  neta-agent run [--outbound|--inbound|--all] [filters] [--db neta.db] [--max-db-mb 200]
   neta-agent history [--limit 50] [--db neta.db] [--json]
   neta-agent history show ID [--db neta.db] [--json]
   neta-agent baseline capture --target host:port [--db neta.db] [--ca file]
@@ -202,6 +153,10 @@ void cmd_capabilities() {
               << "TCP connect events         " << (capabilities.ebpf_connect_events ? "YES" : "NO") << "\n"
               << "TCP accept events          " << (capabilities.ebpf_accept_events ? "YES" : "NO") << "\n"
               << "TCP close events           " << (capabilities.ebpf_close_events ? "YES" : "NO") << "\n"
+              << "Exact lifecycle direction " << (capabilities.exact_lifecycle_direction ? "YES" : "NO") << "\n"
+              << "Lifecycle loss counter    " << (capabilities.lifecycle_drop_counter ? "YES" : "NO") << "\n"
+              << "Lifecycle dropped events  " << (capabilities.lifecycle_dropped_events
+                  ? std::to_string(*capabilities.lifecycle_dropped_events) : "UNAVAILABLE") << "\n"
               << "Exact TLS identity         " << (capabilities.exact_tls_observation ? "YES" : "NO (active probe is SUPPORTING)") << "\n"
               << "Exact DNS attribution      " << (capabilities.exact_dns_observation ? "YES" : "NO") << "\n";
     if (!capabilities.connection_lifecycle_events) {
@@ -211,79 +166,6 @@ void cmd_capabilities() {
                   << (outbound_lifecycle ? "OUTBOUND eBPF (partial)" : "POLLING") << "\n"
                   << "Lifecycle unavailable      "
                   << capabilities.lifecycle_unavailable_reason << "\n";
-    }
-}
-
-void cmd_observe(int argc, char** argv) {
-    g_stop_requested = 0;
-    const auto previous_sigint = std::signal(SIGINT, handle_stop_signal);
-    const auto previous_sigterm = std::signal(SIGTERM, handle_stop_signal);
-    const auto db = arg_value(argc, argv, "--db", default_db_path().string());
-    const auto target = parse_target(arg_value(argc, argv, "--target"));
-    const auto ca = arg_value(argc, argv, "--ca");
-    const int duration = std::stoi(arg_value(argc, argv, "--duration", "30"));
-    const auto requested_poll_ms = arg_value(argc, argv, "--poll-ms");
-    const auto max_db_mb = std::stoull(arg_value(argc, argv, "--max-db-mb", "200"));
-
-    HistoryStore store(db);
-    store.prune_to_budget(max_db_mb * 1024ULL * 1024ULL);
-    auto observer = platform::make_connection_observer();
-    auto resolver = platform::make_process_resolver();
-    auto route = platform::make_route_observer();
-
-    std::optional<TlsObservation> tls;
-    std::optional<std::int64_t> tls_id;
-    try {
-        tls = TlsProbe{}.probe(target.host, target.port, ca);
-        tls_id = store.add_tls(*tls);
-    } catch (const std::exception& error) {
-        std::cerr << "TLS supporting probe unavailable: " << error.what() << "\n";
-    }
-    const auto baseline = store.baseline_for(target.host, target.port);
-    auto lifecycle = platform::make_lifecycle_observer();
-    const bool lifecycle_active = lifecycle->capability().outbound_available();
-    const int poll_ms = std::stoi(requested_poll_ms.empty()
-        ? (lifecycle_active ? "1000" : "100") : requested_poll_ms);
-    if (duration < 0 || poll_ms <= 0) throw std::runtime_error("duration and poll interval must be positive");
-    if (!lifecycle_active) {
-        std::cerr << "Lifecycle eBPF unavailable; using polling discovery: "
-                  << lifecycle->capability().unavailable_reason << "\n";
-    }
-
-    ObservationSession session(store, *observer, *lifecycle, *resolver, *route, target);
-    const auto result = session.run(std::chrono::seconds(duration),
-                                    std::chrono::milliseconds(poll_ms),
-                                    [] { return g_stop_requested != 0; });
-
-    finalize_observe_cmd(result.connection_ids, store, baseline, tls, tls_id);
-
-    store.prune_to_budget(max_db_mb * 1024ULL * 1024ULL);
-
-    std::signal(SIGINT, previous_sigint);
-    std::signal(SIGTERM, previous_sigterm);
-
-    std::cout << "Observed " << result.admitted_connections
-              << " matching connection(s). History: " << db << "\n";
-}
-
-void finalize_observe_cmd(const std::vector<std::int64_t>& connection_ids,
-                        HistoryStore& store,
-                        const std::optional<Baseline>& baseline,
-                        const std::optional<TlsObservation>& tls,
-                        std::optional<std::int64_t> tls_id)
-{
-    for (const auto connection_id : connection_ids) {
-        if (baseline) {
-            const auto samples = store.samples_for_connection(connection_id);
-
-            const auto verdict =
-                evaluate(
-                    *baseline,
-                    aggregate_metrics(samples),
-                    tls);
-
-            store.save_verdict(connection_id, verdict, tls_id);
-        }
     }
 }
 
@@ -301,14 +183,16 @@ void cmd_history(int argc, char** argv) {
                       << json_escape(connection->local_ip) << ':' << connection->local_port
                       << "\",\"remote\":\"" << json_escape(connection->remote_ip) << ':'
                       << connection->remote_port << "\",\"target\":\""
-                      << json_escape(connection->target_host) << "\",\"performance\":\""
+                      << json_escape(connection->target_host) << "\",\"direction\":\""
+                      << to_string(connection->direction) << "\",\"performance\":\""
                       << to_string(connection->performance) << "\",\"trust\":\""
                       << to_string(connection->trust) << "\"}\n";
         } else {
             std::cout << "CONN-" << connection->id << "  " << connection->process.comm << '['
                       << connection->process.pid << "]  " << connection->local_ip << ':'
                       << connection->local_port << " -> " << connection->remote_ip << ':'
-                      << connection->remote_port << "  " << to_string(connection->performance)
+                      << connection->remote_port << "  " << to_string(connection->direction)
+                      << "  " << to_string(connection->performance)
                       << " / " << to_string(connection->trust) << "\n";
         }
         return;
@@ -323,15 +207,17 @@ void cmd_history(int argc, char** argv) {
             std::cout << "{\"id\":" << connection.id << ",\"process\":\""
                       << json_escape(connection.process.comm) << "\",\"remote\":\""
                       << json_escape(connection.remote_ip) << ':' << connection.remote_port
+                      << "\",\"direction\":\"" << to_string(connection.direction)
                       << "\",\"performance\":\"" << to_string(connection.performance)
                       << "\",\"trust\":\"" << to_string(connection.trust) << "\"}";
         }
         std::cout << "]\n";
     } else {
-        std::cout << "ID       PROCESS          REMOTE                         PERF                  TRUST\n";
+        std::cout << "ID       PROCESS          DIRECTION  REMOTE                         PERF                  TRUST\n";
         for (const auto& connection : rows) {
             std::cout << "CONN-" << std::left << std::setw(6) << connection.id
                       << std::setw(17) << connection.process.comm
+                      << std::setw(11) << to_string(connection.direction)
                       << std::setw(31) << (connection.remote_ip + ':' + std::to_string(connection.remote_port))
                       << std::setw(22) << to_string(connection.performance)
                       << to_string(connection.trust) << "\n";
@@ -341,7 +227,7 @@ void cmd_history(int argc, char** argv) {
 
 void cmd_baseline(int argc, char** argv) {
     if (argc < 3) throw std::runtime_error("baseline requires capture or show");
-    const auto target = parse_target(arg_value(argc, argv, "--target"));
+    const auto target = cli::resolve_observation_target(arg_value(argc, argv, "--target"));
     HistoryStore store(arg_value(argc, argv, "--db", default_db_path().string()));
 
     if (std::string(argv[2]) == "show") {
@@ -365,8 +251,10 @@ void cmd_baseline(int argc, char** argv) {
     std::vector<std::uint64_t> rtts;
     std::vector<std::uint64_t> rttvars;
     for (const auto& sample : samples) {
-        if (sample.rtt_us) rtts.push_back(sample.rtt_us);
-        if (sample.rtt_variance_us) rttvars.push_back(sample.rtt_variance_us);
+        if (sample.rtt_us) {
+            rtts.push_back(sample.rtt_us);
+            if (sample.rtt_variance_us) rttvars.push_back(sample.rtt_variance_us);
+        }
     }
     if (rtts.empty()) throw std::runtime_error("samples contain no RTT evidence");
 
@@ -407,6 +295,11 @@ void cmd_evidence(int argc, char** argv) {
               << '[' << data.connection.process.pid << "]\n"
               << "  Path: " << data.connection.local_ip << ':' << data.connection.local_port
               << " -> " << data.connection.remote_ip << ':' << data.connection.remote_port << "\n"
+              << "  Direction: " << to_string(data.connection.direction) << "\n"
+              << "  Network namespace: "
+              << (data.connection.network_namespace_inode
+                  ? std::to_string(*data.connection.network_namespace_inode) : "<unavailable>")
+              << "\n"
               << "  Lifecycle: " << data.connection.lifecycle_state << "\n\n";
 
     std::cout << "Lifecycle observations (eBPF observation, not verdict): "
@@ -464,6 +357,7 @@ void cmd_evidence(int argc, char** argv) {
     if (data.route) {
         const auto& route = *data.route;
         std::cout << "\nRoute (STRONGLY_CORRELATED)\n"
+                  << "  Relation:    " << to_string(route.relation) << '\n'
                   << "  Destination: " << route.destination << '\n'
                   << "  Source:      " << route.source << '\n'
                   << "  Gateway:     " << (route.gateway.empty() ? "<direct>" : route.gateway) << '\n'
@@ -505,6 +399,7 @@ void cmd_explain(int argc, char** argv) {
               << data.connection.process.comm << '[' << data.connection.process.pid << "]\n"
               << data.connection.local_ip << ':' << data.connection.local_port << " -> "
               << data.connection.remote_ip << ':' << data.connection.remote_port
+              << "\nDirection: " << to_string(data.connection.direction)
               << "\n\nPerformance: " << to_string(data.verdict->performance)
               << "\nHypothesis: "
               << (data.verdict->performance_hypothesis.empty() ? "none" : data.verdict->performance_hypothesis)
@@ -532,7 +427,8 @@ void cmd_export(int argc, char** argv) {
     }
     const auto metrics = aggregate_metrics(data.samples);
 
-    std::cout << "{\n  \"schema_version\":1,\n  \"connection_id\":" << id
+    std::cout << "{\n  \"schema_version\":2,\n  \"connection_id\":" << id
+              << ",\n  \"direction\":\"" << to_string(data.connection.direction) << "\""
               << ",\n  \"target_host\":\"" << json_escape(data.connection.target_host)
               << "\",\n  \"target_port\":" << data.connection.remote_port
               << ",\n  \"performance\":\"" << to_string(data.verdict->performance)
@@ -611,8 +507,11 @@ void cmd_replay(int argc, char** argv) {
     const auto original_trust = json_string_value(text, "trust");
     const auto original_rule_hash = json_string_value(text, "rule_set_hash");
     const auto original_input_hash = json_string_value(text, "input_hash");
+    const auto direction = connection_direction_from_string(
+        json_string_value(text, "direction"));
 
-    std::cout << "Original Performance/Trust: " << original_performance << " / " << original_trust
+    std::cout << "Connection direction:       " << to_string(direction) << "\n"
+              << "Original Performance/Trust: " << original_performance << " / " << original_trust
               << "\nReplay Performance/Trust:   " << to_string(replay.performance) << " / "
               << to_string(replay.trust)
               << "\nEvidence input hash:        "
@@ -651,7 +550,8 @@ int main(int argc, char** argv) {
         }
         const std::string command = argv[1];
         if (command == "capabilities") cmd_capabilities();
-        else if (command == "observe") cmd_observe(argc, argv);
+        else if (command == "observe") cli::run_observation_command(argc, argv, false);
+        else if (command == "run") cli::run_observation_command(argc, argv, true);
         else if (command == "history") cmd_history(argc, argv);
         else if (command == "baseline") cmd_baseline(argc, argv);
         else if (command == "evidence") cmd_evidence(argc, argv);

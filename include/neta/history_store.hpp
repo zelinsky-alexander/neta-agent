@@ -43,14 +43,18 @@ public:
     std::int64_t begin_connection(const SocketObservation& socket,
                                   const std::optional<ProcessIdentity>& process,
                                   const std::string& target_host,
-                                  std::uint64_t first_seen_ns);
+                                  std::uint64_t first_seen_ns,
+                                  ConnectionDirection direction = ConnectionDirection::Unknown);
     void touch_connection(std::int64_t connection_id, std::uint64_t last_seen_ns,
                           const std::string& lifecycle_state);
+    [[nodiscard]] bool update_socket_cookie(std::int64_t connection_id,
+                                            std::uint64_t socket_cookie);
     std::int64_t add_tcp_sample(std::int64_t connection_id, const TcpSnapshot& sample);
-    std::int64_t add_lifecycle_event(std::int64_t connection_id,
-                                     const ConnectionLifecycleEvent& event);
+    void add_lifecycle_event(std::int64_t connection_id,
+                             const ConnectionLifecycleEvent& event);
     std::int64_t add_route(std::int64_t connection_id, const RouteObservation& route);
     std::int64_t add_tls(const TlsObservation& tls);
+    void link_tls_observation(std::int64_t connection_id, std::int64_t tls_id);
     void save_baseline(const Baseline& baseline);
     std::optional<Baseline> baseline_for(const std::string& target_host,
                                          std::uint16_t target_port) const;

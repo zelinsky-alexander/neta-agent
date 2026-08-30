@@ -110,14 +110,25 @@ endif()
 
 add_library(neta_core
     src/core/model.cpp
+    src/core/connection_direction.cpp
+    src/core/route_semantics.cpp
+    src/core/tcp_state.cpp
     src/core/lifecycle.cpp
     src/core/crypto.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/history_store.cpp
+    src/core/history_schema.cpp
+    src/core/history_maintenance.cpp
     src/core/connection_admission.cpp
+    src/core/connection_filter.cpp
+    src/core/connection_admission_policy.cpp
     src/core/connection_tracker.cpp
     src/core/observation_session.cpp
+    src/core/evidence_scheduler.cpp
+    src/core/storage_maintenance.cpp
+    src/cli/observation_options.cpp
+    src/cli/observation_command.cpp
     ${NETA_PLATFORM_SOURCES}
 )
 
@@ -165,4 +176,22 @@ if(NETA_ENABLE_TESTS)
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME neta_ms1_ebpf_integration COMMAND neta_ms1_ebpf_integration)
     set_tests_properties(neta_ms1_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
+
+    foreach(NETA_MS2_TEST IN ITEMS
+            connection_direction
+            connection_admission_policy
+            connection_tracker
+            evidence_scheduler
+            history_store_ms2
+            lifecycle_health
+            observation_options
+            observation_session
+            resource_churn
+            storage_maintenance)
+        add_executable(neta_${NETA_MS2_TEST}_test tests/${NETA_MS2_TEST}_test.cpp)
+        target_link_libraries(neta_${NETA_MS2_TEST}_test PRIVATE neta_core)
+        target_compile_options(neta_${NETA_MS2_TEST}_test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        add_test(NAME neta_${NETA_MS2_TEST}_test COMMAND neta_${NETA_MS2_TEST}_test)
+    endforeach()
 endif()

@@ -65,6 +65,14 @@ public:
 
     const LifecycleCapability& capability() const noexcept override { return capability_; }
 
+    LifecycleHealth health() const override {
+        if (drop_map_fd_ < 0) return {};
+        const std::uint32_t key = 0;
+        std::uint64_t dropped = 0;
+        if (bpf_map_lookup_elem(drop_map_fd_, &key, &dropped) != 0) return {};
+        return LifecycleHealth{dropped};
+    }
+
     std::vector<ConnectionLifecycleEvent> poll(std::chrono::milliseconds timeout) override {
         pending_.clear();
         const auto bounded = std::min<std::int64_t>(
@@ -107,6 +115,11 @@ private:
             throw std::runtime_error("configuring lifecycle PID namespace failed: " +
                                      std::string(std::strerror(errno)));
         }
+        drop_map_fd_ = bpf_object__find_map_fd_by_name(object_, "lifecycle_drops");
+        if (drop_map_fd_ < 0) {
+            throw std::runtime_error("embedded lifecycle drop counter map is missing");
+        }
+        capability_.drop_counter = true;
 
         bool ipv4_connect_attached = false;
         bool ipv6_connect_attached = false;
@@ -175,6 +188,7 @@ private:
     bpf_object* object_{nullptr};
     std::vector<bpf_link*> links_;
     ring_buffer* ring_{nullptr};
+    int drop_map_fd_{-1};
     std::vector<ConnectionLifecycleEvent> pending_;
 };
 
@@ -186,6 +200,7 @@ public:
         capability_.unavailable_reason = std::move(reason);
     }
     const LifecycleCapability& capability() const noexcept override { return capability_; }
+    LifecycleHealth health() const override { return {}; }
     std::vector<ConnectionLifecycleEvent> poll(std::chrono::milliseconds) override { return {}; }
 private:
     LifecycleCapability capability_;

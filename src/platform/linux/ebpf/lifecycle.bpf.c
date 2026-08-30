@@ -20,6 +20,22 @@ struct {
     __type(value, struct neta_lifecycle_config);
 } lifecycle_config SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} lifecycle_drops SEC(".maps");
+
+static __always_inline void record_drop(void)
+{
+    const __u32 key = 0;
+    __u64 *counter = bpf_map_lookup_elem(&lifecycle_drops, &key);
+
+    if (counter)
+        __sync_fetch_and_add(counter, 1);
+}
+
 static __always_inline void fill_process(struct neta_lifecycle_wire_event *event)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -99,8 +115,10 @@ static __always_inline int emit(struct sock *sk, __u8 type, __u64 socket_cookie)
     struct neta_lifecycle_wire_event *event;
 
     event = bpf_ringbuf_reserve(&lifecycle_events, sizeof(*event), 0);
-    if (!event)
+    if (!event) {
+        record_drop();
         return 0;
+    }
     __builtin_memset(event, 0, sizeof(*event));
     event->version = NETA_LIFECYCLE_WIRE_VERSION;
     event->size = sizeof(*event);

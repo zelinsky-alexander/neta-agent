@@ -2,7 +2,7 @@
 
 **Endpoint connection assurance agent for per-connection performance, trust, and replayable evidence-based diagnostics.**
 
-`neta-agent` observes real endpoint TCP connections without proxying or redirecting application traffic. Milestone 1 adds optional CO-RE eBPF connect/accept/close lifecycle observation while retaining `NETLINK_SOCK_DIAG` / `INET_DIAG_INFO` as the exact detailed TCP-state collector. The on-demand Linux agent records sparse bounded evidence in SQLite, performs a separate supporting TLS identity probe, compares observations with an explicitly accepted baseline, and produces deterministic Performance + Trust verdicts that can be exported and replayed.
+`neta-agent` observes real endpoint TCP connections without proxying or redirecting application traffic. Milestone 2 uses CO-RE eBPF connect/accept/close lifecycle evidence to observe eligible outbound and inbound connections while retaining `NETLINK_SOCK_DIAG` / `INET_DIAG_INFO` as the exact detailed TCP-state collector. Target mode keeps its polling fallback and deterministic baseline/verdict/replay behavior.
 
 ## POC1 principles
 
@@ -15,7 +15,7 @@
 - **Cross-platform architecture, Linux implementation.** Platform-neutral model/storage/verdict interfaces are separated from `src/platform/linux/`.
 - **Single-binary deployment target.** The compiled BPF object is embedded in the executable; no runtime `.bpf.o`, script, Python process, or companion daemon is required.
 
-Milestone 1 intentionally excludes full inbound assurance/product mode, packet capture, HTTP inspection, DNS interception, QUIC, service mode, Windows/macOS, and the other later-roadmap features.
+Milestone 2 intentionally excludes packet capture, HTTP inspection, DNS interception, exact inbound TLS/client identity, QUIC, Windows/macOS, and later-roadmap features.
 
 ## Dependencies
 
@@ -59,7 +59,7 @@ A fully static Linux release should preferably be produced with a musl-based too
 Check evidence capabilities:
 
 ```bash
-./build/neta-agent capabilities
+sudo ./build/neta-agent capabilities
 ```
 
 Observe a controlled target for 30 seconds while you create real traffic from another terminal:
@@ -88,6 +88,8 @@ When lifecycle eBPF loads successfully, new target connections are admitted from
 ```text
 neta-agent capabilities
 neta-agent observe --target host:port [--duration 30] [--poll-ms interval] [--db neta.db]
+neta-agent observe --outbound|--inbound|--all [--local-port port] [--remote-port port] [--process name] [--exclude-process name]
+neta-agent run [--outbound|--inbound|--all] [filters] [--db neta.db]
 neta-agent history [--limit 50] [--json]
 neta-agent history show ID [--json]
 neta-agent baseline capture --target host:port [--ca file]

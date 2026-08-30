@@ -384,6 +384,8 @@ The target behavior is matching:
 ```text
 neta-agent capabilities
 neta-agent observe --target host:port [--duration] [--poll-ms] [--db]
+neta-agent observe --outbound|--inbound|--all [filters] [--duration] [--db]
+neta-agent run [--outbound|--inbound|--all] [filters] [--db]
 neta-agent history [--limit] [--json] [--db]
 neta-agent history show ID [--json] [--db]
 neta-agent baseline capture --target host:port [--ca] [--db]
@@ -433,11 +435,12 @@ When runtime eBPF is unavailable, SOCK_DIAG polling retains the MS0 limitation: 
 
 A `/proc` inode-to-process match only works while the process still exposes the socket fd. Event-time PID/TGID/UID/comm now covers this race when lifecycle eBPF is active; the limitation remains on the fallback path.
 
-### Target-scoped and outbound-only in POC1
+### Direction capability requires lifecycle evidence
 
-POC1 does not yet observe all endpoint traffic. `--target` is required, and the current matching model observes local processes connecting outbound to the configured remote target.
-
-**Inbound connection assurance is a required later capability, not an excluded product scope.** It is explicitly required by Milestone 2 after Linux lifecycle attribution has been strengthened.
+MS2 supports target, outbound, inbound, and bidirectional all-connection modes.
+Direction-specific modes require the corresponding eBPF lifecycle hooks and
+fail explicitly when they are unavailable. Target mode retains polling fallback;
+connections discovered only through SOCK_DIAG have UNKNOWN direction.
 
 ### TLS evidence is not exact application-session identity
 
@@ -556,7 +559,7 @@ Required behavior:
 - do not reuse the current outbound active TLS probe as if it were exact evidence for an inbound application's TLS session
 - preserve bounded CPU, RAM, and SQLite behavior when both traffic directions are enabled
 
-Planned CLI/operation model:
+Implemented CLI/operation model:
 
 ```text
 neta-agent observe --target host:443              # current targeted outbound mode
@@ -568,20 +571,26 @@ neta-agent run                                     # optional long-lived service
 
 Exact CLI spelling may evolve, but explicit direction selection and a truly bidirectional `--all` mode are requirements.
 
-Planned controls:
+Implemented controls include direction, local/remote port, process
+include/exclude, periodic sampling, lifecycle-loss reporting, bounded tracker
+state, and periodic anomaly-first database maintenance. CIDR filters,
+anomaly-triggered evidence bursts, listener inventory, and systemd packaging
+remain planned rather than being folded into an oversized MS2 implementation.
 
-- include/exclude process
-- local/remote CIDR and port filters
-- direction filters
+Additional future controls:
+
+- local/remote CIDR filters
 - service/listener filters for inbound workloads
-- adaptive sampling
 - anomaly-triggered higher-resolution evidence bursts
-- strict CPU/RAM/DB budgets
 - service/systemd integration while preserving the single-binary design
 
 On-demand mode remains supported even after service mode exists.
 
 Exit criterion: on native Linux, `neta-agent` can concurrently observe a controlled outbound client connection and an accepted inbound server connection, attribute each to the correct local process, label direction correctly, persist bounded transport/route evidence for both, and avoid treating the listening socket itself as a normal connection-history entry.
+
+The deterministic MS2 session and bounded-churn coverage pass. A fresh
+privileged kernel-path run remains required on a host that grants BPF authority;
+the 2026-08-30 restricted WSL execution environment denied BPF loading.
 
 ### Milestone 3 — Stronger connection identity and exact application context where available
 

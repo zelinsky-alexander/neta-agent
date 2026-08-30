@@ -47,6 +47,11 @@ std::uint64_t steady_now_ns() {
 
 class LinuxConnectionObserver final : public ConnectionObserver {
 public:
+    LinuxConnectionObserver() {
+        const auto inode = host_environment().network_namespace_inode;
+        if (inode != 0) network_namespace_inode_ = inode;
+    }
+
     std::vector<SocketObservation> snapshot() override {
         std::vector<SocketObservation> result;
         collect(AF_INET, result);
@@ -106,6 +111,7 @@ private:
 
                 const auto* diag = reinterpret_cast<const inet_diag_msg*>(NLMSG_DATA(nlh));
                 SocketObservation item;
+                item.network_namespace_inode = network_namespace_inode_;
                 item.local_ip = address_to_string(diag->idiag_family, diag->id.idiag_src);
                 item.remote_ip = address_to_string(diag->idiag_family, diag->id.idiag_dst);
                 item.local_port = ntohs(diag->id.idiag_sport);
@@ -116,6 +122,18 @@ private:
                                      (static_cast<std::uint64_t>(diag->id.idiag_cookie[1]) << 32U);
                 item.transport.observed_ns = steady_now_ns();
                 item.transport.state = diag->idiag_state;
+                switch (diag->idiag_state) {
+                    case TCP_LISTEN:
+                        item.endpoint_kind = TcpEndpointKind::Listener;
+                        break;
+                    case TCP_TIME_WAIT:
+                    case TCP_CLOSE:
+                        item.endpoint_kind = TcpEndpointKind::LifecycleTail;
+                        break;
+                    default:
+                        item.endpoint_kind = TcpEndpointKind::Connection;
+                        break;
+                }
                 item.transport.send_queue_bytes = diag->idiag_wqueue;
                 item.transport.recv_queue_bytes = diag->idiag_rqueue;
 
@@ -139,20 +157,11 @@ private:
             }
         }
     }
+
+    std::optional<std::uint64_t> network_namespace_inode_;
 };
 
 } // namespace
-
-bool eligible_for_new_connection(const SocketObservation& socket) {
-    switch (socket.transport.state) {
-        case TCP_TIME_WAIT:
-        case TCP_CLOSE:
-        case TCP_LISTEN:
-            return false;
-        default:
-            return true;
-    }
-}
 
 std::unique_ptr<ConnectionObserver> make_connection_observer() {
     return std::make_unique<LinuxConnectionObserver>();

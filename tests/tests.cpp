@@ -60,6 +60,7 @@ SocketObservation make_socket(std::uint64_t index, std::uint64_t observed_ns) {
     socket.local_port = static_cast<std::uint16_t>(10'000 + (index % 40'000));
     socket.remote_ip = "127.0.0.2";
     socket.remote_port = 443;
+    socket.endpoint_kind = TcpEndpointKind::Connection;
     socket.transport.observed_ns = observed_ns;
     socket.transport.state = 1;
     socket.transport.rtt_us = 30'000;

@@ -3,6 +3,7 @@
 #include "lifecycle_wire.h"
 
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 
 #include <array>
@@ -57,6 +58,12 @@ DecodeResult decode_lifecycle_event(std::span<const std::byte> bytes) {
     event.protocol = wire.protocol == IPPROTO_TCP ? TransportProtocol::Tcp :
                                                    TransportProtocol::Unknown;
     event.tcp_state = wire.tcp_state;
+    switch (wire.tcp_state) {
+        case TCP_LISTEN: event.endpoint_kind = TcpEndpointKind::Listener; break;
+        case TCP_TIME_WAIT:
+        case TCP_CLOSE: event.endpoint_kind = TcpEndpointKind::LifecycleTail; break;
+        default: event.endpoint_kind = TcpEndpointKind::Connection; break;
+    }
 
     if ((wire.availability & NETA_HAS_KERNEL_PID) != 0U) {
         event.process.kernel.pid = static_cast<std::int64_t>(wire.kernel_pid);

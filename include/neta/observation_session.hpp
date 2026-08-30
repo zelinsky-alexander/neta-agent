@@ -1,11 +1,14 @@
 #pragma once
 
 #include "neta/history_store.hpp"
+#include "neta/connection_admission_policy.hpp"
+#include "neta/storage_maintenance.hpp"
 #include "neta/platform.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -31,22 +34,24 @@ public:
                        LifecycleObserver& lifecycle_observer,
                        platform::ProcessResolver& process_resolver,
                        platform::RouteObserver& route_observer,
-                       ObservationTarget target);
+                       ConnectionAdmissionPolicy admission_policy,
+                       std::string target_label,
+                       StorageMaintenance* storage_maintenance = nullptr);
 
-    ObservationRunResult run(std::chrono::seconds duration,
+    ObservationRunResult run(std::optional<std::chrono::seconds> duration,
                              std::chrono::milliseconds transport_poll_interval,
-                             const std::function<bool()>& stop_requested);
+                             const std::function<bool()>& stop_requested,
+                             const std::function<void()>& observation_started = {});
 
 private:
-    bool matches_target(const SocketObservation& socket) const;
-    bool matches_target(const ConnectionLifecycleEvent& event) const;
-
     HistoryStore& store_;
     platform::ConnectionObserver& socket_observer_;
     LifecycleObserver& lifecycle_observer_;
     platform::ProcessResolver& process_resolver_;
     platform::RouteObserver& route_observer_;
-    ObservationTarget target_;
+    ConnectionAdmissionPolicy admission_policy_;
+    std::string target_label_;
+    StorageMaintenance* storage_maintenance_;
 };
 
 } // namespace neta

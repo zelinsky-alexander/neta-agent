@@ -15,6 +15,7 @@ public:
             "binary was built without libbpf lifecycle support (polling fallback active)";
     }
     const LifecycleCapability& capability() const noexcept override { return capability_; }
+    LifecycleHealth health() const override { return {}; }
     std::vector<ConnectionLifecycleEvent> poll(std::chrono::milliseconds) override { return {}; }
 private:
     LifecycleCapability capability_;

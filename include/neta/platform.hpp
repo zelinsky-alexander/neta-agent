@@ -23,6 +23,9 @@ struct PlatformCapabilities {
     bool ebpf_connect_events{false};
     bool ebpf_accept_events{false};
     bool ebpf_close_events{false};
+    bool exact_lifecycle_direction{false};
+    bool lifecycle_drop_counter{false};
+    std::optional<std::uint64_t> lifecycle_dropped_events;
     bool btf_core_runtime{false};
     bool ebpf_built_in{false};
     std::string lifecycle_unavailable_reason;
@@ -50,11 +53,6 @@ public:
 
 HostEnvironment host_environment();
 PlatformCapabilities capabilities();
-
-// Platform-specific admission policy for a socket first seen by the polling
-// observer. The collector still returns all TCP states so already-tracked
-// connections may retain lifecycle-tail evidence.
-bool eligible_for_new_connection(const SocketObservation& socket);
 
 std::unique_ptr<ConnectionObserver> make_connection_observer();
 std::unique_ptr<LifecycleObserver> make_lifecycle_observer();

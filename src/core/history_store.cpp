@@ -2,6 +2,8 @@
 #include "neta/crypto.hpp"
 #include "neta/verdict.hpp"
 
+#include "history_schema.hpp"
+
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -34,16 +36,6 @@ std::string text_col(sqlite3_stmt* stmt, int col) {
     return value ? reinterpret_cast<const char*>(value) : std::string{};
 }
 
-std::uint64_t file_size_or_zero(const std::filesystem::path& path) {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    return ec ? 0 : static_cast<std::uint64_t>(size);
-}
-
-std::uint64_t sqlite_total_size(const std::filesystem::path& path) {
-    return file_size_or_zero(path) + file_size_or_zero(path.string() + "-wal");
-}
-
 std::string tcp_sample_hash(const TcpSnapshot& s) {
     return sha256_hex(std::to_string(s.observed_ns) + "|" + std::to_string(s.state) + "|" +
                       std::to_string(s.rtt_us) + "|" + std::to_string(s.rtt_variance_us) + "|" +
@@ -70,86 +62,6 @@ TcpSnapshot sample_from_row(sqlite3_stmt* stmt) {
     s.send_queue_bytes = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 11));
     s.recv_queue_bytes = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 12));
     return s;
-}
-
-int auto_vacuum_mode(sqlite3* db) {
-    Statement stmt(db, "PRAGMA auto_vacuum;");
-    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
-        throw std::runtime_error(sqlite3_errmsg(db));
-    }
-    return sqlite3_column_int(stmt.get(), 0);
-}
-
-void prune_orphans(sqlite3* db) {
-    {
-        Statement stmt(db, R"SQL(
-DELETE FROM processes
-WHERE NOT EXISTS (
-    SELECT 1 FROM connections WHERE connections.process_id = processes.id
-);
-)SQL");
-        stmt.step_done();
-    }
-
-    {
-        Statement stmt(db, R"SQL(
-DELETE FROM tls_observations
-WHERE NOT EXISTS (
-    SELECT 1 FROM verdicts WHERE verdicts.tls_observation_id = tls_observations.id
-)
-AND NOT EXISTS (
-    SELECT 1
-    FROM connection_tls_observations
-    WHERE connection_tls_observations.tls_observation_id = tls_observations.id
-);
-)SQL");
-        stmt.step_done();
-    }
-
-    // Keep every baseline referenced by retained verdict evidence, plus the newest
-    // baseline for each target even if no verdict references it yet. Older,
-    // unreferenced baselines are obsolete history and may be reclaimed.
-    {
-        Statement stmt(db, R"SQL(
-DELETE FROM baselines AS candidate
-WHERE NOT EXISTS (
-    SELECT 1 FROM verdicts WHERE verdicts.baseline_hash = candidate.sha256
-)
-AND EXISTS (
-    SELECT 1
-    FROM baselines AS newer
-    WHERE newer.target_host = candidate.target_host
-      AND newer.target_port = candidate.target_port
-      AND (
-          newer.created_ns > candidate.created_ns
-          OR (newer.created_ns = candidate.created_ns AND newer.id > candidate.id)
-      )
-);
-)SQL");
-        stmt.step_done();
-    }
-}
-
-bool table_has_column(sqlite3* db, const char* table, const char* column) {
-    const std::string query = "PRAGMA table_info(" + std::string(table) + ");";
-    Statement stmt(db, query.c_str());
-    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        if (text_col(stmt.get(), 1) == column) return true;
-    }
-    return false;
-}
-
-void ensure_column(sqlite3* db, const char* table, const char* column,
-                   const char* definition) {
-    if (table_has_column(db, table, column)) return;
-    const std::string sql = "ALTER TABLE " + std::string(table) + " ADD COLUMN " +
-                            definition + ";";
-    char* error = nullptr;
-    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error) != SQLITE_OK) {
-        const std::string message = error ? error : "SQLite schema migration error";
-        sqlite3_free(error);
-        throw std::runtime_error(message);
-    }
 }
 
 } // namespace
@@ -188,6 +100,7 @@ CREATE TABLE IF NOT EXISTS processes(
  pid INTEGER NOT NULL,
  uid INTEGER NOT NULL,
  start_ticks INTEGER NOT NULL,
+ start_ticks_observed INTEGER,
  comm TEXT NOT NULL,
  executable_path TEXT NOT NULL,
  UNIQUE(pid,start_ticks)
@@ -207,6 +120,8 @@ CREATE TABLE IF NOT EXISTS connections(
  last_seen_ns INTEGER NOT NULL,
  performance_state TEXT NOT NULL DEFAULT 'INSUFFICIENT_EVIDENCE',
  trust_state TEXT NOT NULL DEFAULT 'UNVERIFIED',
+ direction TEXT NOT NULL DEFAULT 'UNKNOWN',
+ network_namespace_inode INTEGER,
  FOREIGN KEY(process_id) REFERENCES processes(id)
 );
 CREATE INDEX IF NOT EXISTS idx_connections_recent ON connections(first_seen_ns DESC);
@@ -269,6 +184,7 @@ CREATE TABLE IF NOT EXISTS routes(
  interface_name TEXT NOT NULL,
  interface_index INTEGER NOT NULL,
  sha256 TEXT NOT NULL,
+ relation TEXT NOT NULL DEFAULT 'UNKNOWN',
  FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS tls_observations(
@@ -328,23 +244,50 @@ CREATE TABLE IF NOT EXISTS verdicts(
  FOREIGN KEY(tls_observation_id) REFERENCES tls_observations(id)
 );
 )SQL");
-    ensure_column(db_, "lifecycle_events", "agent_pid", "agent_pid INTEGER");
-    ensure_column(db_, "lifecycle_events", "agent_tgid", "agent_tgid INTEGER");
-    ensure_column(db_, "lifecycle_events", "kernel_pid", "kernel_pid INTEGER");
-    ensure_column(db_, "lifecycle_events", "kernel_tgid", "kernel_tgid INTEGER");
-    ensure_column(db_, "lifecycle_events", "agent_pid_namespace_device",
-                  "agent_pid_namespace_device INTEGER");
-    ensure_column(db_, "lifecycle_events", "agent_pid_namespace_inode",
-                  "agent_pid_namespace_inode INTEGER");
+    history_schema::ensure_column(db_, "processes", "start_ticks_observed",
+                                  "start_ticks_observed INTEGER");
+    exec("UPDATE processes SET start_ticks_observed=start_ticks "
+         "WHERE start_ticks_observed IS NULL AND start_ticks>0;");
+    history_schema::ensure_column(db_, "connections", "direction",
+                                  "direction TEXT NOT NULL DEFAULT 'UNKNOWN'");
+    history_schema::ensure_column(db_, "connections", "network_namespace_inode",
+                                  "network_namespace_inode INTEGER");
+    history_schema::ensure_column(db_, "routes", "relation",
+                                  "relation TEXT NOT NULL DEFAULT 'UNKNOWN'");
+    history_schema::ensure_column(db_, "lifecycle_events", "agent_pid", "agent_pid INTEGER");
+    history_schema::ensure_column(db_, "lifecycle_events", "agent_tgid", "agent_tgid INTEGER");
+    history_schema::ensure_column(db_, "lifecycle_events", "kernel_pid", "kernel_pid INTEGER");
+    history_schema::ensure_column(db_, "lifecycle_events", "kernel_tgid", "kernel_tgid INTEGER");
+    history_schema::ensure_column(db_, "lifecycle_events", "agent_pid_namespace_device",
+                                  "agent_pid_namespace_device INTEGER");
+    history_schema::ensure_column(db_, "lifecycle_events", "agent_pid_namespace_inode",
+                                  "agent_pid_namespace_inode INTEGER");
 }
 
 std::int64_t HistoryStore::upsert_process(const ProcessIdentity& p) {
-    Statement ins(db_, "INSERT INTO processes(pid,uid,start_ticks,comm,executable_path) VALUES(?,?,?,?,?) ON CONFLICT(pid,start_ticks) DO UPDATE SET uid=excluded.uid,comm=excluded.comm,executable_path=excluded.executable_path RETURNING id;");
+    const bool has_durable_start = p.start_ticks && *p.start_ticks != 0;
+    const char* sql = has_durable_start
+        ? "INSERT INTO processes(pid,uid,start_ticks,start_ticks_observed,comm,executable_path) "
+          "VALUES(?,?,?,?,?,?) ON CONFLICT(pid,start_ticks) DO UPDATE SET "
+          "uid=excluded.uid,start_ticks_observed=excluded.start_ticks_observed,"
+          "comm=excluded.comm,executable_path=excluded.executable_path RETURNING id;"
+        : "INSERT INTO processes(pid,uid,start_ticks,start_ticks_observed,comm,executable_path) "
+          "VALUES(?,?,COALESCE((SELECT MIN(start_ticks)-1 FROM processes "
+          "WHERE pid=? AND start_ticks<0),-1),"
+          "NULL,?,?) RETURNING id;";
+    Statement ins(db_, sql);
     sqlite3_bind_int64(ins.get(), 1, p.pid);
     sqlite3_bind_int(ins.get(), 2, static_cast<int>(p.uid));
-    sqlite3_bind_int64(ins.get(), 3, static_cast<sqlite3_int64>(p.start_ticks));
-    sqlite3_bind_text(ins.get(), 4, p.comm.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ins.get(), 5, p.executable_path.c_str(), -1, SQLITE_TRANSIENT);
+    if (has_durable_start) {
+        sqlite3_bind_int64(ins.get(), 3, static_cast<sqlite3_int64>(*p.start_ticks));
+        sqlite3_bind_int64(ins.get(), 4, static_cast<sqlite3_int64>(*p.start_ticks));
+        sqlite3_bind_text(ins.get(), 5, p.comm.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins.get(), 6, p.executable_path.c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_int64(ins.get(), 3, p.pid);
+        sqlite3_bind_text(ins.get(), 4, p.comm.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins.get(), 5, p.executable_path.c_str(), -1, SQLITE_TRANSIENT);
+    }
     if (sqlite3_step(ins.get()) != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(db_));
     return sqlite3_column_int64(ins.get(), 0);
 }
@@ -352,10 +295,11 @@ std::int64_t HistoryStore::upsert_process(const ProcessIdentity& p) {
 std::int64_t HistoryStore::begin_connection(const SocketObservation& s,
                                             const std::optional<ProcessIdentity>& process,
                                             const std::string& target_host,
-                                            std::uint64_t first_seen_ns) {
+                                            std::uint64_t first_seen_ns,
+                                            ConnectionDirection direction) {
     std::optional<std::int64_t> process_id;
     if (process) process_id = upsert_process(*process);
-    Statement stmt(db_, "INSERT INTO connections(socket_cookie,socket_inode,process_id,local_ip,local_port,remote_ip,remote_port,target_host,lifecycle_state,first_seen_ns,last_seen_ns) VALUES(?,?,?,?,?,?,?,?,?,?,?);");
+    Statement stmt(db_, "INSERT INTO connections(socket_cookie,socket_inode,process_id,local_ip,local_port,remote_ip,remote_port,target_host,lifecycle_state,first_seen_ns,last_seen_ns,direction,network_namespace_inode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);");
     sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(s.socket_cookie));
     sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(s.socket_inode));
     if (process_id) sqlite3_bind_int64(stmt.get(), 3, *process_id); else sqlite3_bind_null(stmt.get(), 3);
@@ -367,6 +311,14 @@ std::int64_t HistoryStore::begin_connection(const SocketObservation& s,
     sqlite3_bind_text(stmt.get(), 9, "ACTIVE", -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt.get(), 10, static_cast<sqlite3_int64>(first_seen_ns));
     sqlite3_bind_int64(stmt.get(), 11, static_cast<sqlite3_int64>(first_seen_ns));
+    const auto direction_text = to_string(direction);
+    sqlite3_bind_text(stmt.get(), 12, direction_text.c_str(), -1, SQLITE_TRANSIENT);
+    if (s.network_namespace_inode) {
+        sqlite3_bind_int64(stmt.get(), 13,
+                           static_cast<sqlite3_int64>(*s.network_namespace_inode));
+    } else {
+        sqlite3_bind_null(stmt.get(), 13);
+    }
     stmt.step_done();
 
     const auto connection_id = sqlite3_last_insert_rowid(db_);
@@ -387,6 +339,14 @@ void HistoryStore::touch_connection(std::int64_t id, std::uint64_t last_seen_ns,
     sqlite3_bind_text(stmt.get(), 2, lifecycle_state.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt.get(), 3, id);
     stmt.step_done();
+}
+
+bool HistoryStore::update_socket_cookie(std::int64_t id, std::uint64_t socket_cookie) {
+    Statement stmt(db_, "UPDATE connections SET socket_cookie=? WHERE id=? AND socket_cookie=0;");
+    sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(socket_cookie));
+    sqlite3_bind_int64(stmt.get(), 2, id);
+    stmt.step_done();
+    return sqlite3_changes(db_) == 1;
 }
 
 std::int64_t HistoryStore::add_tcp_sample(std::int64_t id, const TcpSnapshot& s) {
@@ -412,8 +372,8 @@ std::int64_t HistoryStore::add_tcp_sample(std::int64_t id, const TcpSnapshot& s)
     return sqlite3_last_insert_rowid(db_);
 }
 
-std::int64_t HistoryStore::add_lifecycle_event(std::int64_t id,
-                                               const ConnectionLifecycleEvent& event) {
+void HistoryStore::add_lifecycle_event(std::int64_t id,
+                                       const ConnectionLifecycleEvent& event) {
     Statement stmt(db_, R"SQL(
 INSERT OR IGNORE INTO lifecycle_events(
  connection_id,event_type,observed_ns,provenance,agent_pid,agent_tgid,kernel_pid,kernel_tgid,
@@ -490,11 +450,10 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
     if (event.tcp_state) sqlite3_bind_int(stmt.get(), index, *event.tcp_state);
     else sqlite3_bind_null(stmt.get(), index);
     stmt.step_done();
-    return sqlite3_last_insert_rowid(db_);
 }
 
 std::int64_t HistoryStore::add_route(std::int64_t connection_id, const RouteObservation& r) {
-    Statement stmt(db_, "INSERT OR REPLACE INTO routes(connection_id,observed_ns,destination,source,gateway,interface_name,interface_index,sha256) VALUES(?,?,?,?,?,?,?,?);");
+    Statement stmt(db_, "INSERT OR REPLACE INTO routes(connection_id,observed_ns,destination,source,gateway,interface_name,interface_index,sha256,relation) VALUES(?,?,?,?,?,?,?,?,?);");
     sqlite3_bind_int64(stmt.get(), 1, connection_id);
     sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(r.observed_ns));
     sqlite3_bind_text(stmt.get(), 3, r.destination.c_str(), -1, SQLITE_TRANSIENT);
@@ -503,6 +462,8 @@ std::int64_t HistoryStore::add_route(std::int64_t connection_id, const RouteObse
     sqlite3_bind_text(stmt.get(), 6, r.interface_name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt.get(), 7, r.interface_index);
     sqlite3_bind_text(stmt.get(), 8, r.sha256.c_str(), -1, SQLITE_TRANSIENT);
+    const auto relation = to_string(r.relation);
+    sqlite3_bind_text(stmt.get(), 9, relation.c_str(), -1, SQLITE_TRANSIENT);
     stmt.step_done();
     return sqlite3_last_insert_rowid(db_);
 }
@@ -532,6 +493,16 @@ std::int64_t HistoryStore::add_tls(const TlsObservation& t) {
     pending_tls_host_ = t.target_host;
     pending_tls_port_ = t.target_port;
     return tls_id;
+}
+
+void HistoryStore::link_tls_observation(std::int64_t connection_id,
+                                        std::int64_t tls_id) {
+    Statement link(db_, "INSERT OR REPLACE INTO connection_tls_observations(connection_id,tls_observation_id,relation,fidelity) VALUES(?,?,?,?);");
+    sqlite3_bind_int64(link.get(), 1, connection_id);
+    sqlite3_bind_int64(link.get(), 2, tls_id);
+    sqlite3_bind_text(link.get(), 3, "contemporaneous_check_for", -1, SQLITE_STATIC);
+    sqlite3_bind_text(link.get(), 4, "SUPPORTING", -1, SQLITE_STATIC);
+    link.step_done();
 }
 
 void HistoryStore::save_baseline(const Baseline& b) {
@@ -592,7 +563,7 @@ void HistoryStore::save_verdict(std::int64_t connection_id, const AssuranceVerdi
 }
 
 std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limit) const {
-    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),COALESCE(p.start_ticks,0),COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state FROM connections c LEFT JOIN processes p ON p.id=c.process_id ORDER BY c.first_seen_ns DESC LIMIT ?;)SQL");
+    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id ORDER BY c.first_seen_ns DESC LIMIT ?;)SQL");
     sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(limit));
     std::vector<ConnectionSummary> out;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
@@ -602,7 +573,9 @@ std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limi
         c.last_seen_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 2));
         c.process.pid = sqlite3_column_int64(stmt.get(), 3);
         c.process.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt.get(), 4));
-        c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 5));
+        if (sqlite3_column_type(stmt.get(), 5) != SQLITE_NULL) {
+            c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 5));
+        }
         c.process.comm = text_col(stmt.get(), 6);
         c.process.executable_path = text_col(stmt.get(), 7);
         c.local_ip = text_col(stmt.get(), 8);
@@ -613,13 +586,20 @@ std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limi
         c.lifecycle_state = text_col(stmt.get(), 13);
         c.performance = performance_state_from_string(text_col(stmt.get(), 14));
         c.trust = trust_state_from_string(text_col(stmt.get(), 15));
+        c.direction = connection_direction_from_string(text_col(stmt.get(), 16));
+        c.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 17));
+        c.socket_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 18));
+        if (sqlite3_column_type(stmt.get(), 19) != SQLITE_NULL) {
+            c.network_namespace_inode = static_cast<std::uint64_t>(
+                sqlite3_column_int64(stmt.get(), 19));
+        }
         out.push_back(std::move(c));
     }
     return out;
 }
 
 std::optional<ConnectionSummary> HistoryStore::connection(std::int64_t id) const {
-    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),COALESCE(p.start_ticks,0),COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state FROM connections c LEFT JOIN processes p ON p.id=c.process_id WHERE c.id=?;)SQL");
+    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id WHERE c.id=?;)SQL");
     sqlite3_bind_int64(stmt.get(), 1, id);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) return std::nullopt;
     ConnectionSummary c;
@@ -628,7 +608,9 @@ std::optional<ConnectionSummary> HistoryStore::connection(std::int64_t id) const
     c.last_seen_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 2));
     c.process.pid = sqlite3_column_int64(stmt.get(), 3);
     c.process.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt.get(), 4));
-    c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 5));
+    if (sqlite3_column_type(stmt.get(), 5) != SQLITE_NULL) {
+        c.process.start_ticks = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 5));
+    }
     c.process.comm = text_col(stmt.get(), 6);
     c.process.executable_path = text_col(stmt.get(), 7);
     c.local_ip = text_col(stmt.get(), 8);
@@ -639,6 +621,13 @@ std::optional<ConnectionSummary> HistoryStore::connection(std::int64_t id) const
     c.lifecycle_state = text_col(stmt.get(), 13);
     c.performance = performance_state_from_string(text_col(stmt.get(), 14));
     c.trust = trust_state_from_string(text_col(stmt.get(), 15));
+    c.direction = connection_direction_from_string(text_col(stmt.get(), 16));
+    c.socket_cookie = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 17));
+    c.socket_inode = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 18));
+    if (sqlite3_column_type(stmt.get(), 19) != SQLITE_NULL) {
+        c.network_namespace_inode = static_cast<std::uint64_t>(
+            sqlite3_column_int64(stmt.get(), 19));
+    }
     return c;
 }
 
@@ -715,7 +704,7 @@ std::vector<TcpSnapshot> HistoryStore::recent_samples_for_target(const std::stri
 }
 
 std::optional<RouteObservation> HistoryStore::route_for_connection(std::int64_t id) const {
-    Statement stmt(db_, "SELECT observed_ns,destination,source,gateway,interface_name,interface_index,sha256 FROM routes WHERE connection_id=?;");
+    Statement stmt(db_, "SELECT observed_ns,destination,source,gateway,interface_name,interface_index,sha256,relation FROM routes WHERE connection_id=?;");
     sqlite3_bind_int64(stmt.get(), 1, id);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) return std::nullopt;
     RouteObservation r;
@@ -726,6 +715,7 @@ std::optional<RouteObservation> HistoryStore::route_for_connection(std::int64_t 
     r.interface_name = text_col(stmt.get(), 4);
     r.interface_index = static_cast<std::uint32_t>(sqlite3_column_int64(stmt.get(), 5));
     r.sha256 = text_col(stmt.get(), 6);
+    r.relation = route_relation_from_string(text_col(stmt.get(), 7));
     return r;
 }
 
@@ -835,108 +825,6 @@ LIMIT 1;
         }
     }
     return data;
-}
-
-StorageStatus HistoryStore::status(std::uint64_t max_bytes) const {
-    StorageStatus s;
-    s.path = path_;
-    s.bytes = sqlite_total_size(path_);
-    s.max_bytes = max_bytes;
-    Statement c(db_, "SELECT COUNT(*) FROM connections;");
-    if (sqlite3_step(c.get()) == SQLITE_ROW) s.connection_count = static_cast<std::uint64_t>(sqlite3_column_int64(c.get(), 0));
-    Statement t(db_, "SELECT COUNT(*) FROM transport_samples;");
-    if (sqlite3_step(t.get()) == SQLITE_ROW) s.sample_count = static_cast<std::uint64_t>(sqlite3_column_int64(t.get(), 0));
-    return s;
-}
-
-void HistoryStore::prune_to_budget(std::uint64_t max_bytes) {
-    if (max_bytes == 0) return;
-
-    auto bytes = sqlite_total_size(path_);
-    if (bytes <= max_bytes) return;
-
-    // Crossing the configured hard cap triggers cleanup to 90% of the cap.
-    // The default 200 MiB budget therefore cleans down to <= 180 MiB.
-    const auto target_bytes = max_bytes - (max_bytes / 10ULL);
-
-    // First eliminate transient WAL growth. If the checkpoint itself restores
-    // enough headroom, no evidence has to be deleted.
-    exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    bytes = sqlite_total_size(path_);
-    if (bytes <= target_bytes) return;
-
-    const auto compact_and_measure = [&]() {
-        prune_orphans(db_);
-
-        if (auto_vacuum_mode(db_) == 2) {
-            // New/current databases can return free pages incrementally.
-            exec("PRAGMA incremental_vacuum;");
-        } else {
-            // Older databases were created after WAL had already fixed the
-            // database format, so auto_vacuum remained NONE. A full VACUUM
-            // both compacts the file and migrates it to incremental mode.
-            exec("PRAGMA auto_vacuum=INCREMENTAL;");
-            exec("VACUUM;");
-        }
-
-        exec("PRAGMA wal_checkpoint(TRUNCATE);");
-        return sqlite_total_size(path_);
-    };
-
-    bytes = compact_and_measure();
-
-    while (bytes > target_bytes) {
-        int removed = 0;
-
-        // Primary retention tier: reclaim the oldest non-anomalous history.
-        // DEGRADED, FAILED, CHANGED, and SUSPICIOUS are protected here.
-        {
-            Statement del(db_, R"SQL(
-DELETE FROM connections
-WHERE id IN (
-    SELECT id
-    FROM connections
-    WHERE performance_state NOT IN ('DEGRADED','FAILED')
-      AND trust_state NOT IN ('CHANGED','SUSPICIOUS')
-    ORDER BY first_seen_ns ASC, id ASC
-    LIMIT 64
-);
-)SQL");
-            del.step_done();
-            removed = sqlite3_changes(db_);
-        }
-
-        // Protection is priority rather than immortality: if only anomalous
-        // history remains and storage is still above the cleanup target, use
-        // a smaller emergency batch so the configured hard cap remains
-        // enforceable instead of allowing unbounded growth.
-        if (removed == 0) {
-            Statement emergency(db_, R"SQL(
-DELETE FROM connections
-WHERE id IN (
-    SELECT id
-    FROM connections
-    WHERE performance_state IN ('DEGRADED','FAILED')
-       OR trust_state IN ('CHANGED','SUSPICIOUS')
-    ORDER BY first_seen_ns ASC, id ASC
-    LIMIT 8
-);
-)SQL");
-            emergency.step_done();
-            removed = sqlite3_changes(db_);
-        }
-
-        if (removed == 0) break;
-
-        // Reclaim dependent/orphaned metadata and physical pages between
-        // every bounded deletion batch before deciding whether more history
-        // must be removed.
-        bytes = compact_and_measure();
-    }
-
-    if (bytes > max_bytes) {
-        throw std::runtime_error("SQLite history cannot satisfy configured storage cap");
-    }
 }
 
 } // namespace neta

@@ -1,5 +1,9 @@
 #pragma once
 
+#include "neta/tcp_state.hpp"
+#include "neta/connection_direction.hpp"
+#include "neta/route_semantics.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -23,7 +27,7 @@ struct HostEnvironment {
 struct ProcessIdentity {
     std::int64_t pid{-1};
     std::uint32_t uid{0};
-    std::uint64_t start_ticks{0};
+    std::optional<std::uint64_t> start_ticks;
     std::string comm;
     std::string executable_path;
 };
@@ -47,11 +51,13 @@ struct TcpSnapshot {
 struct SocketObservation {
     std::uint64_t socket_cookie{0};
     std::uint64_t socket_inode{0};
+    std::optional<std::uint64_t> network_namespace_inode;
     std::uint32_t uid{0};
     std::string local_ip;
     std::uint16_t local_port{0};
     std::string remote_ip;
     std::uint16_t remote_port{0};
+    TcpEndpointKind endpoint_kind{TcpEndpointKind::Unknown};
     TcpSnapshot transport;
 };
 
@@ -63,6 +69,7 @@ struct RouteObservation {
     std::uint32_t interface_index{0};
     std::uint64_t observed_ns{0};
     std::string sha256;
+    RouteRelation relation{RouteRelation::Unknown};
 };
 
 struct TlsObservation {
@@ -117,6 +124,10 @@ struct ConnectionSummary {
     std::int64_t id{0};
     std::uint64_t first_seen_ns{0};
     std::uint64_t last_seen_ns{0};
+    ConnectionDirection direction{ConnectionDirection::Unknown};
+    std::uint64_t socket_cookie{0};
+    std::uint64_t socket_inode{0};
+    std::optional<std::uint64_t> network_namespace_inode;
     ProcessIdentity process;
     std::string local_ip;
     std::uint16_t local_port{0};

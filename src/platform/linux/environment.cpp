@@ -50,6 +50,10 @@ PlatformCapabilities capabilities() {
     c.ebpf_connect_events = lifecycle_capability.connect_events;
     c.ebpf_accept_events = lifecycle_capability.accept_events;
     c.ebpf_close_events = lifecycle_capability.close_events;
+    c.exact_lifecycle_direction = lifecycle_capability.connect_events &&
+                                  lifecycle_capability.accept_events;
+    c.lifecycle_drop_counter = lifecycle_capability.drop_counter;
+    c.lifecycle_dropped_events = lifecycle->health().dropped_events;
     c.btf_core_runtime = lifecycle_capability.btf_core_runtime;
     c.ebpf_built_in = lifecycle_capability.built_in;
     c.lifecycle_unavailable_reason = lifecycle_capability.unavailable_reason;

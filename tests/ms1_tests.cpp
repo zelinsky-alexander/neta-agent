@@ -86,12 +86,14 @@ ConnectionLifecycleEvent decode(const neta_lifecycle_wire_event& wire) {
 SocketObservation matching_socket(std::uint64_t cookie) {
     SocketObservation socket;
     socket.socket_cookie = cookie;
+    socket.network_namespace_inode = 42;
     socket.socket_inode = 8800;
     socket.uid = 1000;
     socket.local_ip = "127.0.0.1";
     socket.local_port = 41000;
     socket.remote_ip = "127.0.0.2";
     socket.remote_port = 443;
+    socket.endpoint_kind = TcpEndpointKind::Connection;
     socket.transport.observed_ns = 9'100'000'000ULL;
     socket.transport.state = TCP_ESTABLISHED;
     socket.transport.rtt_us = 2000;
@@ -147,7 +149,7 @@ void test_namespace_pid_failure_is_not_misattributed() {
         assert(!event.process.agent_visible.tgid);
         assert(event.process.agent_pid_namespace);
         assert(event.process.agent_pid_namespace->inode == 37);
-        assert(!tracker.observe_lifecycle(event));
+        assert(!tracker.observe_lifecycle(event, ConnectionDirection::Outbound));
         assert(store.status(10'000'000).connection_count == 0);
     }
     remove_db(path);
@@ -163,11 +165,11 @@ void test_lifecycle_admission_correlation_and_close() {
         ConnectionTracker tracker(store, resolver, "target.example");
 
         const auto connect = decode(wire_event(NETA_LIFECYCLE_CONNECT, 23456));
-        const auto first = tracker.observe_lifecycle(connect);
+        const auto first = tracker.observe_lifecycle(connect, ConnectionDirection::Outbound);
         assert(first && first->newly_admitted);
         assert(store.status(10'000'000).connection_count == 1);
 
-        const auto duplicate = tracker.observe_lifecycle(connect);
+        const auto duplicate = tracker.observe_lifecycle(connect, ConnectionDirection::Outbound);
         assert(duplicate && !duplicate->newly_admitted);
         assert(store.status(10'000'000).connection_count == 1);
 
@@ -189,10 +191,10 @@ void test_lifecycle_admission_correlation_and_close() {
         assert(persisted->process.comm == "short-client");
 
         const auto close = decode(wire_event(NETA_LIFECYCLE_CLOSE, 23456));
-        const auto closed = tracker.observe_lifecycle(close);
+        const auto closed = tracker.observe_lifecycle(close, ConnectionDirection::Unknown);
         assert(closed && !closed->newly_admitted);
         assert(store.connection(first->connection_id)->lifecycle_state == "CLOSED");
-        assert(!tracker.observe_lifecycle(close));
+        assert(!tracker.observe_lifecycle(close, ConnectionDirection::Unknown));
         assert(store.lifecycle_events_for_connection(first->connection_id).size() == 2);
         assert(store.status(10'000'000).connection_count == 1);
     }
@@ -212,7 +214,7 @@ void test_accept_and_listen_semantics() {
         const auto accepted = decode(accept_wire);
         assert(accepted.type == ConnectionLifecycleEventType::Accept);
         assert(!accepted.socket_cookie);
-        const auto result = tracker.observe_lifecycle(accepted);
+        const auto result = tracker.observe_lifecycle(accepted, ConnectionDirection::Inbound);
         assert(result && result->newly_admitted);
 
         const auto enrichment = tracker.observe_socket(matching_socket(34567));
@@ -223,7 +225,8 @@ void test_accept_and_listen_semantics() {
 
         auto listen_wire = wire_event(NETA_LIFECYCLE_ACCEPT, 45678);
         listen_wire.tcp_state = TCP_LISTEN;
-        assert(!tracker.observe_lifecycle(decode(listen_wire)));
+        assert(!tracker.observe_lifecycle(
+            decode(listen_wire), ConnectionDirection::Inbound));
         assert(store.status(10'000'000).connection_count == 1);
     }
     remove_db(path);
@@ -264,7 +267,8 @@ void test_cookie_unavailable_fallback_is_one_incarnation() {
         ConnectionTracker tracker(store, resolver, "fallback-identity.example");
         auto wire = wire_event(NETA_LIFECYCLE_CONNECT, 0);
         wire.availability &= ~NETA_HAS_COOKIE;
-        const auto lifecycle_admission = tracker.observe_lifecycle(decode(wire));
+        const auto lifecycle_admission = tracker.observe_lifecycle(
+            decode(wire), ConnectionDirection::Outbound);
         assert(lifecycle_admission && lifecycle_admission->newly_admitted);
 
         const auto enrichment = tracker.observe_socket(matching_socket(67890));

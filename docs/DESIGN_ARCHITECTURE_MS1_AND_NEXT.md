@@ -1104,3 +1104,13 @@ After the validated MS1 commit, the nearest implementation sequence should be:
 ```
 
 This order keeps MS2 focused on becoming a real endpoint agent without weakening the evidence/replay semantics already proven in MS0 and the lifecycle acquisition semantics proven in MS1.
+
+## 24. Milestone 2 implementation status
+
+The MS2 implementation follows the decomposition proposed in §19.3. Direction,
+filters/admission, scheduling, periodic storage maintenance, route relation,
+and observation CLI/service handling are separate modules; the tracker remains
+responsible only for logical identity, correlation, promotion, and lifecycle
+state. See [`MILESTONE2.md`](MILESTONE2.md) for the implemented architecture,
+schema/CLI semantics, validation commands, deterministic results, and the
+explicitly unvalidated privileged runtime criterion.

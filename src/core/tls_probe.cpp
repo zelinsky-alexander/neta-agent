@@ -11,6 +11,7 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace neta {
 namespace {
@@ -75,7 +76,8 @@ std::string asn1_time_string(const ASN1_TIME* value) {
 } // namespace
 
 TlsObservation TlsProbe::probe(const std::string& host, std::uint16_t port,
-                               const std::string& ca_file) const {
+                               const std::string& ca_file,
+                               std::chrono::milliseconds post_handshake_hold) const {
     using CtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
     using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free_all)>;
     using CertPtr = std::unique_ptr<X509, decltype(&X509_free)>;
@@ -127,6 +129,8 @@ TlsObservation TlsProbe::probe(const std::string& host, std::uint16_t port,
     result.not_after = asn1_time_string(X509_get0_notAfter(cert.get()));
     result.chain_valid = SSL_get_verify_result(ssl) == X509_V_OK;
     result.hostname_valid = X509_check_host(cert.get(), host.c_str(), host.size(), 0, nullptr) == 1;
+
+    if (post_handshake_hold.count() > 0) std::this_thread::sleep_for(post_handshake_hold);
 
     std::ostringstream canonical;
     canonical << result.target_host << ':' << result.target_port << '|'

@@ -17,8 +17,11 @@ AggregateMetrics aggregate_metrics(const std::vector<TcpSnapshot>& samples) {
     AggregateMetrics result;
     if (samples.empty()) return result;
     for (const auto& sample : samples) {
-        result.observed_rtt_us = std::max<std::uint64_t>(result.observed_rtt_us, sample.rtt_us);
-        result.observed_rttvar_us = std::max<std::uint64_t>(result.observed_rttvar_us, sample.rtt_variance_us);
+        if (sample.rtt_us != 0) {
+            result.observed_rtt_us = std::max<std::uint64_t>(result.observed_rtt_us, sample.rtt_us);
+            result.observed_rttvar_us = std::max<std::uint64_t>(result.observed_rttvar_us,
+                                                                 sample.rtt_variance_us);
+        }
     }
     const auto first = samples.front().total_retrans;
     const auto last = samples.back().total_retrans;

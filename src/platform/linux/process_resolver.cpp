@@ -14,18 +14,18 @@ namespace neta::platform {
 namespace fs = std::filesystem;
 namespace {
 
-std::uint64_t process_start_ticks(std::int64_t pid) {
+std::optional<std::uint64_t> process_start_ticks(std::int64_t pid) {
     std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
     std::string line;
     std::getline(in, line);
     const auto end_comm = line.rfind(')');
-    if (end_comm == std::string::npos || end_comm + 2 >= line.size()) return 0;
+    if (end_comm == std::string::npos || end_comm + 2 >= line.size()) return std::nullopt;
     std::istringstream fields(line.substr(end_comm + 2));
     std::string token;
     for (int i = 0; i <= 19; ++i) {
-        if (!(fields >> token)) return 0;
+        if (!(fields >> token)) return std::nullopt;
     }
-    try { return std::stoull(token); } catch (...) { return 0; }
+    try { return std::stoull(token); } catch (...) { return std::nullopt; }
 }
 
 std::string first_line(const std::string& path) {
