@@ -110,6 +110,7 @@ endif()
 
 add_library(neta_core
     src/core/model.cpp
+    src/core/name_resolution.cpp
     src/core/connection_direction.cpp
     src/core/route_semantics.cpp
     src/core/tcp_state.cpp
@@ -118,6 +119,7 @@ add_library(neta_core
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/history_store.cpp
+    src/core/history_name_resolution.cpp
     src/core/history_schema.cpp
     src/core/history_maintenance.cpp
     src/core/connection_admission.cpp
@@ -199,5 +201,13 @@ if(NETA_ENABLE_TESTS)
         target_compile_options(neta_${NETA_MS2_TEST}_test PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
         add_test(NAME neta_${NETA_MS2_TEST}_test COMMAND neta_${NETA_MS2_TEST}_test)
+    endforeach()
+
+    foreach(NETA_MS3_TEST IN ITEMS name_resolution history_name_resolution)
+        add_executable(neta_${NETA_MS3_TEST}_test tests/${NETA_MS3_TEST}_test.cpp)
+        target_link_libraries(neta_${NETA_MS3_TEST}_test PRIVATE neta_core)
+        target_compile_options(neta_${NETA_MS3_TEST}_test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        add_test(NAME neta_${NETA_MS3_TEST}_test COMMAND neta_${NETA_MS3_TEST}_test)
     endforeach()
 endif()
