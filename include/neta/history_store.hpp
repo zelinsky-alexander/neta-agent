@@ -3,6 +3,7 @@
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 #include "neta/name_resolution.hpp"
+#include "neta/tls_session.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -56,6 +57,8 @@ public:
     std::int64_t add_route(std::int64_t connection_id, const RouteObservation& route);
     std::int64_t add_name_resolution_evidence(std::int64_t connection_id,
                                               const NameResolutionEvidence& evidence);
+    std::int64_t add_tls_session_evidence(std::int64_t connection_id,
+                                          const TlsSessionEvidence& evidence);
     std::int64_t add_tls(const TlsObservation& tls);
     void link_tls_observation(std::int64_t connection_id, std::int64_t tls_id);
     void save_baseline(const Baseline& baseline);
@@ -74,6 +77,8 @@ public:
                                                        std::size_t limit) const;
     std::optional<RouteObservation> route_for_connection(std::int64_t id) const;
     std::vector<NameResolutionEvidence> name_resolution_evidence_for_connection(
+        std::int64_t id) const;
+    std::vector<TlsSessionEvidence> tls_session_evidence_for_connection(
         std::int64_t id) const;
     std::optional<TlsObservation> latest_tls_for_target(const std::string& host,
                                                         std::uint16_t port) const;

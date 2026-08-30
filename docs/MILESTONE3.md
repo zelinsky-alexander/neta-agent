@@ -1,233 +1,315 @@
 # Milestone 3: stronger connection identity and exact application context where available
 
-Milestone 3 reduces uncertainty between a transport socket, name-resolution identity, and cryptographic/application identity without changing the core product rule: `neta-agent` observes evidence and states its fidelity honestly; it does not infer exactness from coincidence.
+Milestone 3 reduces uncertainty between a transport socket, name-resolution identity, and cryptographic/application identity without changing the product rule: `neta-agent` observes evidence and states its fidelity honestly; it does not infer exactness from coincidence.
 
-This work extends the completed MS2 bidirectional architecture. MS2 invariants remain requirements: explicit `OUTBOUND`/`INBOUND`/`UNKNOWN` direction, listener exclusion, canonical socket-cookie promotion only after unambiguous correlation, bounded active state and SQLite retention, lifecycle-drop visibility, and no reuse of the outbound supporting TLS probe as inbound application-session evidence.
+This work extends the completed MS2 bidirectional architecture. MS2 invariants remain requirements: explicit `OUTBOUND`/`INBOUND`/`UNKNOWN` direction, listener exclusion, canonical socket-cookie promotion only after unambiguous correlation, bounded active state and SQLite retention, lifecycle-drop visibility, and no reuse of the outbound supporting TLS probe as inbound or actual-application TLS evidence.
 
-## Implemented resolver path
+## Implemented MS3.1: application name-resolution context
 
-The current MS3 branch contains an actual Linux application resolver collector and integrates it into the existing connection evidence graph:
+The Linux resolver path observes dynamically linked glibc `getaddrinfo()` calls with libbpf uprobes/uretprobes, then correlates successful forward-resolution results to outbound connections by process, durable process start identity, network namespace, returned remote address, direction, and a bounded time window.
+
+A complete `getaddrinfo` event can be `EXACT` for the application resolver API call. It is not an exact DNS packet claim because NSS, `/etc/hosts`, a local cache, or another configured backend may satisfy the call. `PlatformCapabilities::exact_dns_observation` therefore remains false.
+
+Resolver-to-socket correlation is at most `STRONGLY_CORRELATED`. Multiple plausible resolver events remain `AMBIGUOUS` and are not attached.
+
+The resolver collector and ObservationSession buffers are bounded, event loss is visible, and only per-connection correlated evidence is persisted. Existing connection pruning cascades to resolver evidence.
+
+## Implemented MS3.2: actual OpenSSL application TLS sessions
+
+MS3.2 adds an opt-in OpenSSL 3 application instrumentation mechanism that observes the real TLS session used by the application. It does not proxy, redirect, decrypt, terminate, or create a substitute connection.
 
 ```text
-application process
-    |
-    | dynamically linked glibc getaddrinfo()
-    v
-uprobes / uretprobes
-    |
-    | query + API result + returned addrinfo values
-    | event-time process/start/netns identity
-    v
-NameResolutionObserver
-    |
-    | bounded recent resolver-event window
-    v
+instrumented application
+        |
+        | real SSL_connect / SSL_accept / SSL_do_handshake
+        v
+libneta_tls_context.so
+        |
+        | OpenSSL public session/certificate APIs
+        | Linux socket identity (SO_COOKIE + endpoints)
+        | bounded Unix datagram evidence event
+        v
+TlsSessionObserver
+        |
+        | kernel SCM_CREDENTIALS sender validation
+        v
 ObservationSession
-    |
-    | unique process + identity + address + time correlation
-    +-------------------------+
-    |                         |
-    v                         v
-STRONGLY_CORRELATED       ambiguous/no match
-or lower fidelity             unresolved
-    |
-    v
-HistoryStore per-connection evidence
-    |
-    +--> evidence CLI
-    +--> export schema 3
-    +--> replay integrity check
-    |
-    v
-existing connection retention / delete cascade
+        |
+        | exact cookie correlation when available
+        | tuple/process/netns/time fallback otherwise
+        v
+HistoryStore connection_tls_session_evidence
+        |
+        +--> evidence CLI
+        +--> export schema 4
+        +--> replay integrity
 ```
 
-The collector is implemented with libbpf uprobes on `getaddrinfo` in the dynamically loaded `libc.so.6` used by the agent. The entry probe records the queried name and event start. The return probe records the `getaddrinfo` result code and, on success, reads the returned IPv4/IPv6 `addrinfo` chain.
+### Native/application observation source
 
-The event also carries the same forms of process context already used by lifecycle evidence where the kernel exposes them: kernel PID/TGID, agent-visible PID/TGID, UID, process start identity, command name, agent PID namespace, and current network namespace.
-
-## What `EXACT` means here
-
-The resolver collector may label a complete observed `getaddrinfo` call as an `EXACT` **application resolver API event**. That means the instrumented call and the returned values were observed directly at that API boundary.
-
-It does **not** mean that a DNS packet was observed or even sent. A successful `getaddrinfo` call may be satisfied by NSS, `/etc/hosts`, local caches, or another configured backend. For that reason:
+The instrumentation library is built from:
 
 ```text
-PlatformCapabilities::application_name_resolution_events = true
-    when the supported collector is active
-
-PlatformCapabilities::exact_dns_observation = false
-    because no network DNS transaction is claimed
+src/platform/linux/tls_context_shim.cpp
 ```
 
-The CLI reports these capabilities separately.
-
-The socket relationship is also kept separate from event fidelity. Even a complete exact resolver API event is linked to a connection at no more than `STRONGLY_CORRELATED` fidelity.
-
-## Correlation policy
-
-The current correlator links only **forward lookups to outbound connections**. A candidate must satisfy all of the following:
-
-- resolver API result is successful when a result code is available;
-- the resolver event completed before connection admission;
-- the resolver event is within the bounded five-second correlation window;
-- the agent-visible process matches the connection process;
-- the resolver returned the connection remote IP address;
-- available durable process-start identities do not conflict;
-- available network-namespace identities do not conflict.
-
-For the strongest current link:
+It interposes the public OpenSSL handshake entry points:
 
 ```text
-complete resolver event
-+ matching PID
-+ matching durable process start
-+ matching network namespace
-+ returned address equals remote socket address
-+ exactly one candidate in the bounded window
-    -> STRONGLY_CORRELATED
+SSL_connect
+SSL_accept
+SSL_do_handshake
 ```
 
-If durable start or network-namespace identity is unavailable, the link is downgraded to `SUPPORTING`. Context-only sources remain `CONTEXTUAL`.
+Only a successful handshake on a stream socket is emitted. Immediately after the real handshake returns successfully, the shim queries the same `SSL*` and socket with public OpenSSL/Linux APIs.
 
-If two or more resolver events satisfy the candidate rules, the result is `AMBIGUOUS` and no evidence is attached. The implementation never chooses the closest timestamp or otherwise guesses.
+The shim preserves application behavior:
 
-Inbound reverse-name identity remains outside this implemented slice. An inbound peer address is not treated as proof of a reverse DNS name.
+- it calls the real OpenSSL function first;
+- it preserves and restores `errno`;
+- post-handshake evidence extraction is isolated from the application's OpenSSL error queue;
+- if an existing OpenSSL error queue cannot be safely marked/restored, evidence extraction is skipped;
+- C++ exceptions from observational work are contained inside the shim and never cross the OpenSSL C ABI;
+- evidence transport is non-blocking and failure to deliver evidence does not fail the TLS handshake.
 
-## Bounded collection
+### Exact session facts captured
 
-Resolver instrumentation is intentionally bounded:
+Where available, the exact application-session observation contains:
 
-- name-resolution ring buffer: 8 MiB;
-- in-flight `getaddrinfo` state: 8,192-entry LRU map;
-- returned addresses captured per call: at most 8;
-- query and canonical-name wire fields: fixed 256-byte buffers;
-- `ObservationSession` recent resolver-event buffer: at most 4,096 events;
-- correlation retention window: five seconds.
+```text
+local TLS role: CLIENT / SERVER
+process PID / UID / durable start ticks / comm
+network namespace
+Linux SO_COOKIE
+local and remote socket endpoint
+TLS protocol version
+cipher
+selected ALPN
+SNI visible to OpenSSL
+expected peer hostname configured in OpenSSL
+matched peer hostname reported by OpenSSL verification
+peer certificate presence
+peer verification mode/result
+peer-authenticated boolean under conservative rules
+peer leaf certificate SHA-256
+peer public-key/SPKI SHA-256
+peer subject / issuer / validity interval
+```
 
-If a query/canonical name or returned result set exceeds the supported capture bounds, or userspace result memory cannot be read completely, the event is marked partial and its observation fidelity is reduced from `EXACT` to `SUPPORTING`.
+Certificate hashes are derived from the certificate actually returned by the application's `SSL` session, not from the independent `TlsProbe` connection.
 
-Nested same-thread `getaddrinfo` calls cannot be represented safely by the single in-flight key. Such a sequence is conservatively suppressed and increments the resolver drop counter rather than risking incorrect attribution.
+### Identity is not the same as authentication
 
-Resolver event loss is independently observable through `NameResolutionHealth::dropped_events`. It is not conflated with an absence of name-resolution activity.
+A peer certificate may be exactly observed without being authenticated.
+
+For an outbound client session, `peer_authenticated=true` is emitted only when:
+
+```text
+peer certificate present
++ SSL_get_verify_result() == X509_V_OK
++ an expected peer hostname was configured in OpenSSL
++ OpenSSL reports a matched peer hostname
+```
+
+For an inbound server session, `peer_authenticated=true` is emitted only when:
+
+```text
+peer certificate present
++ SSL_VERIFY_PEER is enabled
++ SSL_get_verify_result() == X509_V_OK
+```
+
+This intentionally underclaims applications that perform custom verification outside the supported OpenSSL verification configuration. MS3 does not infer authentication from certificate presence alone.
+
+## Exact TLS-to-connection correlation
+
+MS3.2 uses the Linux socket cookie from the application's actual TLS socket when available.
+
+```text
+actual SSL socket
+    |
+    +--> SO_COOKIE = 12345
+    |
+connection history
+    +--> canonical socket_cookie = 12345
+
+same process + non-conflicting durable identity/netns + correct direction
+    -> EXACT connection correlation
+```
+
+A TLS event with a valid cookie that does not match a connection cookie is rejected for that connection. The correlator does not fall back to a coincidental tuple after a cookie mismatch.
+
+If `SO_COOKIE` is unavailable, the fallback requires:
+
+- correct TLS local role mapped to connection direction (`CLIENT -> OUTBOUND`, `SERVER -> INBOUND`);
+- exact local/remote endpoint tuple;
+- same process;
+- non-conflicting durable process-start identity;
+- non-conflicting network namespace;
+- event time within the connection and bounded tuple-correlation window.
+
+That fallback is capped at `STRONGLY_CORRELATED`. Multiple possible matches are `AMBIGUOUS` and no evidence is persisted.
+
+### Direction-aware semantic relations
+
+MS3.2 keeps transport-session and peer-identity semantics explicit:
+
+```text
+CLIENT + peer certificate  -> OUTBOUND_SERVER_IDENTITY
+CLIENT + no peer cert      -> OUTBOUND_TLS_SESSION
+SERVER + peer certificate  -> INBOUND_CLIENT_IDENTITY
+SERVER + no peer cert      -> INBOUND_TLS_SESSION
+```
+
+`INBOUND_CLIENT_IDENTITY` means an exact peer certificate was presented on the actual accepted TLS session. Whether that identity was authenticated is separately represented by `peer_authenticated`.
+
+This is the evidence foundation for the dedicated inbound/mTLS policy work that follows; MS3.2 itself does not invent a new inbound Trust verdict rule.
+
+## Local evidence channel and provenance
+
+The shim sends a fixed-size bounded event over a local Unix datagram socket. The default endpoint is an abstract Unix socket scoped by UID:
+
+```text
+@neta-agent-tls-uid-<uid>
+```
+
+Both `neta-agent` and the instrumented application may override it with:
+
+```text
+NETA_TLS_CONTEXT_SOCKET=@custom-name
+```
+
+The receiver enables `SO_PASSCRED` and requires kernel-supplied `SCM_CREDENTIALS`. Payload PID/UID must equal the kernel sender PID/UID or the event is rejected. This prevents a different local process from simply asserting another process identity in the evidence payload.
+
+The receiver is bounded:
+
+- 1 MiB requested socket receive buffer;
+- at most 256 decoded events per poll;
+- `ObservationSession` holds at most 4,096 unresolved TLS-session observations;
+- malformed, truncated, or credential-mismatched events are rejected and counted;
+- receive-queue overflow is exposed where Linux provides `SO_RXQ_OVFL`.
+
+A dropped/rejected event means TLS evidence may be incomplete; it is never interpreted as proof that no TLS session occurred.
+
+## Running an instrumented application
+
+A normal dynamic build produces the agent and the optional instrumentation library:
+
+```text
+build/neta-agent
+build/libneta_tls_context.so
+```
+
+Start the observer normally, then opt a supported OpenSSL application into exact session evidence:
+
+```bash
+sudo ./build/neta-agent observe --outbound --duration 30 --db ./db/neta.db
+
+LD_PRELOAD="$PWD/build/libneta_tls_context.so" \
+  curl https://example.com/
+```
+
+For a long-lived service, the same preload can be configured in that service's environment. `NETA_TLS_CONTEXT_SOCKET` must match the observer if a non-default endpoint is used.
+
+Instrumentation is explicit and opt-in. Uninstrumented applications continue to receive all existing transport/lifecycle/route/resolver evidence, and target mode retains the independent supporting TLS probe.
 
 ## Coverage limitations
 
-The live collector currently covers the supported dynamically-linked, 64-bit glibc `getaddrinfo` ABI associated with the `libc.so.6` resolved by the running agent.
+MS3.2 currently claims actual-session TLS coverage only for supported dynamically linked OpenSSL 3 applications that execute the instrumented public handshake entry points and use an ordinary stream socket accessible through `SSL_get_fd()`.
 
-It does not claim coverage for:
+It does not claim exact application TLS coverage for:
 
-- static binaries;
-- musl or other non-glibc C libraries;
-- c-ares or custom DNS implementations that bypass glibc `getaddrinfo`;
-- application/runtime resolvers that do not cross this API boundary;
-- a distinct libc inode that is not the instrumented object, for example in another mount/container environment;
-- direct DNS traffic that bypasses the supported resolver API.
+- applications not launched with the instrumentation library;
+- statically linked OpenSSL;
+- BoringSSL, LibreSSL, GnuTLS, rustls, NSS, Schannel, Secure Transport, or custom TLS implementations;
+- TLS stacks that do not expose the real socket through the supported OpenSSL APIs;
+- QUIC/DTLS/UDP;
+- processes in environments where the local Unix evidence endpoint is not reachable;
+- application authentication performed entirely outside the observable OpenSSL verification configuration.
 
-The collector also requires the normal eBPF prerequisites already used by the lifecycle backend, including kernel BTF and sufficient BPF/uprobe authority. Unsupported or denied environments expose an explicit unavailable reason and continue transport assurance without name-resolution enrichment.
+Unsupported coverage stays unavailable rather than being downgraded into a false exact claim.
 
-`NETA_EBPF=OFF` provides the explicit unavailable stub and does not change MS2 polling/lifecycle fallback semantics.
+The shim is disabled for builds requesting static OpenSSL dependencies or a fully static executable. This avoids pretending the `LD_PRELOAD` mechanism applies to a static deployment model.
+
+## Relationship to the legacy TLS probe and Trust verdict
+
+The existing `TlsProbe` remains unchanged:
+
+```text
+neta-agent -> separate OpenSSL connection -> target
+```
+
+It remains `SUPPORTING` evidence only.
+
+MS3.2 stores actual application-session evidence as a separate evidence class and does **not** silently alter the established Performance/Trust rule set or verdict input hash. Therefore:
+
+```text
+current Trust verdict
+    -> still uses the existing versioned supporting-probe input
+
+MS3.2 exact application TLS evidence
+    -> independently inspectable and replay-integrity checked
+    -> future Trust rule changes require an explicit rule-set/version decision
+```
+
+This preserves previously validated MS0/MS1/MS2 verdict/replay behavior while adding stronger evidence.
 
 ## Persistence
 
-Correlated evidence is stored per connection in:
+Actual-session evidence is persisted in:
 
 ```text
-connection_name_resolution_evidence
-connection_name_resolution_addresses
+connection_tls_session_evidence
 ```
 
-The evidence row includes resolver start/completion time, query kind, mechanism, queried and canonical names, source, API result code, observation fidelity, correlation fidelity, relation, process identity, network namespace, and a deterministic evidence hash. Returned addresses are normalized into the child table.
+The row is owned by its connection with `ON DELETE CASCADE`, so existing storage maintenance also bounds MS3.2 evidence.
 
-Both tables use `ON DELETE CASCADE` from the connection. Existing MS2 connection pruning therefore also bounds MS3 resolver evidence. The agent does not persist an unbounded global stream of uncorrelated resolver events.
-
-Databases created by the earlier MS3 slice are migrated idempotently to add the nullable resolver `result_code` column.
-
-## ObservationSession integration
-
-`ObservationSession` accepts an optional `NameResolutionObserver`. Existing callers remain source-compatible.
-
-When the collector is active:
-
-1. resolver events are drained into the bounded transient window;
-2. after a lifecycle poll returns, resolver events are drained before processing CONNECT events, because the resolver API call necessarily completes before the subsequent application connect attempt;
-3. a newly admitted outbound connection is correlated against the bounded resolver window;
-4. one unique match is persisted;
-5. ambiguous matches are counted but not persisted;
-6. inbound connections are left without forward-resolution attribution.
-
-The same mechanism also works with target-mode transport polling when lifecycle evidence is unavailable, but a polling-discovered connection retains its existing `UNKNOWN` direction semantics and therefore is not upgraded to an outbound resolver relationship merely from coincidence.
+Repeated instrumentation callbacks for the same session are idempotently deduplicated by a deterministic session identity key. The persisted evidence retains a separate deterministic evidence hash for export/replay integrity.
 
 ## Evidence CLI, export, and replay
 
-`neta-agent evidence ID` now shows resolver evidence separately, including:
+`neta-agent evidence ID` presents actual application TLS evidence separately from the independent active probe. It reports the role/relation, observation and correlation fidelity, TLS version/cipher/ALPN/SNI, peer-certificate hashes, verification result, and authentication status.
 
-- query name;
-- resolver source;
-- API result code;
-- observation fidelity;
-- connection-correlation fidelity;
-- semantic relation;
-- returned addresses.
-
-Export schema version 3 adds `NAME_RESOLUTION` evidence records. Each record has a deterministic SHA-256, and the bundle contains the count and deterministic set hash of all resolver evidence attached to the connection.
-
-Replay behavior is deliberately separated into two questions:
-
-1. **Verdict replay** — unchanged. Name-resolution evidence is not currently an input to Performance or Trust, so the validated MS0 verdict-input hash remains unchanged.
-2. **Resolver evidence integrity** — schema-3 replay verifies the exported resolver record count and set hash and reports `MATCH` or `MISMATCH` independently.
-
-Schema-1 and schema-2 bundles remain accepted. They report resolver evidence as not present rather than failing replay.
-
-## Source modules
-
-Portable/core:
+Export schema version 4 adds `TLS_SESSION` evidence records plus:
 
 ```text
-include/neta/name_resolution.hpp
-src/core/name_resolution.cpp
-src/core/history_name_resolution.cpp
-include/neta/observation_session.hpp
-src/core/observation_session.cpp
+tls_session_count
+tls_session_hash
 ```
 
-Linux eBPF collector:
+Replay verifies the deterministic set of exported TLS-session hashes separately from the existing verdict replay. Schema versions 1-3 remain accepted; they report TLS application-session evidence as not present.
 
-```text
-src/platform/linux/ebpf/name_resolution.bpf.c
-src/platform/linux/ebpf/name_resolution_wire.h
-src/platform/linux/ebpf/name_resolution_decoder.hpp
-src/platform/linux/ebpf/name_resolution_decoder.cpp
-src/platform/linux/ebpf/name_resolution_loader.cpp
-src/platform/linux/ebpf/name_resolution_loader_stub.cpp
-```
+Name-resolution schema-3 integrity behavior is unchanged.
 
-The existing embedded-BPF helper now accepts a symbol parameter so lifecycle and name-resolution BPF objects can coexist without duplicating the embedding implementation.
+## Build and regression behavior
 
-No new third-party dependency is introduced. The implementation uses the project's existing C++20, libbpf, SQLite, OpenSSL, Linux API, and platform dynamic-loader facilities.
+No new third-party dependency is introduced. MS3.2 uses the existing OpenSSL 3 dependency, C++20, SQLite, Linux socket APIs, and the standard dynamic loader facilities already used by the project.
 
-## Regression requirements
+Normal dynamic builds include `libneta_tls_context.so`. `NETA_EBPF=OFF` still builds and tests the TLS-session receiver/correlation path because MS3.2 does not depend on eBPF. The resolver collector remains unavailable in that configuration exactly as before.
 
-Every MS3 change must continue to preserve MS0/MS1/MS2 behavior. In particular:
+Focused MS3.2 coverage includes:
 
-- no listener may become an ordinary connection-history row;
-- inbound and outbound direction semantics must not change;
-- ambiguous cookie or resolver correlation must remain unresolved;
-- target-mode supporting TLS behavior must remain unchanged;
-- inbound/all modes must not gain fake TLS identity;
-- lifecycle and resolver drop health must remain explicit;
-- tracker, scheduler, resolver buffers, and storage must remain bounded;
-- SQLite cleanup must continue to remove MS3 evidence with its owning connection;
-- name-resolution enrichment must not alter the current deterministic Performance/Trust input hash.
+- exact socket-cookie correlation;
+- strongly-correlated tuple fallback;
+- cookie mismatch refusing tuple fallback;
+- ambiguity remaining unresolved;
+- outbound/inbound role isolation;
+- inbound peer-certificate relation semantics;
+- partial-event fidelity downgrade;
+- sender-credential validation and malformed-wire rejection;
+- SQLite round-trip/idempotence/delete cascade;
+- `ObservationSession` attachment;
+- export/replay integrity and tamper detection;
+- a real non-privileged OpenSSL client/server handshake executed with `LD_PRELOAD` instrumentation.
 
-Focused MS3 tests cover correlation, ambiguity, fidelity downgrade, wire decoding, persistence/result-code migration, ObservationSession integration, export/replay integrity including tamper detection, and a controlled real `getaddrinfo` eBPF integration path. The privileged integration test uses return code 77 when the host cannot load/attach BPF programs; a skip is not considered a privileged runtime pass.
+## Remaining MS3 work after MS3.2
 
-## Remaining MS3 work
+The remaining major MS3 areas are:
 
-The next major MS3 areas are:
+1. dedicated direction-aware Trust policy for inbound authenticated client identity/mTLS, if that evidence should affect deterministic verdicts;
+2. richer stable, privacy-conscious host/network-environment identity;
+3. optional HTTP/RPC/span correlation as higher-layer evidence;
+4. additional resolver or TLS backends only where source, coverage, fidelity, resource cost, and licensing can be stated precisely;
+5. controlled native-Linux end-to-end acceptance for supported collectors where CI cannot exercise privileged BPF attachment.
 
-1. exact TLS/session evidence only where an OS or application mechanism observes the real application session;
-2. distinct outbound server identity and inbound authenticated-client/mTLS identity relations;
-3. optional HTTP/RPC/span correlation as higher-layer evidence, never as a prerequisite for transport assurance;
-4. richer stable, privacy-conscious host/network-environment identity;
-5. additional resolver backends only when their coverage and event semantics can be stated precisely.
+Every later MS3 change must preserve the same rule: stronger attribution is added only when the native/application observation source and fidelity are explicit.

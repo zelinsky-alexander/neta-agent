@@ -3,6 +3,7 @@
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 #include "neta/name_resolution.hpp"
+#include "neta/tls_session.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,14 @@ struct PlatformCapabilities {
     std::optional<std::uint64_t> name_resolution_dropped_events;
     std::string name_resolution_source;
     std::string name_resolution_unavailable_reason;
+    bool application_tls_session_events{false};
+    bool tls_session_sender_credentials_verified{false};
+    bool tls_session_drop_counter{false};
+    std::optional<std::uint64_t> tls_session_dropped_events;
+    std::uint64_t tls_session_rejected_events{0};
+    std::string tls_session_source;
+    std::string tls_session_endpoint;
+    std::string tls_session_unavailable_reason;
     bool exact_dns_observation{false};
     bool exact_tls_observation{false};
 };
@@ -63,6 +72,7 @@ PlatformCapabilities capabilities();
 std::unique_ptr<ConnectionObserver> make_connection_observer();
 std::unique_ptr<LifecycleObserver> make_lifecycle_observer();
 std::unique_ptr<NameResolutionObserver> make_name_resolution_observer();
+std::unique_ptr<TlsSessionObserver> make_tls_session_observer();
 std::unique_ptr<ProcessResolver> make_process_resolver();
 std::unique_ptr<RouteObserver> make_route_observer();
 

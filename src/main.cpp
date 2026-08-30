@@ -4,6 +4,7 @@
 #include "neta/history_store.hpp"
 #include "neta/platform.hpp"
 #include "neta/tls_probe.hpp"
+#include "neta/tls_session.hpp"
 #include "neta/verdict.hpp"
 
 #include <algorithm>
@@ -212,7 +213,18 @@ void cmd_capabilities() {
               << "Resolver loss counter     " << (capabilities.name_resolution_drop_counter ? "YES" : "NO") << "\n"
               << "Resolver dropped events   " << (capabilities.name_resolution_dropped_events
                   ? std::to_string(*capabilities.name_resolution_dropped_events) : "UNAVAILABLE") << "\n"
-              << "Exact TLS identity         " << (capabilities.exact_tls_observation ? "YES" : "NO (active probe is SUPPORTING)") << "\n"
+              << "Application TLS sessions  " << (capabilities.application_tls_session_events ? "YES" : "NO") << "\n"
+              << "TLS session source        " << (capabilities.tls_session_source.empty()
+                  ? "UNAVAILABLE" : capabilities.tls_session_source) << "\n"
+              << "TLS context endpoint      " << (capabilities.tls_session_endpoint.empty()
+                  ? "UNAVAILABLE" : capabilities.tls_session_endpoint) << "\n"
+              << "TLS sender credentials    " << (capabilities.tls_session_sender_credentials_verified ? "VERIFIED" : "UNAVAILABLE") << "\n"
+              << "TLS dropped events        " << (capabilities.tls_session_dropped_events
+                  ? std::to_string(*capabilities.tls_session_dropped_events) : "UNAVAILABLE") << "\n"
+              << "TLS rejected events       " << capabilities.tls_session_rejected_events << "\n"
+              << "Exact TLS identity         " << (capabilities.exact_tls_observation
+                  ? "YES (instrumented OpenSSL sessions only)"
+                  : "NO (active probe remains SUPPORTING)") << "\n"
               << "Exact DNS transaction      " << (capabilities.exact_dns_observation ? "YES" : "NO (resolver API event is not a DNS packet claim)") << "\n";
     if (!capabilities.connection_lifecycle_events) {
         const bool outbound_lifecycle = capabilities.ebpf_connect_events && capabilities.ebpf_close_events;
@@ -221,6 +233,9 @@ void cmd_capabilities() {
     }
     if (!capabilities.application_name_resolution_events) {
         std::cout << "Resolver unavailable       " << capabilities.name_resolution_unavailable_reason << "\n";
+    }
+    if (!capabilities.application_tls_session_events) {
+        std::cout << "TLS session unavailable    " << capabilities.tls_session_unavailable_reason << "\n";
     }
 }
 
@@ -323,6 +338,7 @@ void cmd_evidence(int argc, char** argv) {
     const auto id = std::stoll(argv[2]);
     const auto data = store.export_data(id);
     const auto names = store.name_resolution_evidence_for_connection(id);
+    const auto tls_sessions = store.tls_session_evidence_for_connection(id);
     std::cout << "Connection CONN-" << id << "\n  Process: "
               << (data.connection.process.comm.empty() ? "<unattributed>" : data.connection.process.comm) << '['
               << data.connection.process.pid << "]\n  Path: " << data.connection.local_ip << ':' << data.connection.local_port
@@ -345,6 +361,26 @@ void cmd_evidence(int argc, char** argv) {
                   << " correlation=" << to_string(evidence.correlation_fidelity)
                   << " relation=" << to_string(evidence.relation) << " addresses=" << name_resolution_addresses(evidence) << '\n';
     }
+    std::cout << "\nApplication TLS session evidence: " << tls_sessions.size() << "\n";
+    for (const auto& evidence : tls_sessions) {
+        const auto& tls = evidence.observation;
+        std::cout << "  Role: " << to_string(tls.local_role)
+                  << " relation=" << to_string(evidence.relation)
+                  << " observation=" << to_string(tls.fidelity)
+                  << " correlation=" << to_string(evidence.correlation_fidelity)
+                  << " source=" << tls.source << '\n'
+                  << "    Version: " << tls.tls_version
+                  << " cipher=" << tls.cipher
+                  << " ALPN=" << (tls.alpn.empty() ? "<none>" : tls.alpn)
+                  << " SNI=" << (tls.sni.empty() ? "<none>" : tls.sni) << '\n'
+                  << "    Peer cert: " << (tls.peer_certificate_present ? "yes" : "no")
+                  << " authenticated=" << (tls.peer_authenticated ? "yes" : "no")
+                  << " verify=" << (tls.verify_result ? std::to_string(*tls.verify_result) : "<unavailable>") << '\n'
+                  << "    Expected name: " << tls.expected_peer_name.value_or("<unavailable>")
+                  << " matched name: " << tls.matched_peer_name.value_or("<unavailable>") << '\n'
+                  << "    Leaf SHA-256: " << (tls.leaf_sha256.empty() ? "<unavailable>" : tls.leaf_sha256)
+                  << "\n    SPKI SHA-256: " << (tls.spki_sha256.empty() ? "<unavailable>" : tls.spki_sha256) << '\n';
+    }
     std::cout << "\nTCP samples (EXACT): " << data.samples.size() << "\n";
     if (data.route) {
         const auto& route = *data.route;
@@ -355,7 +391,7 @@ void cmd_evidence(int argc, char** argv) {
     }
     if (data.tls) {
         const auto& tls = *data.tls;
-        std::cout << "\nTLS active probe (SUPPORTING)\n  Target:         " << tls.target_host << ':' << tls.target_port
+        std::cout << "\nTLS active probe (SUPPORTING, separate connection)\n  Target:         " << tls.target_host << ':' << tls.target_port
                   << "\n  Version:        " << tls.tls_version << "\n  Cipher:         " << tls.cipher
                   << "\n  SPKI SHA-256:   " << tls.spki_sha256 << '\n';
     }
@@ -368,6 +404,10 @@ void cmd_explain(int argc, char** argv) {
     auto data = store.export_data(id);
     if (!data.verdict) throw std::runtime_error("no verdict for connection (capture a baseline, then observe again)");
     const auto metrics = aggregate_metrics(data.samples);
+    const auto tls_sessions = store.tls_session_evidence_for_connection(id);
+    const auto exact_sessions = std::count_if(tls_sessions.begin(), tls_sessions.end(), [](const auto& evidence) {
+        return evidence.correlation_fidelity == EvidenceFidelity::Exact;
+    });
     std::cout << "Connection Assurance\n--------------------\nCONN-" << id << "  " << data.connection.process.comm << '['
               << data.connection.process.pid << "]\n" << data.connection.local_ip << ':' << data.connection.local_port << " -> "
               << data.connection.remote_ip << ':' << data.connection.remote_port << "\nDirection: " << to_string(data.connection.direction)
@@ -378,7 +418,11 @@ void cmd_explain(int argc, char** argv) {
               << metrics.retransmission_delta << "\nRule confidence: " << data.verdict->rule_confidence << "\n\nTrust: "
               << to_string(data.verdict->trust) << "\nHypothesis: "
               << (data.verdict->trust_hypothesis.empty() ? "none" : data.verdict->trust_hypothesis)
-              << "\nTLS evidence fidelity: SUPPORTING (independent active probe)\n\nCausality: performance/trust causal relation NOT ESTABLISHED"
+              << "\nActual application TLS sessions: " << tls_sessions.size()
+              << " (EXACT links: " << exact_sessions << ')'
+              << "\nCurrent Trust rule input: SUPPORTING independent active probe"
+              << "\nMS3.2 exact-session evidence is retained separately and does not silently change the versioned Trust rule"
+              << "\n\nCausality: performance/trust causal relation NOT ESTABLISHED"
               << "\nRule set: " << data.verdict->rule_set_version << "\nRule hash: " << data.verdict->rule_set_hash
               << "\nInput hash: " << data.verdict->input_hash << "\n";
 }
@@ -389,10 +433,12 @@ void cmd_export(int argc, char** argv) {
     const auto id = std::stoll(argv[2]);
     const auto data = store.export_data(id);
     const auto names = store.name_resolution_evidence_for_connection(id);
+    const auto tls_sessions = store.tls_session_evidence_for_connection(id);
     if (!data.baseline || !data.verdict) throw std::runtime_error("export requires baseline and verdict");
     const auto metrics = aggregate_metrics(data.samples);
     const auto name_hash = name_resolution_evidence_set_hash(names);
-    std::cout << "{\n  \"schema_version\":3,\n  \"connection_id\":" << id
+    const auto tls_session_hash = tls_session_evidence_set_hash(tls_sessions);
+    std::cout << "{\n  \"schema_version\":4,\n  \"connection_id\":" << id
               << ",\n  \"direction\":\"" << to_string(data.connection.direction) << "\""
               << ",\n  \"target_host\":\"" << json_escape(data.connection.target_host) << "\",\n  \"target_port\":" << data.connection.remote_port
               << ",\n  \"performance\":\"" << to_string(data.verdict->performance) << "\",\n  \"trust\":\"" << to_string(data.verdict->trust)
@@ -410,7 +456,9 @@ void cmd_export(int argc, char** argv) {
               << ",\n  \"tls_hostname_valid\":" << (data.tls && data.tls->hostname_valid ? "true" : "false")
               << ",\n  \"tls_hash\":\"" << (data.tls ? data.tls->sha256 : "")
               << "\",\n  \"name_resolution_count\":" << names.size()
-              << ",\n  \"name_resolution_hash\":\"" << name_hash << "\",\n  \"evidence\":[\n";
+              << ",\n  \"name_resolution_hash\":\"" << name_hash
+              << "\",\n  \"tls_session_count\":" << tls_sessions.size()
+              << ",\n  \"tls_session_hash\":\"" << tls_session_hash << "\",\n  \"evidence\":[\n";
     bool first = true;
     for (const auto& sample : data.samples) {
         const auto hash = sha256_hex(std::to_string(sample.observed_ns) + '|' + std::to_string(sample.state) + '|'
@@ -437,6 +485,24 @@ void cmd_export(int argc, char** argv) {
                   << json_escape(name_resolution_addresses(evidence)) << "\",\"sha256\":\""
                   << name_resolution_evidence_hash(evidence) << "\"}";
     }
+    for (const auto& evidence : tls_sessions) {
+        if (!first) std::cout << ",\n";
+        first = false;
+        const auto& tls = evidence.observation;
+        std::cout << "    {\"kind\":\"TLS_SESSION\",\"fidelity\":\""
+                  << to_string(evidence.correlation_fidelity) << "\",\"observation_fidelity\":\""
+                  << to_string(tls.fidelity) << "\",\"role\":\"" << to_string(tls.local_role)
+                  << "\",\"relation\":\"" << to_string(evidence.relation)
+                  << "\",\"source\":\"" << json_escape(tls.source)
+                  << "\",\"tls_version\":\"" << json_escape(tls.tls_version)
+                  << "\",\"cipher\":\"" << json_escape(tls.cipher)
+                  << "\",\"alpn\":\"" << json_escape(tls.alpn)
+                  << "\",\"sni\":\"" << json_escape(tls.sni)
+                  << "\",\"leaf_sha256\":\"" << tls.leaf_sha256
+                  << "\",\"spki_sha256\":\"" << tls.spki_sha256
+                  << "\",\"peer_authenticated\":" << (tls.peer_authenticated ? "true" : "false")
+                  << ",\"sha256\":\"" << tls_session_evidence_hash(evidence) << "\"}";
+    }
     std::cout << "\n  ]\n}\n";
 }
 
@@ -446,7 +512,7 @@ void cmd_replay(int argc, char** argv) {
     if (!in) throw std::runtime_error("cannot open bundle");
     const std::string text((std::istreambuf_iterator<char>(in)), {});
     const auto schema_version = json_u64_value(text, "schema_version");
-    if (schema_version > 3) throw std::runtime_error("unsupported export schema version");
+    if (schema_version > 4) throw std::runtime_error("unsupported export schema version");
     Baseline baseline;
     baseline.target_host = json_string_value(text, "target_host");
     baseline.target_port = static_cast<std::uint16_t>(json_u64_value(text, "target_port"));
@@ -482,11 +548,20 @@ void cmd_replay(int argc, char** argv) {
         name_result = hashes.size() == expected_count && evidence_hash_set_hash(hashes) == expected_hash
             ? "MATCH" : "MISMATCH";
     }
+    std::string tls_session_result = "NOT PRESENT (schema <4)";
+    if (schema_version >= 4) {
+        const auto expected_count = json_u64_value(text, "tls_session_count");
+        const auto expected_hash = json_string_value(text, "tls_session_hash");
+        const auto hashes = evidence_hashes_for_kind(text, "TLS_SESSION");
+        tls_session_result = hashes.size() == expected_count && evidence_hash_set_hash(hashes) == expected_hash
+            ? "MATCH" : "MISMATCH";
+    }
     std::cout << "Connection direction:       " << to_string(direction)
               << "\nOriginal Performance/Trust: " << original_performance << " / " << original_trust
               << "\nReplay Performance/Trust:   " << to_string(replay.performance) << " / " << to_string(replay.trust)
               << "\nEvidence input hash:        " << (replay.input_hash == original_input_hash ? "MATCH" : "MISMATCH")
               << "\nName-resolution evidence:   " << name_result
+              << "\nTLS application sessions:    " << tls_session_result
               << "\nRule set:                   " << (replay.rule_set_hash == original_rule_hash ? "MATCH" : "MISMATCH")
               << "\nVerdict:                    " << ((to_string(replay.performance) == original_performance &&
                    to_string(replay.trust) == original_trust) ? "MATCH" : "MISMATCH") << "\n";
