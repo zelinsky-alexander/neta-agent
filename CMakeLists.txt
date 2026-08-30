@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(NETA_ENABLE_TESTS "Build tests" ON)
 option(NETA_STATIC_DEPS "Prefer static OpenSSL/SQLite and static C++ runtime when available" OFF)
 option(NETA_FULL_STATIC "Request a fully static executable (intended for musl release builds)" OFF)
-set(NETA_EBPF "AUTO" CACHE STRING "Build lifecycle eBPF support: AUTO, ON, or OFF")
+set(NETA_EBPF "AUTO" CACHE STRING "Build lifecycle/application-context eBPF support: AUTO, ON, or OFF")
 set_property(CACHE NETA_EBPF PROPERTY STRINGS AUTO ON OFF)
 if(NOT NETA_EBPF MATCHES "^(AUTO|ON|OFF)$")
     message(FATAL_ERROR "NETA_EBPF must be AUTO, ON, or OFF")
@@ -52,7 +52,7 @@ if(NOT NETA_EBPF STREQUAL "OFF")
         message(FATAL_ERROR "NETA_EBPF=ON requires a clang compiler with the BPF target")
     endif()
     if(NETA_EBPF STREQUAL "AUTO" AND NOT NETA_HAVE_EBPF)
-        message(STATUS "Lifecycle eBPF build support unavailable; building polling fallback")
+        message(STATUS "eBPF build support unavailable; building polling/context fallback")
     endif()
 endif()
 
@@ -62,6 +62,7 @@ set(NETA_PLATFORM_SOURCES
     src/platform/linux/process_resolver.cpp
     src/platform/linux/route_observer.cpp
     src/platform/linux/ebpf/lifecycle_decoder.cpp
+    src/platform/linux/ebpf/name_resolution_decoder.cpp
 )
 
 if(NETA_HAVE_EBPF)
@@ -70,24 +71,25 @@ if(NETA_HAVE_EBPF)
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
         set(NETA_BPF_ARCH arm64)
     else()
-        message(FATAL_ERROR "Lifecycle eBPF currently supports x86_64 and arm64 release targets")
+        message(FATAL_ERROR "eBPF currently supports x86_64 and arm64 release targets")
     endif()
 
     set(NETA_BPF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/ebpf")
     set(NETA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-    set(NETA_BPF_OBJECT "${NETA_GENERATED_DIR}/lifecycle.bpf.o")
-    set(NETA_BPF_BYTES "${NETA_GENERATED_DIR}/lifecycle_bpf_bytes.inc")
     file(MAKE_DIRECTORY "${NETA_GENERATED_DIR}")
     set(NETA_BPF_INCLUDE_ARGS "-I${NETA_BPF_DIR}" -I/usr/include)
     if(CMAKE_LIBRARY_ARCHITECTURE)
         list(APPEND NETA_BPF_INCLUDE_ARGS "-I/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}")
     endif()
+
+    set(NETA_LIFECYCLE_BPF_OBJECT "${NETA_GENERATED_DIR}/lifecycle.bpf.o")
+    set(NETA_LIFECYCLE_BPF_BYTES "${NETA_GENERATED_DIR}/lifecycle_bpf_bytes.inc")
     add_custom_command(
-        OUTPUT "${NETA_BPF_OBJECT}"
+        OUTPUT "${NETA_LIFECYCLE_BPF_OBJECT}"
         COMMAND "${NETA_CLANG_EXECUTABLE}" -g -O2 -target bpf
                 "-fdebug-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=."
                 -D__TARGET_ARCH_${NETA_BPF_ARCH} ${NETA_BPF_INCLUDE_ARGS}
-                -c "${NETA_BPF_DIR}/lifecycle.bpf.c" -o "${NETA_BPF_OBJECT}"
+                -c "${NETA_BPF_DIR}/lifecycle.bpf.c" -o "${NETA_LIFECYCLE_BPF_OBJECT}"
         DEPENDS
             "${NETA_BPF_DIR}/lifecycle.bpf.c"
             "${NETA_BPF_DIR}/lifecycle_wire.h"
@@ -95,17 +97,51 @@ if(NETA_HAVE_EBPF)
         VERBATIM
     )
     add_custom_command(
-        OUTPUT "${NETA_BPF_BYTES}"
-        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${NETA_BPF_OBJECT}" "-DOUTPUT=${NETA_BPF_BYTES}"
+        OUTPUT "${NETA_LIFECYCLE_BPF_BYTES}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${NETA_LIFECYCLE_BPF_OBJECT}"
+                "-DOUTPUT=${NETA_LIFECYCLE_BPF_BYTES}" "-DSYMBOL=Lifecycle"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
-        DEPENDS "${NETA_BPF_OBJECT}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS "${NETA_LIFECYCLE_BPF_OBJECT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
         VERBATIM
     )
+
+    set(NETA_NAME_RESOLUTION_BPF_OBJECT "${NETA_GENERATED_DIR}/name_resolution.bpf.o")
+    set(NETA_NAME_RESOLUTION_BPF_BYTES "${NETA_GENERATED_DIR}/name_resolution_bpf_bytes.inc")
+    add_custom_command(
+        OUTPUT "${NETA_NAME_RESOLUTION_BPF_OBJECT}"
+        COMMAND "${NETA_CLANG_EXECUTABLE}" -g -O2 -target bpf
+                "-fdebug-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=."
+                -D__TARGET_ARCH_${NETA_BPF_ARCH} ${NETA_BPF_INCLUDE_ARGS}
+                -c "${NETA_BPF_DIR}/name_resolution.bpf.c"
+                -o "${NETA_NAME_RESOLUTION_BPF_OBJECT}"
+        DEPENDS
+            "${NETA_BPF_DIR}/name_resolution.bpf.c"
+            "${NETA_BPF_DIR}/name_resolution_wire.h"
+            "${NETA_BPF_DIR}/vmlinux_min.h"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${NETA_NAME_RESOLUTION_BPF_BYTES}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${NETA_NAME_RESOLUTION_BPF_OBJECT}"
+                "-DOUTPUT=${NETA_NAME_RESOLUTION_BPF_BYTES}" "-DSYMBOL=NameResolution"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS "${NETA_NAME_RESOLUTION_BPF_OBJECT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        VERBATIM
+    )
+
     set_source_files_properties(src/platform/linux/ebpf/lifecycle_loader.cpp
-        PROPERTIES OBJECT_DEPENDS "${NETA_BPF_BYTES}")
-    list(APPEND NETA_PLATFORM_SOURCES src/platform/linux/ebpf/lifecycle_loader.cpp)
+        PROPERTIES OBJECT_DEPENDS "${NETA_LIFECYCLE_BPF_BYTES}")
+    set_source_files_properties(src/platform/linux/ebpf/name_resolution_loader.cpp
+        PROPERTIES OBJECT_DEPENDS "${NETA_NAME_RESOLUTION_BPF_BYTES}")
+    list(APPEND NETA_PLATFORM_SOURCES
+         src/platform/linux/ebpf/lifecycle_loader.cpp
+         src/platform/linux/ebpf/name_resolution_loader.cpp)
 else()
-    list(APPEND NETA_PLATFORM_SOURCES src/platform/linux/ebpf/lifecycle_loader_stub.cpp)
+    list(APPEND NETA_PLATFORM_SOURCES
+         src/platform/linux/ebpf/lifecycle_loader_stub.cpp
+         src/platform/linux/ebpf/name_resolution_loader_stub.cpp)
 endif()
 
 add_library(neta_core
@@ -135,7 +171,7 @@ add_library(neta_core
 )
 
 target_include_directories(neta_core PUBLIC include PRIVATE src/platform/linux/ebpf)
-target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3)
+target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3 ${CMAKE_DL_LIBS})
 if(NETA_HAVE_EBPF)
     target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
     target_link_libraries(neta_core PRIVATE PkgConfig::LIBBPF)
