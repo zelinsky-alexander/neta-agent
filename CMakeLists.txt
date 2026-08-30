@@ -239,11 +239,32 @@ if(NETA_ENABLE_TESTS)
         add_test(NAME neta_${NETA_MS2_TEST}_test COMMAND neta_${NETA_MS2_TEST}_test)
     endforeach()
 
-    foreach(NETA_MS3_TEST IN ITEMS name_resolution history_name_resolution)
+    foreach(NETA_MS3_TEST IN ITEMS name_resolution history_name_resolution observation_name_resolution)
         add_executable(neta_${NETA_MS3_TEST}_test tests/${NETA_MS3_TEST}_test.cpp)
         target_link_libraries(neta_${NETA_MS3_TEST}_test PRIVATE neta_core)
         target_compile_options(neta_${NETA_MS3_TEST}_test PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
         add_test(NAME neta_${NETA_MS3_TEST}_test COMMAND neta_${NETA_MS3_TEST}_test)
     endforeach()
+
+    add_executable(neta_name_resolution_decoder_test tests/name_resolution_decoder_test.cpp)
+    target_link_libraries(neta_name_resolution_decoder_test PRIVATE neta_core)
+    target_include_directories(neta_name_resolution_decoder_test PRIVATE src/platform/linux/ebpf)
+    target_compile_options(neta_name_resolution_decoder_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_name_resolution_decoder_test COMMAND neta_name_resolution_decoder_test)
+
+    add_executable(neta_name_resolution_export_replay_test tests/name_resolution_export_replay_test.cpp)
+    target_link_libraries(neta_name_resolution_export_replay_test PRIVATE neta_core)
+    target_compile_options(neta_name_resolution_export_replay_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_name_resolution_export_replay_test
+             COMMAND neta_name_resolution_export_replay_test $<TARGET_FILE:neta-agent>)
+
+    add_executable(neta_name_resolution_ebpf_integration tests/name_resolution_ebpf_integration.cpp)
+    target_link_libraries(neta_name_resolution_ebpf_integration PRIVATE neta_core)
+    target_compile_options(neta_name_resolution_ebpf_integration PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_name_resolution_ebpf_integration COMMAND neta_name_resolution_ebpf_integration)
+    set_tests_properties(neta_name_resolution_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
 endif()
