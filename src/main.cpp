@@ -391,9 +391,22 @@ void cmd_evidence(int argc, char** argv) {
     }
     if (data.tls) {
         const auto& tls = *data.tls;
-        std::cout << "\nTLS active probe (SUPPORTING, separate connection)\n  Target:         " << tls.target_host << ':' << tls.target_port
-                  << "\n  Version:        " << tls.tls_version << "\n  Cipher:         " << tls.cipher
-                  << "\n  SPKI SHA-256:   " << tls.spki_sha256 << '\n';
+        std::cout << "\nTLS active probe (SUPPORTING)\n"
+                  << "  Relation:       separate connection\n"
+                  << "  Target:         " << tls.target_host << ':' << tls.target_port << '\n'
+                  << "  Version:        " << tls.tls_version << '\n'
+                  << "  Cipher:         " << tls.cipher << '\n'
+                  << "  ALPN:           " << (tls.alpn.empty() ? "<none>" : tls.alpn) << '\n'
+                  << "  Chain valid:    " << (tls.chain_valid ? "yes" : "no") << '\n'
+                  << "  Hostname valid: " << (tls.hostname_valid ? "yes" : "no") << '\n'
+                  << "  Leaf SHA-256:   " << tls.leaf_sha256 << '\n'
+                  << "  SPKI SHA-256:   " << tls.spki_sha256 << '\n'
+                  << "  Subject:        " << tls.subject << '\n'
+                  << "  Issuer:         " << tls.issuer << '\n'
+                  << "  Not before:     " << tls.not_before << '\n'
+                  << "  Not after:      " << tls.not_after << '\n'
+                  << "  Observed ns:    " << tls.observed_ns << '\n'
+                  << "  SHA-256:        " << tls.sha256 << '\n';
     }
 }
 
