@@ -1,5 +1,6 @@
 #pragma once
 
+#include "neta/host_network_environment.hpp"
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 #include "neta/name_resolution.hpp"
@@ -28,6 +29,7 @@ struct ExportData {
     std::vector<TcpSnapshot> samples;
     std::vector<ConnectionLifecycleEvent> lifecycle_events;
     std::optional<RouteObservation> route;
+    std::optional<HostNetworkEnvironmentEvidence> host_network_environment;
     std::optional<TlsObservation> tls;
     std::optional<Baseline> baseline;
     std::optional<AssuranceVerdict> verdict;
@@ -55,6 +57,8 @@ public:
     void add_lifecycle_event(std::int64_t connection_id,
                              const ConnectionLifecycleEvent& event);
     std::int64_t add_route(std::int64_t connection_id, const RouteObservation& route);
+    std::int64_t add_host_network_environment(
+        std::int64_t connection_id, const HostNetworkEnvironmentEvidence& evidence);
     std::int64_t add_name_resolution_evidence(std::int64_t connection_id,
                                               const NameResolutionEvidence& evidence);
     std::int64_t add_tls_session_evidence(std::int64_t connection_id,
@@ -76,6 +80,8 @@ public:
                                                        std::uint16_t port,
                                                        std::size_t limit) const;
     std::optional<RouteObservation> route_for_connection(std::int64_t id) const;
+    std::optional<HostNetworkEnvironmentEvidence> host_network_environment_for_connection(
+        std::int64_t id) const;
     std::vector<NameResolutionEvidence> name_resolution_evidence_for_connection(
         std::int64_t id) const;
     std::vector<TlsSessionEvidence> tls_session_evidence_for_connection(
