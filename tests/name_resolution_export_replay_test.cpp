@@ -114,7 +114,7 @@ void export_and_replay_preserve_name_evidence(const char* binary) {
         " > " + shell_quote(bundle);
     assert(std::system(export_command.c_str()) == 0);
     const auto exported = read_file(bundle);
-    assert(exported.find("\"schema_version\":4") != std::string::npos);
+    assert(exported.find("\"schema_version\":5") != std::string::npos);
     assert(exported.find("\"kind\":\"NAME_RESOLUTION\"") != std::string::npos);
     assert(exported.find("\"query\":\"api.example.test\"") != std::string::npos);
     assert(exported.find("\"name_resolution_count\":1") != std::string::npos);

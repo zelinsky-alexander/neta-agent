@@ -63,6 +63,28 @@ void finalize_target_connections(const std::vector<std::int64_t>& connection_ids
     }
 }
 
+void finalize_inbound_connections(const std::vector<std::int64_t>& connection_ids,
+                                  HistoryStore& store) {
+    for (const auto connection_id : connection_ids) {
+        const auto connection = store.connection(connection_id);
+        if (!connection || connection->direction != ConnectionDirection::Inbound) continue;
+
+        const auto tls_sessions = store.tls_session_evidence_for_connection(connection_id);
+        const auto context = inbound_trust_context(tls_sessions);
+        std::optional<Baseline> accepted_identity;
+        const auto baseline_key = inbound_client_baseline_key(*connection, context.subject);
+        if (!baseline_key.empty()) {
+            accepted_identity = store.baseline_for(baseline_key, connection->local_port);
+        }
+
+        const auto verdict = evaluate_inbound(
+            accepted_identity,
+            aggregate_metrics(store.samples_for_connection(connection_id)),
+            context);
+        store.save_verdict(connection_id, verdict);
+    }
+}
+
 } // namespace
 
 void run_observation_command(int argc, char** argv, bool service_mode) {
@@ -142,6 +164,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     if (options.target) {
         finalize_target_connections(result.connection_ids, store, baseline, tls, tls_id);
     }
+    finalize_inbound_connections(result.connection_ids, store);
     maintenance.run_now();
 
     const auto lifecycle_health = lifecycle->health();

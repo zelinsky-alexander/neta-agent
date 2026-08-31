@@ -1,5 +1,6 @@
 #include "neta/connection_admission.hpp"
 #include "neta/history_store.hpp"
+#include "neta/tls_session.hpp"
 #include "neta/verdict.hpp"
 
 #include <sqlite3.h>
@@ -232,6 +233,145 @@ void test_changed_and_combined_replay() {
     assert(combined_replay.rule_set_hash == combined.rule_set_hash);
 }
 
+TlsSessionEvidence inbound_evidence(std::string spki, bool certificate_present,
+                                    bool verification_required, std::optional<std::int64_t> verify_result,
+                                    bool authenticated,
+                                    EvidenceFidelity correlation = EvidenceFidelity::Exact,
+                                    std::string subject = "CN=client-a",
+                                    std::string issuer = "CN=test-ca") {
+    TlsSessionEvidence evidence;
+    evidence.observation.observed_ns = 50'000;
+    evidence.observation.local_role = TlsSessionRole::Server;
+    evidence.observation.process.pid = 333;
+    evidence.observation.process.uid = 1000;
+    evidence.observation.process.start_ticks = 444;
+    evidence.observation.process.comm = "mtls-server";
+    evidence.observation.network_namespace_inode = 55;
+    evidence.observation.socket_cookie = 66;
+    evidence.observation.local = {"127.0.0.1", 9443};
+    evidence.observation.remote = {"127.0.0.2", 50123};
+    evidence.observation.tls_version = "TLSv1.3";
+    evidence.observation.cipher = "TLS_AES_256_GCM_SHA384";
+    evidence.observation.peer_certificate_present = certificate_present;
+    evidence.observation.peer_verification_required = verification_required;
+    evidence.observation.verify_result = verify_result;
+    evidence.observation.peer_authenticated = authenticated;
+    evidence.observation.spki_sha256 = std::move(spki);
+    evidence.observation.subject = std::move(subject);
+    evidence.observation.issuer = std::move(issuer);
+    evidence.observation.fidelity = EvidenceFidelity::Exact;
+    evidence.observation.source = "openssl3:application-shim";
+    evidence.relation = certificate_present
+        ? TlsSessionRelation::InboundClientIdentity
+        : TlsSessionRelation::InboundTlsSession;
+    evidence.correlation_fidelity = correlation;
+    return evidence;
+}
+
+void test_ms33_inbound_trust_policy() {
+    const AggregateMetrics metrics{10'000, 1'000, 0};
+
+    const auto no_tls = inbound_trust_context({});
+    const auto no_tls_verdict = evaluate_inbound(std::nullopt, metrics, no_tls);
+    assert(no_tls_verdict.trust == TrustState::Unverified);
+    assert(no_tls_verdict.trust_hypothesis == "INBOUND_TLS_EVIDENCE_UNAVAILABLE");
+
+    const auto no_cert_context = inbound_trust_context(
+        {inbound_evidence("", false, true, 0, false)});
+    const auto no_cert = evaluate_inbound(std::nullopt, metrics, no_cert_context);
+    assert(no_cert.trust == TrustState::Unverified);
+    assert(no_cert.trust_hypothesis == "INBOUND_CLIENT_CERTIFICATE_ABSENT");
+
+    const auto presented_context = inbound_trust_context(
+        {inbound_evidence("client-a", true, false, 0, false)});
+    const auto presented = evaluate_inbound(std::nullopt, metrics, presented_context);
+    assert(presented.trust == TrustState::Unverified);
+    assert(presented.trust_hypothesis == "INBOUND_CLIENT_CERTIFICATE_NOT_AUTHENTICATED");
+
+    const auto failed_context = inbound_trust_context(
+        {inbound_evidence("client-a", true, true, 18, false)});
+    const auto failed = evaluate_inbound(std::nullopt, metrics, failed_context);
+    assert(failed.trust == TrustState::Suspicious);
+    assert(failed.trust_hypothesis == "INBOUND_CLIENT_CERTIFICATE_VERIFICATION_FAILURE");
+
+    const auto authenticated_context = inbound_trust_context(
+        {inbound_evidence("client-a", true, true, 0, true)});
+    const auto unaccepted = evaluate_inbound(std::nullopt, metrics, authenticated_context);
+    assert(unaccepted.trust == TrustState::Unverified);
+    assert(unaccepted.trust_hypothesis == "INBOUND_CLIENT_IDENTITY_NOT_ACCEPTED");
+
+    Baseline accepted;
+    accepted.target_host = "inbound-client:test";
+    accepted.target_port = 9443;
+    accepted.accepted_spki_sha256 = "client-a";
+    accepted.accepted_issuer = "CN=test-ca";
+    accepted.sha256 = "accepted-client-a";
+
+    const auto stable = evaluate_inbound(accepted, metrics, authenticated_context);
+    assert(stable.performance == PerformanceState::InsufficientEvidence);
+    assert(stable.trust == TrustState::Stable);
+    assert(stable.rule_set_version == kRuleSetVersion);
+    assert(stable.baseline_hash == accepted.sha256);
+
+    const auto changed_spki_context = inbound_trust_context(
+        {inbound_evidence("client-b", true, true, 0, true)});
+    const auto changed_spki = evaluate_inbound(accepted, metrics, changed_spki_context);
+    assert(changed_spki.trust == TrustState::Changed);
+    assert(changed_spki.trust_hypothesis == "INBOUND_CLIENT_IDENTITY_CHANGE");
+
+    const auto changed_issuer_context = inbound_trust_context(
+        {inbound_evidence("client-a", true, true, 0, true, EvidenceFidelity::Exact,
+                          "CN=client-a", "CN=other-ca")});
+    const auto changed_issuer = evaluate_inbound(accepted, metrics, changed_issuer_context);
+    assert(changed_issuer.trust == TrustState::Changed);
+
+    const auto missing_subject_context = inbound_trust_context(
+        {inbound_evidence("client-a", true, true, 0, true, EvidenceFidelity::Exact, "")});
+    const auto missing_subject = evaluate_inbound(std::nullopt, metrics, missing_subject_context);
+    assert(missing_subject.trust == TrustState::Unverified);
+    assert(missing_subject.trust_hypothesis == "INBOUND_CLIENT_PRINCIPAL_UNAVAILABLE");
+
+    const auto weak_context = inbound_trust_context(
+        {inbound_evidence("client-a", true, true, 0, true,
+                          EvidenceFidelity::StronglyCorrelated)});
+    const auto weak = evaluate_inbound(accepted, metrics, weak_context);
+    assert(weak.trust == TrustState::Unverified);
+    assert(weak.trust_hypothesis == "INBOUND_TLS_EVIDENCE_NOT_EXACT");
+
+    auto first = inbound_evidence("client-a", true, true, 0, true);
+    auto second = inbound_evidence("client-b", true, true, 0, true);
+    second.observation.observed_ns += 1;
+    second.observation.socket_cookie = 67;
+    const auto ambiguous_context = inbound_trust_context({first, second});
+    assert(ambiguous_context.ambiguous);
+    const auto ambiguous = evaluate_inbound(accepted, metrics, ambiguous_context);
+    assert(ambiguous.trust == TrustState::Unverified);
+    assert(ambiguous.trust_hypothesis == "INBOUND_CLIENT_IDENTITY_AMBIGUOUS");
+
+    const auto legacy_rules = rule_set_for_version(kLegacyRuleSetVersion);
+    assert(legacy_rules);
+    const auto legacy = evaluate_inbound(accepted, metrics, authenticated_context, *legacy_rules);
+    assert(legacy.trust == TrustState::Unverified);
+    assert(legacy.trust_hypothesis == "INBOUND_TRUST_POLICY_UNAVAILABLE");
+
+    ConnectionSummary service;
+    service.direction = ConnectionDirection::Inbound;
+    service.local_port = 9443;
+    service.network_namespace_inode = 123;
+    service.process.uid = 1000;
+    service.process.comm = "mtls-server";
+    service.process.executable_path = "/usr/bin/mtls-server";
+    const auto key_a = inbound_client_baseline_key(service, "CN=client-a");
+    assert(!key_a.empty());
+    auto restarted = service;
+    restarted.process.pid = 9999;
+    restarted.process.start_ticks = 123456;
+    assert(inbound_client_baseline_key(restarted, "CN=client-a") == key_a);
+    assert(inbound_client_baseline_key(restarted, "CN=client-b") != key_a);
+    restarted.network_namespace_inode = 124;
+    assert(inbound_client_baseline_key(restarted, "CN=client-a") != key_a);
+}
+
 void test_ten_mib_storage_stress() {
     const auto path = db_path("ms0-storage-stress");
     remove_db_files(path);
@@ -369,6 +509,7 @@ int main() {
     test_process_attribution_retry();
     test_tls_link_exists_without_verdict();
     test_changed_and_combined_replay();
+    test_ms33_inbound_trust_policy();
     test_ten_mib_storage_stress();
-    std::cout << "All MS0 closure tests passed\n";
+    std::cout << "All MS0/MS3.3 closure tests passed\n";
 }

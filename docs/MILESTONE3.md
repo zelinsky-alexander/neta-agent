@@ -10,71 +10,40 @@ The Linux resolver path observes dynamically linked glibc `getaddrinfo()` calls 
 
 A complete `getaddrinfo` event can be `EXACT` for the application resolver API call. It is not an exact DNS packet claim because NSS, `/etc/hosts`, a local cache, or another configured backend may satisfy the call. `PlatformCapabilities::exact_dns_observation` therefore remains false.
 
-Resolver-to-socket correlation is at most `STRONGLY_CORRELATED`. Multiple plausible resolver events remain `AMBIGUOUS` and are not attached.
-
-The resolver collector and ObservationSession buffers are bounded, event loss is visible, and only per-connection correlated evidence is persisted. Existing connection pruning cascades to resolver evidence.
+Resolver-to-socket correlation is at most `STRONGLY_CORRELATED`. Multiple plausible resolver events remain `AMBIGUOUS` and are not attached. Collector and ObservationSession buffers are bounded, event loss is visible, and only correlated per-connection evidence is persisted.
 
 ## Implemented MS3.2: actual OpenSSL application TLS sessions
 
-MS3.2 adds an opt-in OpenSSL 3 application instrumentation mechanism that observes the real TLS session used by the application. It does not proxy, redirect, decrypt, terminate, or create a substitute connection.
+MS3.2 adds opt-in OpenSSL 3 application instrumentation that observes the real TLS session used by the application. It does not proxy, redirect, decrypt, terminate, or create a substitute connection.
 
 ```text
 instrumented application
         |
-        | real SSL_connect / SSL_accept / SSL_do_handshake
+        | SSL_connect / SSL_accept / SSL_do_handshake
         v
 libneta_tls_context.so
         |
         | OpenSSL public session/certificate APIs
-        | Linux socket identity (SO_COOKIE + endpoints)
+        | SO_COOKIE + socket endpoints
         | bounded Unix datagram evidence event
         v
 TlsSessionObserver
         |
-        | kernel SCM_CREDENTIALS sender validation
+        | SCM_CREDENTIALS sender validation
         v
 ObservationSession
         |
         | exact cookie correlation when available
-        | tuple/process/netns/time fallback otherwise
+        | bounded tuple/process/netns/time fallback otherwise
         v
 HistoryStore connection_tls_session_evidence
-        |
-        +--> evidence CLI
-        +--> export schema 4
-        +--> replay integrity
 ```
 
-### Native/application observation source
+Only a successful handshake on a stream socket is emitted. The shim calls the real OpenSSL function first, preserves `errno`, isolates its OpenSSL error-queue use, contains exceptions inside the C ABI boundary, and sends evidence non-blockingly so instrumentation failure cannot fail the application handshake.
 
-The instrumentation library is built from:
+### Exact session facts
 
-```text
-src/platform/linux/tls_context_shim.cpp
-```
-
-It interposes the public OpenSSL handshake entry points:
-
-```text
-SSL_connect
-SSL_accept
-SSL_do_handshake
-```
-
-Only a successful handshake on a stream socket is emitted. Immediately after the real handshake returns successfully, the shim queries the same `SSL*` and socket with public OpenSSL/Linux APIs.
-
-The shim preserves application behavior:
-
-- it calls the real OpenSSL function first;
-- it preserves and restores `errno`;
-- post-handshake evidence extraction is isolated from the application's OpenSSL error queue;
-- if an existing OpenSSL error queue cannot be safely marked/restored, evidence extraction is skipped;
-- C++ exceptions from observational work are contained inside the shim and never cross the OpenSSL C ABI;
-- evidence transport is non-blocking and failure to deliver evidence does not fail the TLS handshake.
-
-### Exact session facts captured
-
-Where available, the exact application-session observation contains:
+Where available, an application-session observation contains:
 
 ```text
 local TLS role: CLIENT / SERVER
@@ -85,74 +54,31 @@ local and remote socket endpoint
 TLS protocol version
 cipher
 selected ALPN
-SNI visible to OpenSSL
-expected peer hostname configured in OpenSSL
-matched peer hostname reported by OpenSSL verification
+SNI
+expected / matched peer hostname
 peer certificate presence
 peer verification mode/result
-peer-authenticated boolean under conservative rules
+peer-authenticated boolean
 peer leaf certificate SHA-256
 peer public-key/SPKI SHA-256
 peer subject / issuer / validity interval
 ```
 
-Certificate hashes are derived from the certificate actually returned by the application's `SSL` session, not from the independent `TlsProbe` connection.
+For outbound client sessions, `peer_authenticated=true` requires a peer certificate, `X509_V_OK`, an expected peer hostname, and an OpenSSL matched peer hostname.
 
-### Identity is not the same as authentication
+For inbound server sessions, `peer_authenticated=true` requires a peer certificate, `SSL_VERIFY_PEER`, and `X509_V_OK`.
 
-A peer certificate may be exactly observed without being authenticated.
+A peer certificate may therefore be exactly observed without being authenticated.
 
-For an outbound client session, `peer_authenticated=true` is emitted only when:
+### TLS-to-connection correlation
 
-```text
-peer certificate present
-+ SSL_get_verify_result() == X509_V_OK
-+ an expected peer hostname was configured in OpenSSL
-+ OpenSSL reports a matched peer hostname
-```
+When the application's TLS socket has the same Linux socket cookie as the canonical connection and process/direction/non-conflicting netns identity agree, correlation is `EXACT`.
 
-For an inbound server session, `peer_authenticated=true` is emitted only when:
+A valid cookie mismatch rejects correlation; the correlator does not fall back to a coincidental tuple. Without a cookie, role/direction, exact tuple, process, non-conflicting start identity/netns, and bounded time are required, and the result is capped at `STRONGLY_CORRELATED`.
 
-```text
-peer certificate present
-+ SSL_VERIFY_PEER is enabled
-+ SSL_get_verify_result() == X509_V_OK
-```
+Multiple plausible matches remain `AMBIGUOUS` and are not attached.
 
-This intentionally underclaims applications that perform custom verification outside the supported OpenSSL verification configuration. MS3 does not infer authentication from certificate presence alone.
-
-## Exact TLS-to-connection correlation
-
-MS3.2 uses the Linux socket cookie from the application's actual TLS socket when available.
-
-```text
-actual SSL socket
-    |
-    +--> SO_COOKIE = 12345
-    |
-connection history
-    +--> canonical socket_cookie = 12345
-
-same process + non-conflicting durable identity/netns + correct direction
-    -> EXACT connection correlation
-```
-
-A TLS event with a valid cookie that does not match a connection cookie is rejected for that connection. The correlator does not fall back to a coincidental tuple after a cookie mismatch.
-
-If `SO_COOKIE` is unavailable, the fallback requires:
-
-- correct TLS local role mapped to connection direction (`CLIENT -> OUTBOUND`, `SERVER -> INBOUND`);
-- exact local/remote endpoint tuple;
-- same process;
-- non-conflicting durable process-start identity;
-- non-conflicting network namespace;
-- event time within the connection and bounded tuple-correlation window.
-
-That fallback is capped at `STRONGLY_CORRELATED`. Multiple possible matches are `AMBIGUOUS` and no evidence is persisted.
-
-### Direction-aware semantic relations
-
-MS3.2 keeps transport-session and peer-identity semantics explicit:
+Direction-aware relations are:
 
 ```text
 CLIENT + peer certificate  -> OUTBOUND_SERVER_IDENTITY
@@ -161,155 +87,258 @@ SERVER + peer certificate  -> INBOUND_CLIENT_IDENTITY
 SERVER + no peer cert      -> INBOUND_TLS_SESSION
 ```
 
-`INBOUND_CLIENT_IDENTITY` means an exact peer certificate was presented on the actual accepted TLS session. Whether that identity was authenticated is separately represented by `peer_authenticated`.
+## Implemented MS3.3: inbound authenticated identity / mTLS Trust policy
 
-This is the evidence foundation for the dedicated inbound/mTLS policy work that follows; MS3.2 itself does not invent a new inbound Trust verdict rule.
+MS3.3 turns the exact inbound TLS evidence from MS3.2 into an explicit versioned Trust policy. It does not silently reuse the old outbound supporting-probe rule.
 
-## Local evidence channel and provenance
+The current rule set is:
 
-The shim sends a fixed-size bounded event over a local Unix datagram socket. The default endpoint is an abstract Unix socket scoped by UID:
+```text
+neta-rules/0.2.0
+```
+
+Historical `neta-rules/0.1.0` remains available to replay older bundles exactly.
+
+### Policy source requirements
+
+Inbound client identity affects Trust only when the application TLS evidence itself and the TLS-to-connection correlation are both `EXACT`.
+
+`STRONGLY_CORRELATED`, `SUPPORTING`, `CONTEXTUAL`, missing, or ambiguous application-session evidence cannot establish an inbound client identity verdict.
+
+### Deterministic inbound Trust mapping
+
+```text
+no inbound TLS application evidence
+    -> UNVERIFIED / INBOUND_TLS_EVIDENCE_UNAVAILABLE
+
+inbound TLS observed but not EXACT
+    -> UNVERIFIED / INBOUND_TLS_EVIDENCE_NOT_EXACT
+
+multiple exact inbound TLS identities
+    -> UNVERIFIED / INBOUND_CLIENT_IDENTITY_AMBIGUOUS
+
+no client certificate
+    -> UNVERIFIED / INBOUND_CLIENT_CERTIFICATE_ABSENT
+
+certificate presented but not authenticated
+    -> UNVERIFIED / INBOUND_CLIENT_CERTIFICATE_NOT_AUTHENTICATED
+
+verification required + known non-X509_V_OK result
+    -> SUSPICIOUS / INBOUND_CLIENT_CERTIFICATE_VERIFICATION_FAILURE
+
+authenticated certificate but no usable certificate subject
+    -> UNVERIFIED / INBOUND_CLIENT_PRINCIPAL_UNAVAILABLE
+
+authenticated principal not explicitly accepted
+    -> UNVERIFIED / INBOUND_CLIENT_IDENTITY_NOT_ACCEPTED
+
+accepted principal + matching issuer and SPKI
+    -> STABLE
+
+accepted principal + changed issuer or SPKI
+    -> CHANGED / INBOUND_CLIENT_IDENTITY_CHANGE
+```
+
+Certificate presence alone never produces `STABLE`.
+
+### Principal and accepted identity model
+
+An inbound service may legitimately have many mTLS clients, so MS3.3 does not store one client identity for the whole service.
+
+The accepted baseline is scoped per:
+
+```text
+service UID
++ stable service process identity (executable path when available, otherwise comm)
++ network namespace when available
++ local service port
++ exact client certificate subject
+```
+
+The client certificate subject is the principal key. The accepted cryptographic identity is:
+
+```text
+issuer + SPKI SHA-256
+```
+
+This permits client A and client B to both be accepted independently for the same service. If client A later presents the same principal subject with a different issuer or SPKI, the result is `CHANGED`. A never-accepted client C is `UNVERIFIED`, not mislabeled as client A changing.
+
+PID and process start ticks are deliberately not part of the durable accepted-service key so a normal service restart does not invalidate accepted client principals.
+
+### Explicit acceptance workflow
+
+An operator accepts an observed client only from an already captured inbound connection:
+
+```bash
+neta-agent baseline accept-client CONN_ID --db neta.db
+```
+
+Acceptance is refused unless the selected connection has exactly one exact, presented, authenticated client certificate with a usable subject and SPKI.
+
+The command stores an immutable `Baseline` row using the existing baseline storage and immediately re-evaluates the selected connection under `neta-rules/0.2.0`.
+
+Inspect the currently accepted identity for the selected principal with:
+
+```bash
+neta-agent baseline show-client CONN_ID --db neta.db
+```
+
+Using immutable baseline rows preserves the existing property that a historical verdict retains the exact baseline hash used for its decision even after a later identity acceptance/rotation.
+
+### Automatic inbound finalization
+
+At the end of `observe --inbound` or `observe --all`, every admitted inbound connection is finalized under the MS3.3 policy.
+
+The agent derives the exact inbound TLS context, derives that principal's service-scoped baseline key when possible, loads the latest accepted baseline for that principal, evaluates Trust, and persists the verdict.
+
+Inbound Performance remains `INSUFFICIENT_EVIDENCE` under this MS3.3 path. MS3.3 changes only inbound authenticated-identity Trust semantics; it does not invent a new inbound performance baseline model.
+
+### Rule-set compatibility
+
+`neta-rules/0.2.0` retains the existing outbound target performance and supporting-probe Trust behavior while adding the inbound exact-session policy.
+
+`neta-rules/0.1.0` remains replayable and reports inbound authenticated-identity policy as unavailable rather than retroactively applying the new semantics to old evidence.
+
+### Export/replay schema 5
+
+MS3.3 raises export schema to version 5.
+
+Schema 5 retains schema-3 resolver and schema-4 TLS-session evidence integrity fields and adds the inputs required to replay an inbound Trust decision:
+
+```text
+baseline_present / baseline_kind
+baseline target key / local service port / baseline hash
+accepted SPKI / accepted issuer
+inbound TLS observed / exact / ambiguous flags
+client certificate present
+peer verification required
+verify-result presence/value
+peer authenticated
+client subject
+client issuer
+client SPKI
+exact inbound TLS evidence hash
+```
+
+Replay chooses the rule set recorded in the bundle. Schema 1-4 bundles remain accepted under their historical rule version; schema 5 inbound bundles replay with the exact persisted policy inputs.
+
+Tampering with the inbound client identity changes the verdict input hash and causes deterministic replay mismatch.
+
+## Local TLS evidence channel and provenance
+
+The shim sends fixed-size bounded events over a local Unix datagram endpoint. The default endpoint is:
 
 ```text
 @neta-agent-tls-uid-<uid>
 ```
 
-Both `neta-agent` and the instrumented application may override it with:
+Both observer and instrumented application may override it with:
 
 ```text
 NETA_TLS_CONTEXT_SOCKET=@custom-name
 ```
 
-The receiver enables `SO_PASSCRED` and requires kernel-supplied `SCM_CREDENTIALS`. Payload PID/UID must equal the kernel sender PID/UID or the event is rejected. This prevents a different local process from simply asserting another process identity in the evidence payload.
+The receiver requires kernel-supplied `SCM_CREDENTIALS`; payload PID/UID must equal the actual sender credentials. Receiver buffers and unresolved-event queues are bounded, malformed/credential-mismatched events are rejected and counted, and receive-queue overflow is exposed where supported.
 
-The receiver is bounded:
+Dropped/rejected evidence means application TLS evidence may be incomplete. It is never interpreted as proof that no TLS session occurred.
 
-- 1 MiB requested socket receive buffer;
-- at most 256 decoded events per poll;
-- `ObservationSession` holds at most 4,096 unresolved TLS-session observations;
-- malformed, truncated, or credential-mismatched events are rejected and counted;
-- receive-queue overflow is exposed where Linux provides `SO_RXQ_OVFL`.
+## Running a supported instrumented application
 
-A dropped/rejected event means TLS evidence may be incomplete; it is never interpreted as proof that no TLS session occurred.
-
-## Running an instrumented application
-
-A normal dynamic build produces the agent and the optional instrumentation library:
+A normal dynamic build produces:
 
 ```text
 build/neta-agent
 build/libneta_tls_context.so
 ```
 
-Start the observer normally, then opt a supported OpenSSL application into exact session evidence:
+For a root observer and a non-root application/service, use an explicit shared endpoint:
 
 ```bash
-sudo ./build/neta-agent observe --outbound --duration 30 --db ./db/neta.db
+sudo env NETA_TLS_CONTEXT_SOCKET=@neta-ms3-test \
+  ./build/neta-agent observe --inbound --duration 30 --db ./db/neta.db
 
+NETA_TLS_CONTEXT_SOCKET=@neta-ms3-test \
 LD_PRELOAD="$PWD/build/libneta_tls_context.so" \
-  curl https://example.com/
+  ./supported-openssl-application
 ```
 
-For a long-lived service, the same preload can be configured in that service's environment. `NETA_TLS_CONTEXT_SOCKET` must match the observer if a non-default endpoint is used.
-
-Instrumentation is explicit and opt-in. Uninstrumented applications continue to receive all existing transport/lifecycle/route/resolver evidence, and target mode retains the independent supporting TLS probe.
+Instrumentation is explicit and opt-in.
 
 ## Coverage limitations
 
-MS3.2 currently claims actual-session TLS coverage only for supported dynamically linked OpenSSL 3 applications that execute the instrumented public handshake entry points and use an ordinary stream socket accessible through `SSL_get_fd()`.
+Actual-session TLS coverage currently applies only to supported dynamically linked OpenSSL 3 applications that execute the instrumented public handshake entry points and expose an ordinary stream socket through `SSL_get_fd()`.
 
 It does not claim exact application TLS coverage for:
 
-- applications not launched with the instrumentation library;
+- uninstrumented applications;
 - statically linked OpenSSL;
-- BoringSSL, LibreSSL, GnuTLS, rustls, NSS, Schannel, Secure Transport, or custom TLS implementations;
-- TLS stacks that do not expose the real socket through the supported OpenSSL APIs;
+- BoringSSL, LibreSSL, GnuTLS, rustls, NSS, Schannel, Secure Transport, or custom TLS stacks;
 - QUIC/DTLS/UDP;
-- processes in environments where the local Unix evidence endpoint is not reachable;
-- application authentication performed entirely outside the observable OpenSSL verification configuration.
+- inaccessible local evidence endpoints;
+- authentication performed entirely outside the observable OpenSSL verification configuration.
 
-Unsupported coverage stays unavailable rather than being downgraded into a false exact claim.
+Unsupported coverage remains unavailable rather than becoming a false exact claim.
 
-The shim is disabled for builds requesting static OpenSSL dependencies or a fully static executable. This avoids pretending the `LD_PRELOAD` mechanism applies to a static deployment model.
+The shim is disabled for static-dependency/full-static builds because `LD_PRELOAD` does not apply to that deployment model.
 
-## Relationship to the legacy TLS probe and Trust verdict
+## Relationship to the legacy active TLS probe
 
-The existing `TlsProbe` remains unchanged:
+The existing `TlsProbe` remains a separate connection:
 
 ```text
 neta-agent -> separate OpenSSL connection -> target
 ```
 
-It remains `SUPPORTING` evidence only.
+It remains `SUPPORTING` outbound target evidence only. It is never used as actual inbound TLS/client identity evidence.
 
-MS3.2 stores actual application-session evidence as a separate evidence class and does **not** silently alter the established Performance/Trust rule set or verdict input hash. Therefore:
-
-```text
-current Trust verdict
-    -> still uses the existing versioned supporting-probe input
-
-MS3.2 exact application TLS evidence
-    -> independently inspectable and replay-integrity checked
-    -> future Trust rule changes require an explicit rule-set/version decision
-```
-
-This preserves previously validated MS0/MS1/MS2 verdict/replay behavior while adding stronger evidence.
-
-## Persistence
-
-Actual-session evidence is persisted in:
+MS3.3 therefore has direction-aware Trust inputs:
 
 ```text
-connection_tls_session_evidence
+OUTBOUND target-mode Trust
+    -> existing SUPPORTING independent active probe
+
+INBOUND client-identity Trust
+    -> EXACT actual application TLS session only
 ```
 
-The row is owned by its connection with `ON DELETE CASCADE`, so existing storage maintenance also bounds MS3.2 evidence.
+## Regression expectations
 
-Repeated instrumentation callbacks for the same session are idempotently deduplicated by a deterministic session identity key. The persisted evidence retains a separate deterministic evidence hash for export/replay integrity.
+MS3.3 must preserve:
 
-## Evidence CLI, export, and replay
+- MS0 controlled baseline/netem/certificate/replay behavior;
+- MS1 lifecycle semantics and drop visibility;
+- MS2 direction, listener exclusion, bounded state/storage, and service-mode invariants;
+- MS3.1 resolver evidence integrity;
+- MS3.2 actual-session TLS evidence, sender validation, correlation anti-misassociation, and schema-4 compatibility;
+- `NETA_EBPF=OFF` build/test behavior for the non-eBPF core/TLS receiver paths.
 
-`neta-agent evidence ID` presents actual application TLS evidence separately from the independent active probe. It reports the role/relation, observation and correlation fidelity, TLS version/cipher/ALPN/SNI, peer-certificate hashes, verification result, and authentication status.
+Focused MS3.3 coverage includes:
 
-Export schema version 4 adds `TLS_SESSION` evidence records plus:
+- no TLS evidence;
+- no client certificate;
+- presented but unauthenticated certificate;
+- verification failure;
+- authenticated but unaccepted principal;
+- accepted stable principal;
+- changed SPKI;
+- changed issuer;
+- missing principal subject;
+- weak correlation refusing Trust promotion;
+- ambiguous exact evidence refusing Trust promotion;
+- historical rule-set behavior;
+- principal key stability across PID/start-time changes;
+- principal/service separation across different client subjects and network namespaces;
+- schema-5 outbound and inbound export/replay;
+- TLS evidence tamper detection;
+- inbound policy-input tamper detection.
 
-```text
-tls_session_count
-tls_session_hash
-```
-
-Replay verifies the deterministic set of exported TLS-session hashes separately from the existing verdict replay. Schema versions 1-3 remain accepted; they report TLS application-session evidence as not present.
-
-Name-resolution schema-3 integrity behavior is unchanged.
-
-## Build and regression behavior
-
-No new third-party dependency is introduced. MS3.2 uses the existing OpenSSL 3 dependency, C++20, SQLite, Linux socket APIs, and the standard dynamic loader facilities already used by the project.
-
-Normal dynamic builds include `libneta_tls_context.so`. `NETA_EBPF=OFF` still builds and tests the TLS-session receiver/correlation path because MS3.2 does not depend on eBPF. The resolver collector remains unavailable in that configuration exactly as before.
-
-Focused MS3.2 coverage includes:
-
-- exact socket-cookie correlation;
-- strongly-correlated tuple fallback;
-- cookie mismatch refusing tuple fallback;
-- ambiguity remaining unresolved;
-- outbound/inbound role isolation;
-- inbound peer-certificate relation semantics;
-- partial-event fidelity downgrade;
-- sender-credential validation and malformed-wire rejection;
-- SQLite round-trip/idempotence/delete cascade;
-- `ObservationSession` attachment;
-- export/replay integrity and tamper detection;
-- a real non-privileged OpenSSL client/server handshake executed with `LD_PRELOAD` instrumentation.
-
-## Remaining MS3 work after MS3.2
+## Remaining MS3 work after MS3.3
 
 The remaining major MS3 areas are:
 
-1. dedicated direction-aware Trust policy for inbound authenticated client identity/mTLS, if that evidence should affect deterministic verdicts;
-2. richer stable, privacy-conscious host/network-environment identity;
+1. richer stable, privacy-conscious host/network-environment identity;
+2. controlled native-Linux end-to-end acceptance for supported collectors where normal CI cannot exercise privileged BPF attachment;
 3. optional HTTP/RPC/span correlation as higher-layer evidence;
-4. additional resolver or TLS backends only where source, coverage, fidelity, resource cost, and licensing can be stated precisely;
-5. controlled native-Linux end-to-end acceptance for supported collectors where CI cannot exercise privileged BPF attachment.
+4. additional resolver or TLS backends only where source, coverage, fidelity, resource cost, and licensing can be stated precisely.
 
-Every later MS3 change must preserve the same rule: stronger attribution is added only when the native/application observation source and fidelity are explicit.
+The intended MS3 finish line remains direction-aware connection assurance with correlated resolver context, actual application TLS identity where supported, authenticated inbound client identity, stable host/network context, explicit fidelity, deterministic replay, and native-Linux validation.

@@ -115,6 +115,15 @@ std::uint64_t json_u64_value(const std::string& text, const std::string& key) {
     return std::stoull(text.substr(pos));
 }
 
+std::int64_t json_i64_value(const std::string& text, const std::string& key) {
+    const std::string needle = "\"" + key + "\":";
+    auto pos = text.find(needle);
+    if (pos == std::string::npos) return 0;
+    pos += needle.size();
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
+    return std::stoll(text.substr(pos));
+}
+
 bool json_bool_value(const std::string& text, const std::string& key) {
     const std::string needle = "\"" + key + "\":";
     auto pos = text.find(needle);
@@ -177,6 +186,8 @@ Usage:
   neta-agent history show ID [--db neta.db] [--json]
   neta-agent baseline capture --target host:port [--db neta.db] [--ca file]
   neta-agent baseline show --target host:port [--db neta.db]
+  neta-agent baseline accept-client ID [--db neta.db]
+  neta-agent baseline show-client ID [--db neta.db]
   neta-agent evidence ID [--db neta.db]
   neta-agent explain ID [--db neta.db]
   neta-agent export ID [--db neta.db]
@@ -289,10 +300,80 @@ void cmd_history(int argc, char** argv) {
 }
 
 void cmd_baseline(int argc, char** argv) {
-    if (argc < 3) throw std::runtime_error("baseline requires capture or show");
-    const auto target = cli::resolve_observation_target(arg_value(argc, argv, "--target"));
+    if (argc < 3) throw std::runtime_error("baseline requires capture, show, accept-client, or show-client");
     HistoryStore store(arg_value(argc, argv, "--db", default_db_path().string()));
-    if (std::string(argv[2]) == "show") {
+    const std::string action = argv[2];
+
+    if (action == "accept-client" || action == "show-client") {
+        if (argc < 4) throw std::runtime_error("baseline client action requires connection ID");
+        const auto connection_id = std::stoll(argv[3]);
+        const auto connection = store.connection(connection_id);
+        if (!connection) throw std::runtime_error("connection not found");
+        if (connection->direction != ConnectionDirection::Inbound) {
+            throw std::runtime_error("client identity baselines require an INBOUND connection");
+        }
+
+        const auto tls_sessions = store.tls_session_evidence_for_connection(connection_id);
+        const auto context = inbound_trust_context(tls_sessions);
+        if (context.ambiguous) {
+            throw std::runtime_error("inbound client identity evidence is ambiguous");
+        }
+        if (!context.exact_evidence || !context.peer_certificate_present || context.subject.empty()) {
+            throw std::runtime_error("client identity baseline requires an EXACT presented client certificate with a subject");
+        }
+        const auto baseline_key = inbound_client_baseline_key(*connection, context.subject);
+        if (baseline_key.empty()) {
+            throw std::runtime_error("cannot derive stable inbound client/service identity from process evidence");
+        }
+
+        if (action == "show-client") {
+            const auto baseline = store.baseline_for(baseline_key, connection->local_port);
+            if (!baseline) throw std::runtime_error("accepted inbound client identity not found");
+            std::cout << "Inbound service: "
+                      << (connection->process.comm.empty() ? "<unattributed>" : connection->process.comm)
+                      << " uid=" << connection->process.uid
+                      << " local-port=" << connection->local_port
+                      << "\nClient subject: " << context.subject
+                      << "\nAccepted client SPKI: " << baseline->accepted_spki_sha256
+                      << "\nAccepted issuer: " << baseline->accepted_issuer
+                      << "\nHash: " << baseline->sha256 << "\n";
+            return;
+        }
+
+        if (!context.peer_authenticated) {
+            throw std::runtime_error("refusing to accept a client certificate that was not authenticated by the server TLS session");
+        }
+        if (context.spki_sha256.empty()) {
+            throw std::runtime_error("authenticated client identity has no SPKI hash");
+        }
+
+        Baseline baseline;
+        baseline.target_host = baseline_key;
+        baseline.target_port = connection->local_port;
+        baseline.accepted_spki_sha256 = context.spki_sha256;
+        baseline.accepted_issuer = context.issuer;
+        baseline.created_ns = wall_now_ns();
+        baseline.sha256 = sha256_hex("inbound-client|" + baseline_key + '|' +
+                                     std::to_string(connection->local_port) + '|' +
+                                     context.subject + '|' + context.spki_sha256 + '|' + context.issuer);
+        store.save_baseline(baseline);
+
+        const auto verdict = evaluate_inbound(
+            baseline, aggregate_metrics(store.samples_for_connection(connection_id)), context);
+        store.save_verdict(connection_id, verdict);
+        std::cout << "Accepted authenticated inbound client identity for "
+                  << (connection->process.comm.empty() ? "<unattributed>" : connection->process.comm)
+                  << " uid=" << connection->process.uid
+                  << " local-port=" << connection->local_port
+                  << "\nClient subject: " << context.subject
+                  << "\nClient SPKI: " << context.spki_sha256
+                  << "\nIssuer: " << (context.issuer.empty() ? "<unavailable>" : context.issuer)
+                  << "\nBaseline hash: " << baseline.sha256 << "\n";
+        return;
+    }
+
+    const auto target = cli::resolve_observation_target(arg_value(argc, argv, "--target"));
+    if (action == "show") {
         auto baseline = store.baseline_for(target.host, target.port);
         if (!baseline) throw std::runtime_error("baseline not found");
         std::cout << "Target: " << baseline->target_host << ':' << baseline->target_port
@@ -302,7 +383,7 @@ void cmd_baseline(int argc, char** argv) {
                   << "\nHash: " << baseline->sha256 << "\n";
         return;
     }
-    if (std::string(argv[2]) != "capture") throw std::runtime_error("unknown baseline action");
+    if (action != "capture") throw std::runtime_error("unknown baseline action");
     const auto samples = store.recent_samples_for_target(target.host, target.port, 200);
     if (samples.size() < 5) throw std::runtime_error("need at least 5 persisted target samples; run observe first (20+ recommended)");
     std::vector<std::uint64_t> rtts;
@@ -374,6 +455,7 @@ void cmd_evidence(int argc, char** argv) {
                   << " ALPN=" << (tls.alpn.empty() ? "<none>" : tls.alpn)
                   << " SNI=" << (tls.sni.empty() ? "<none>" : tls.sni) << '\n'
                   << "    Peer cert: " << (tls.peer_certificate_present ? "yes" : "no")
+                  << " verify-required=" << (tls.peer_verification_required ? "yes" : "no")
                   << " authenticated=" << (tls.peer_authenticated ? "yes" : "no")
                   << " verify=" << (tls.verify_result ? std::to_string(*tls.verify_result) : "<unavailable>") << '\n'
                   << "    Expected name: " << tls.expected_peer_name.value_or("<unavailable>")
@@ -415,7 +497,7 @@ void cmd_explain(int argc, char** argv) {
     HistoryStore store(arg_value(argc, argv, "--db", default_db_path().string()));
     const auto id = std::stoll(argv[2]);
     auto data = store.export_data(id);
-    if (!data.verdict) throw std::runtime_error("no verdict for connection (capture a baseline, then observe again)");
+    if (!data.verdict) throw std::runtime_error("no verdict for connection");
     const auto metrics = aggregate_metrics(data.samples);
     const auto tls_sessions = store.tls_session_evidence_for_connection(id);
     const auto exact_sessions = std::count_if(tls_sessions.begin(), tls_sessions.end(), [](const auto& evidence) {
@@ -432,10 +514,23 @@ void cmd_explain(int argc, char** argv) {
               << to_string(data.verdict->trust) << "\nHypothesis: "
               << (data.verdict->trust_hypothesis.empty() ? "none" : data.verdict->trust_hypothesis)
               << "\nActual application TLS sessions: " << tls_sessions.size()
-              << " (EXACT links: " << exact_sessions << ')'
-              << "\nCurrent Trust rule input: SUPPORTING independent active probe"
-              << "\nMS3.2 exact-session evidence is retained separately and does not silently change the versioned Trust rule"
-              << "\n\nCausality: performance/trust causal relation NOT ESTABLISHED"
+              << " (EXACT links: " << exact_sessions << ')';
+    if (data.connection.direction == ConnectionDirection::Inbound) {
+        const auto context = inbound_trust_context(tls_sessions);
+        std::cout << "\nCurrent Trust rule input: actual inbound TLS client identity (EXACT required)"
+                  << "\nClient certificate: " << (context.peer_certificate_present ? "present" : "absent")
+                  << "\nClient authenticated: " << (context.peer_authenticated ? "yes" : "no")
+                  << "\nClient subject: " << (context.subject.empty() ? "<unavailable>" : context.subject)
+                  << "\nObserved client issuer: " << (context.issuer.empty() ? "<unavailable>" : context.issuer)
+                  << "\nObserved client SPKI: " << (context.spki_sha256.empty() ? "<unavailable>" : context.spki_sha256)
+                  << "\nAccepted issuer: " << (data.baseline ? data.baseline->accepted_issuer : "<none>")
+                  << "\nAccepted client SPKI: "
+                  << (data.baseline ? data.baseline->accepted_spki_sha256 : "<none>");
+    } else {
+        std::cout << "\nCurrent Trust rule input: SUPPORTING independent active probe"
+                  << "\nActual-session TLS evidence remains independently inspectable";
+    }
+    std::cout << "\n\nCausality: performance/trust causal relation NOT ESTABLISHED"
               << "\nRule set: " << data.verdict->rule_set_version << "\nRule hash: " << data.verdict->rule_set_hash
               << "\nInput hash: " << data.verdict->input_hash << "\n";
 }
@@ -447,20 +542,33 @@ void cmd_export(int argc, char** argv) {
     const auto data = store.export_data(id);
     const auto names = store.name_resolution_evidence_for_connection(id);
     const auto tls_sessions = store.tls_session_evidence_for_connection(id);
-    if (!data.baseline || !data.verdict) throw std::runtime_error("export requires baseline and verdict");
+    if (!data.verdict) throw std::runtime_error("export requires a verdict");
+    if (data.connection.direction != ConnectionDirection::Inbound && !data.baseline) {
+        throw std::runtime_error("export requires baseline and verdict");
+    }
     const auto metrics = aggregate_metrics(data.samples);
     const auto name_hash = name_resolution_evidence_set_hash(names);
     const auto tls_session_hash = tls_session_evidence_set_hash(tls_sessions);
-    std::cout << "{\n  \"schema_version\":4,\n  \"connection_id\":" << id
+    const auto inbound_context = inbound_trust_context(tls_sessions);
+    const std::string baseline_kind = !data.baseline ? "NONE" :
+        data.connection.direction == ConnectionDirection::Inbound
+            ? "INBOUND_CLIENT_IDENTITY" : "OUTBOUND_TARGET";
+
+    std::cout << "{\n  \"schema_version\":5,\n  \"connection_id\":" << id
               << ",\n  \"direction\":\"" << to_string(data.connection.direction) << "\""
               << ",\n  \"target_host\":\"" << json_escape(data.connection.target_host) << "\",\n  \"target_port\":" << data.connection.remote_port
               << ",\n  \"performance\":\"" << to_string(data.verdict->performance) << "\",\n  \"trust\":\"" << to_string(data.verdict->trust)
-              << "\",\n  \"rule_set_version\":\"" << data.verdict->rule_set_version << "\",\n  \"rule_set_hash\":\""
-              << data.verdict->rule_set_hash << "\",\n  \"input_hash\":\"" << data.verdict->input_hash << "\",\n  \"baseline_hash\":\""
-              << data.baseline->sha256 << "\",\n  \"baseline_rtt_median_us\":" << data.baseline->rtt_median_us
-              << ",\n  \"baseline_rttvar_median_us\":" << data.baseline->rttvar_median_us
-              << ",\n  \"baseline_sample_count\":" << data.baseline->sample_count << ",\n  \"baseline_spki\":\""
-              << data.baseline->accepted_spki_sha256 << "\",\n  \"observed_rtt_us\":" << metrics.observed_rtt_us
+              << "\",\n  \"rule_set_version\":\"" << data.verdict->rule_set_version << "\",\n  \"rule_set_hash\":\"" << data.verdict->rule_set_hash << "\",\n  \"input_hash\":\"" << data.verdict->input_hash << "\",\n  \"baseline_present\":" << (data.baseline ? "true" : "false")
+              << ",\n  \"baseline_kind\":\"" << baseline_kind << "\""
+              << ",\n  \"baseline_target_host\":\"" << json_escape(data.baseline ? data.baseline->target_host : "") << "\""
+              << ",\n  \"baseline_target_port\":" << (data.baseline ? data.baseline->target_port : 0)
+              << ",\n  \"baseline_hash\":\"" << data.verdict->baseline_hash << "\""
+              << ",\n  \"baseline_rtt_median_us\":" << (data.baseline ? data.baseline->rtt_median_us : 0)
+              << ",\n  \"baseline_rttvar_median_us\":" << (data.baseline ? data.baseline->rttvar_median_us : 0)
+              << ",\n  \"baseline_sample_count\":" << (data.baseline ? data.baseline->sample_count : 0)
+              << ",\n  \"baseline_spki\":\"" << (data.baseline ? data.baseline->accepted_spki_sha256 : "") << "\""
+              << ",\n  \"baseline_issuer\":\"" << json_escape(data.baseline ? data.baseline->accepted_issuer : "") << "\""
+              << ",\n  \"observed_rtt_us\":" << metrics.observed_rtt_us
               << ",\n  \"observed_rttvar_us\":" << metrics.observed_rttvar_us
               << ",\n  \"retransmission_delta\":" << metrics.retransmission_delta
               << ",\n  \"tls_present\":" << (data.tls ? "true" : "false")
@@ -471,7 +579,20 @@ void cmd_export(int argc, char** argv) {
               << "\",\n  \"name_resolution_count\":" << names.size()
               << ",\n  \"name_resolution_hash\":\"" << name_hash
               << "\",\n  \"tls_session_count\":" << tls_sessions.size()
-              << ",\n  \"tls_session_hash\":\"" << tls_session_hash << "\",\n  \"evidence\":[\n";
+              << ",\n  \"tls_session_hash\":\"" << tls_session_hash << "\""
+              << ",\n  \"inbound_tls_session_observed\":" << (inbound_context.tls_session_observed ? "true" : "false")
+              << ",\n  \"inbound_exact_evidence\":" << (inbound_context.exact_evidence ? "true" : "false")
+              << ",\n  \"inbound_identity_ambiguous\":" << (inbound_context.ambiguous ? "true" : "false")
+              << ",\n  \"inbound_peer_certificate_present\":" << (inbound_context.peer_certificate_present ? "true" : "false")
+              << ",\n  \"inbound_peer_verification_required\":" << (inbound_context.peer_verification_required ? "true" : "false")
+              << ",\n  \"inbound_verify_result_present\":" << (inbound_context.verify_result ? "true" : "false")
+              << ",\n  \"inbound_verify_result\":" << (inbound_context.verify_result ? *inbound_context.verify_result : 0)
+              << ",\n  \"inbound_peer_authenticated\":" << (inbound_context.peer_authenticated ? "true" : "false")
+              << ",\n  \"inbound_client_spki\":\"" << inbound_context.spki_sha256 << "\""
+              << ",\n  \"inbound_client_subject\":\"" << json_escape(inbound_context.subject) << "\""
+              << ",\n  \"inbound_client_issuer\":\"" << json_escape(inbound_context.issuer) << "\""
+              << ",\n  \"inbound_tls_evidence_hash\":\"" << inbound_context.evidence_hash << "\""
+              << ",\n  \"evidence\":[\n";
     bool first = true;
     for (const auto& sample : data.samples) {
         const auto hash = sha256_hex(std::to_string(sample.observed_ns) + '|' + std::to_string(sample.state) + '|'
@@ -511,7 +632,11 @@ void cmd_export(int argc, char** argv) {
                   << "\",\"cipher\":\"" << json_escape(tls.cipher)
                   << "\",\"alpn\":\"" << json_escape(tls.alpn)
                   << "\",\"sni\":\"" << json_escape(tls.sni)
-                  << "\",\"leaf_sha256\":\"" << tls.leaf_sha256
+                  << "\",\"peer_certificate_present\":" << (tls.peer_certificate_present ? "true" : "false")
+                  << ",\"peer_verification_required\":" << (tls.peer_verification_required ? "true" : "false")
+                  << ",\"verify_result_present\":" << (tls.verify_result ? "true" : "false")
+                  << ",\"verify_result\":" << (tls.verify_result ? *tls.verify_result : 0)
+                  << ",\"leaf_sha256\":\"" << tls.leaf_sha256
                   << "\",\"spki_sha256\":\"" << tls.spki_sha256
                   << "\",\"peer_authenticated\":" << (tls.peer_authenticated ? "true" : "false")
                   << ",\"sha256\":\"" << tls_session_evidence_hash(evidence) << "\"}";
@@ -525,19 +650,45 @@ void cmd_replay(int argc, char** argv) {
     if (!in) throw std::runtime_error("cannot open bundle");
     const std::string text((std::istreambuf_iterator<char>(in)), {});
     const auto schema_version = json_u64_value(text, "schema_version");
-    if (schema_version > 4) throw std::runtime_error("unsupported export schema version");
-    Baseline baseline;
-    baseline.target_host = json_string_value(text, "target_host");
-    baseline.target_port = static_cast<std::uint16_t>(json_u64_value(text, "target_port"));
-    baseline.rtt_median_us = json_u64_value(text, "baseline_rtt_median_us");
-    baseline.rttvar_median_us = json_u64_value(text, "baseline_rttvar_median_us");
-    baseline.sample_count = json_u64_value(text, "baseline_sample_count");
-    baseline.accepted_spki_sha256 = json_string_value(text, "baseline_spki");
-    baseline.sha256 = json_string_value(text, "baseline_hash");
+    if (schema_version > 5) throw std::runtime_error("unsupported export schema version");
+
+    const auto direction = connection_direction_from_string(json_string_value(text, "direction"));
+    auto original_rule_version = json_string_value(text, "rule_set_version");
+    if (original_rule_version.empty() && schema_version <= 4) original_rule_version = kLegacyRuleSetVersion;
+    const auto rules = rule_set_for_version(original_rule_version);
+    if (!rules) throw std::runtime_error("unsupported rule set version: " + original_rule_version);
+
+    std::optional<Baseline> baseline;
+    if (schema_version >= 5) {
+        if (json_bool_value(text, "baseline_present")) {
+            Baseline value;
+            value.target_host = json_string_value(text, "baseline_target_host");
+            value.target_port = static_cast<std::uint16_t>(json_u64_value(text, "baseline_target_port"));
+            value.rtt_median_us = json_u64_value(text, "baseline_rtt_median_us");
+            value.rttvar_median_us = json_u64_value(text, "baseline_rttvar_median_us");
+            value.sample_count = json_u64_value(text, "baseline_sample_count");
+            value.accepted_spki_sha256 = json_string_value(text, "baseline_spki");
+            value.accepted_issuer = json_string_value(text, "baseline_issuer");
+            value.sha256 = json_string_value(text, "baseline_hash");
+            baseline = value;
+        }
+    } else {
+        Baseline value;
+        value.target_host = json_string_value(text, "target_host");
+        value.target_port = static_cast<std::uint16_t>(json_u64_value(text, "target_port"));
+        value.rtt_median_us = json_u64_value(text, "baseline_rtt_median_us");
+        value.rttvar_median_us = json_u64_value(text, "baseline_rttvar_median_us");
+        value.sample_count = json_u64_value(text, "baseline_sample_count");
+        value.accepted_spki_sha256 = json_string_value(text, "baseline_spki");
+        value.sha256 = json_string_value(text, "baseline_hash");
+        baseline = value;
+    }
+
     AggregateMetrics metrics;
     metrics.observed_rtt_us = json_u64_value(text, "observed_rtt_us");
     metrics.observed_rttvar_us = json_u64_value(text, "observed_rttvar_us");
     metrics.retransmission_delta = json_u64_value(text, "retransmission_delta");
+
     std::optional<TlsObservation> tls;
     if (json_bool_value(text, "tls_present")) {
         TlsObservation observation;
@@ -547,12 +698,33 @@ void cmd_replay(int argc, char** argv) {
         observation.sha256 = json_string_value(text, "tls_hash");
         tls = observation;
     }
-    const auto replay = evaluate(baseline, metrics, tls);
+
+    AssuranceVerdict replay;
+    if (schema_version >= 5 && direction == ConnectionDirection::Inbound) {
+        InboundTrustContext context;
+        context.tls_session_observed = json_bool_value(text, "inbound_tls_session_observed");
+        context.exact_evidence = json_bool_value(text, "inbound_exact_evidence");
+        context.ambiguous = json_bool_value(text, "inbound_identity_ambiguous");
+        context.peer_certificate_present = json_bool_value(text, "inbound_peer_certificate_present");
+        context.peer_verification_required = json_bool_value(text, "inbound_peer_verification_required");
+        if (json_bool_value(text, "inbound_verify_result_present")) {
+            context.verify_result = json_i64_value(text, "inbound_verify_result");
+        }
+        context.peer_authenticated = json_bool_value(text, "inbound_peer_authenticated");
+        context.spki_sha256 = json_string_value(text, "inbound_client_spki");
+        context.subject = json_string_value(text, "inbound_client_subject");
+        context.issuer = json_string_value(text, "inbound_client_issuer");
+        context.evidence_hash = json_string_value(text, "inbound_tls_evidence_hash");
+        replay = evaluate_inbound(baseline, metrics, context, *rules);
+    } else {
+        if (!baseline) throw std::runtime_error("replay bundle has no baseline");
+        replay = evaluate(*baseline, metrics, tls, *rules);
+    }
+
     const auto original_performance = json_string_value(text, "performance");
     const auto original_trust = json_string_value(text, "trust");
     const auto original_rule_hash = json_string_value(text, "rule_set_hash");
     const auto original_input_hash = json_string_value(text, "input_hash");
-    const auto direction = connection_direction_from_string(json_string_value(text, "direction"));
     std::string name_result = "NOT PRESENT (schema <3)";
     if (schema_version >= 3) {
         const auto expected_count = json_u64_value(text, "name_resolution_count");

@@ -2,30 +2,52 @@
 
 **Endpoint connection assurance agent for per-connection performance, trust, and replayable evidence-based diagnostics.**
 
-`neta-agent` observes real endpoint TCP connections without proxying or redirecting application traffic. Milestone 2 uses CO-RE eBPF connect/accept/close lifecycle evidence to observe eligible outbound and inbound connections while retaining `NETLINK_SOCK_DIAG` / `INET_DIAG_INFO` as the exact detailed TCP-state collector. Target mode keeps its polling fallback and deterministic baseline/verdict/replay behavior.
+`neta-agent` observes real endpoint TCP connections without proxying, redirecting, decrypting, or terminating application traffic. The Linux implementation combines CO-RE eBPF lifecycle evidence with `NETLINK_SOCK_DIAG` / `INET_DIAG_INFO`, application resolver correlation, route evidence, and optional exact OpenSSL application-session TLS instrumentation.
 
-## POC1 principles
+## Core principles
 
-- **Endpoint observer, not interceptor.** Application traffic flows normally; `neta-agent` queries kernel diagnostics.
-- **On-demand first.** `observe` runs for a bounded duration and exits. No daemon/service is required.
+- **Endpoint observer, not interceptor.** Application traffic flows normally; `neta-agent` observes host networking state and optional application-library evidence.
+- **Direction is explicit.** Eligible connections are `OUTBOUND`, `INBOUND`, or `UNKNOWN`.
 - **Local-first history.** SQLite is endpoint-local and never exposed as a network database.
-- **Bounded storage.** Default database budget is 200 MB. Evidence is sparse and old normal history is pruned before anomalous history.
-- **Evidence fidelity is explicit.** TCP socket state is `EXACT`; local route is `STRONGLY_CORRELATED`; the independent TLS probe is `SUPPORTING` and is never claimed to be the certificate used by the application socket.
-- **Deterministic verdicts.** POC1 rule set is `neta-rules/0.1.0`; rules and input hashes are persisted/exported.
-- **Cross-platform architecture, Linux implementation.** Platform-neutral model/storage/verdict interfaces are separated from `src/platform/linux/`.
-- **Single-binary deployment target.** The compiled BPF object is embedded in the executable; no runtime `.bpf.o`, script, Python process, or companion daemon is required.
+- **Bounded storage.** Default database budget is 200 MB. Sparse evidence is retained and old normal history is pruned before anomalous history.
+- **Evidence fidelity is explicit.** TCP state can be `EXACT`; route and resolver-to-socket correlation are `STRONGLY_CORRELATED`; the independent TLS probe is `SUPPORTING`; instrumented OpenSSL session identity can be `EXACT` when socket correlation is exact.
+- **Deterministic verdicts.** Rules, rule hashes, baseline hashes, and evidence-input hashes are persisted/exported for replay.
+- **Cross-platform architecture, Linux implementation.** Portable semantic model/storage/verdict code is separated from `src/platform/linux/`.
 
-Milestone 2 intentionally excludes packet capture, HTTP inspection, DNS interception, exact inbound TLS/client identity, QUIC, Windows/macOS, and later-roadmap features.
+## Current milestone status
+
+Milestone 3 currently includes:
+
+- **MS3.1** — application resolver context from glibc `getaddrinfo()` with bounded, direction-aware correlation to outbound connections;
+- **MS3.2** — opt-in actual OpenSSL 3 application TLS-session evidence via `libneta_tls_context.so`, including inbound presented client certificates;
+- **MS3.3** — deterministic direction-aware inbound authenticated-client/mTLS Trust policy.
+
+The current rule set is **`neta-rules/0.2.0`**. Historical `neta-rules/0.1.0` replay remains supported.
+
+### MS3.3 inbound Trust semantics
+
+Only an **EXACT actual application TLS session** may drive inbound client-identity Trust. A presented certificate alone is not accepted as authenticated identity.
+
+```text
+no exact inbound TLS evidence                         -> UNVERIFIED
+no client certificate                                 -> UNVERIFIED
+client certificate presented but not authenticated    -> UNVERIFIED
+known OpenSSL client-certificate verification failure -> SUSPICIOUS
+authenticated client with no accepted principal       -> UNVERIFIED
+accepted subject + matching issuer/SPKI               -> STABLE
+accepted subject + changed issuer/SPKI                -> CHANGED
+ambiguous exact inbound identity evidence              -> UNVERIFIED
+```
+
+Accepted client identity is explicit and scoped per inbound service plus client certificate subject. The accepted cryptographic identity is issuer + SPKI, allowing multiple legitimate clients for one service without treating each different client as an identity change.
 
 ## Dependencies
 
-Only two substantial runtime libraries are used:
+- **SQLite** — embedded endpoint-local longitudinal evidence store.
+- **OpenSSL 3.x** — supporting TLS probe, certificate/SPKI hashing, and optional exact application-session instrumentation.
+- **libbpf** (optional build dependency) — CO-RE relocation, lifecycle/resolver program attachment, and ring-buffer delivery.
 
-- **SQLite** — Public Domain. Used as the embedded endpoint-local longitudinal evidence store. Mature and actively maintained. The C API is wrapped behind `HistoryStore`; other code does not call SQLite directly.
-- **OpenSSL 3.x** — Apache-2.0. Used for TLS handshake, certificate/hostname validation, SPKI/certificate SHA-256, and evidence hashing. Security-sensitive; production builds should track supported OpenSSL releases.
-- **libbpf (optional build dependency)** — dual BSD-2-Clause/LGPL-2.1. It provides the small, maintained CO-RE relocation, BTF, program-attach, and ring-buffer loader surface. It is not a daemon and is not required by polling-only builds. Static releases must also provide libbpf's static transitive dependencies.
-
-The repository itself is Apache-2.0 licensed. Perform normal dependency/license/security review before public production distribution, especially for statically linked release artifacts.
+The repository is Apache-2.0 licensed.
 
 ## Build
 
@@ -38,50 +60,15 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Strict C++20 is required (`CMAKE_CXX_EXTENSIONS=OFF`).
+`NETA_EBPF=AUTO` is the default. `NETA_EBPF=ON` requires the eBPF build prerequisites; `NETA_EBPF=OFF` deliberately builds the polling/context fallback.
 
-`NETA_EBPF=AUTO` is the default: build eBPF when clang and libbpf are available, otherwise build the safe polling fallback. `NETA_EBPF=ON` makes missing build prerequisites an error; `NETA_EBPF=OFF` deliberately produces a fallback-only binary.
+Normal dynamic builds also produce:
 
-For a release toolchain where static archives are available:
-
-```bash
-cmake -S . -B build-static \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DNETA_STATIC_DEPS=ON \
-  -DNETA_FULL_STATIC=ON
-cmake --build build-static -j
+```text
+build/libneta_tls_context.so
 ```
 
-A fully static Linux release should preferably be produced with a musl-based toolchain rather than forcing a fully static glibc build.
-
-## First run
-
-Check evidence capabilities:
-
-```bash
-sudo ./build/neta-agent capabilities
-```
-
-Observe a controlled target for 30 seconds while you create real traffic from another terminal:
-
-```bash
-sudo ./build/neta-agent observe \
-  --target example.com:443 \
-  --duration 30 \
-  --db ./neta.db
-```
-
-For the controlled AWS lab, pass its hostname and lab CA:
-
-```bash
-sudo ./build/neta-agent observe \
-  --target netassure-vg.test:443 \
-  --ca ./lab-ca.crt \
-  --duration 30 \
-  --db ./neta.db
-```
-
-When lifecycle eBPF loads successfully, new target connections are admitted from kernel events and enriched immediately through SOCK_DIAG. When it cannot load, the command reports the reason and uses the validated MS0 polling path.
+for explicit OpenSSL 3 actual-session instrumentation. Static-dependency/full-static builds disable that preload mechanism rather than claiming unsupported exact TLS coverage.
 
 ## CLI
 
@@ -94,6 +81,8 @@ neta-agent history [--limit 50] [--json]
 neta-agent history show ID [--json]
 neta-agent baseline capture --target host:port [--ca file]
 neta-agent baseline show --target host:port
+neta-agent baseline accept-client ID [--db neta.db]
+neta-agent baseline show-client ID [--db neta.db]
 neta-agent evidence ID
 neta-agent explain ID
 neta-agent export ID > conn.json
@@ -102,18 +91,21 @@ neta-agent storage status
 neta-agent storage prune
 ```
 
-### Baseline flow
+## Outbound baseline flow
 
-1. Run `observe` against the target and generate representative real traffic. Twenty or more persisted samples are recommended.
-2. Explicitly accept the baseline:
+1. Observe a controlled target and generate representative traffic.
+2. Explicitly capture the target baseline:
 
 ```bash
-./build/neta-agent baseline capture --target netassure-vg.test:443 --ca ./lab-ca.crt --db ./neta.db
+./build/neta-agent baseline capture \
+  --target netassure-vg.test:443 \
+  --ca ./lab-ca.crt \
+  --db ./neta.db
 ```
 
-3. Run `observe` again. Connections collected after a baseline exists receive deterministic Performance and Trust verdicts.
+3. Observe again. Target-mode connections receive deterministic Performance and outbound Trust verdicts using the existing supporting-probe policy.
 
-POC1 performance rule:
+The original POC performance rule remains:
 
 ```text
 RTT >= 2 x baseline median          +0.50
@@ -122,7 +114,7 @@ retransmission delta >= 2           +0.30
 score >= 0.50 -> DEGRADED
 ```
 
-Trust rules:
+Outbound Trust still uses the independent `SUPPORTING` TLS probe:
 
 ```text
 valid TLS + matching SPKI           -> STABLE
@@ -130,28 +122,47 @@ valid TLS + changed SPKI            -> CHANGED / TLS_IDENTITY_CHANGE
 invalid chain or hostname           -> SUSPICIOUS / TLS_VALIDATION_FAILURE
 ```
 
-The TLS result is supporting evidence from an independent connection; it is not asserted to be the exact TLS session used by the application.
+## Inbound mTLS identity flow
 
-## POC1 acceptance target
-
-The controlled lab should demonstrate:
-
-```text
-baseline              Performance NORMAL     Trust STABLE
-tc netem impairment   Performance DEGRADED   Trust STABLE
-certificate A -> B     Performance NORMAL     Trust CHANGED
-both                   Performance DEGRADED   Trust CHANGED
-```
-
-For combined anomalies, POC1 reports that a causal relation between performance and trust changes is **NOT ESTABLISHED**.
-
-Finally:
+Run the observer for inbound traffic and instrument the OpenSSL server with the same TLS context endpoint:
 
 ```bash
-./build/neta-agent export ID --db ./neta.db > evidence.json
+sudo env NETA_TLS_CONTEXT_SOCKET=@neta-ms3-test \
+  ./build/neta-agent observe --inbound --local-port 9443 --duration 30 --db ./neta.db
+```
+
+Launch the supported dynamically linked OpenSSL server with:
+
+```bash
+NETA_TLS_CONTEXT_SOCKET=@neta-ms3-test \
+LD_PRELOAD="$PWD/build/libneta_tls_context.so" \
+  ./your-mtls-server
+```
+
+After an authenticated inbound client connection is captured, inspect it:
+
+```bash
+./build/neta-agent evidence CONN_ID --db ./neta.db
+./build/neta-agent explain CONN_ID --db ./neta.db
+```
+
+Before explicit acceptance, an authenticated but unknown client is `UNVERIFIED`. Accept that exact authenticated client principal with:
+
+```bash
+./build/neta-agent baseline accept-client CONN_ID --db ./neta.db
+```
+
+The selected connection is re-evaluated immediately. A later connection from the same subject with matching accepted issuer + SPKI is `STABLE`; a changed issuer/SPKI for that accepted subject is `CHANGED`.
+
+## Export and replay
+
+Current exports use schema version **5**. Schema 5 adds the exact inbound Trust-policy inputs needed to replay MS3.3 decisions. Schema versions 1-4 remain supported and replay under their historical rule semantics.
+
+```bash
+./build/neta-agent export CONN_ID --db ./neta.db > evidence.json
 ./build/neta-agent replay evidence.json
 ```
 
-must report matching rule set, evidence-input hash, and verdict.
+Replay independently checks name-resolution evidence, application TLS-session evidence, rule-set hash, verdict input hash, and Performance/Trust verdict.
 
-See [docs/MILESTONE1_EBPF.md](docs/MILESTONE1_EBPF.md) for architecture, requirements, fallback semantics, and integration testing. [docs/POC1.md](docs/POC1.md) remains the MS0 design contract.
+See [`docs/MILESTONE3.md`](docs/MILESTONE3.md) for MS3 architecture, fidelity rules, limitations, and remaining work. [`docs/POC1.md`](docs/POC1.md) remains the original MS0 design contract.
