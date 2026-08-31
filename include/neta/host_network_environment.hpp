@@ -1,9 +1,11 @@
 #pragma once
 
+#include "neta/crypto.hpp"
 #include "neta/model.hpp"
 
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 
 namespace neta {
@@ -38,7 +40,32 @@ struct HostNetworkEnvironmentEvidence {
 // Canonical v2 fingerprint for the complete captured host/network context.
 // Empty/absent values remain explicit empty markers; callers must never invent
 // evidence merely to make the fingerprint complete.
-std::string host_network_environment_fingerprint(
-    const HostNetworkEnvironmentEvidence& evidence);
+inline std::string host_network_environment_fingerprint(
+    const HostNetworkEnvironmentEvidence& evidence) {
+    std::ostringstream canonical;
+    canonical << "neta-env-v2|"
+              << evidence.host_id << '|'
+              << evidence.hostname << '|'
+              << evidence.os << '|'
+              << evidence.boot_id << '|'
+              << evidence.kernel_release << '|'
+              << evidence.architecture << '|'
+              << evidence.environment_class << '|';
+    if (evidence.network_namespace_inode) canonical << *evidence.network_namespace_inode;
+    canonical << '|';
+    if (evidence.interface_index) canonical << *evidence.interface_index;
+    canonical << '|'
+              << evidence.interface_name << '|'
+              << evidence.interface_mac << '|';
+    if (evidence.interface_mtu) canonical << *evidence.interface_mtu;
+    canonical << '|'
+              << evidence.local_address << '|'
+              << evidence.gateway << '|'
+              << evidence.preferred_source << '|';
+    if (evidence.route_table) canonical << *evidence.route_table;
+    canonical << '|';
+    if (evidence.route_metric) canonical << *evidence.route_metric;
+    return sha256_hex(canonical.str());
+}
 
 } // namespace neta
