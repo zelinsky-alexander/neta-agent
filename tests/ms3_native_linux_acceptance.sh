@@ -15,7 +15,7 @@ fail() {
     exit 1
 }
 
-for command in awk grep openssl sed seq sleep sqlite3 uname; do
+for command in awk grep openssl sed seq sleep sqlite3 ss uname; do
     command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 [[ -x "$BIN" ]] || fail "neta-agent executable not found: $BIN"
@@ -70,11 +70,23 @@ wait_for_port() {
     return 1
 }
 
-latest_connection() {
+wait_for_listen() {
+    local port="$1"
+    for _ in $(seq 1 60); do
+        if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+latest_exact_tls_connection() {
     local direction="$1"
     local port_column="$2"
     local port="$3"
-    sqlite3 "$DB" "SELECT id FROM connections WHERE direction='$direction' AND $port_column=$port ORDER BY id DESC LIMIT 1;"
+    local relation="$4"
+    sqlite3 "$DB" "SELECT c.id FROM connections c JOIN connection_tls_session_evidence t ON t.connection_id=c.id WHERE c.direction='$direction' AND c.$port_column=$port AND t.relation='$relation' AND t.observation_fidelity='EXACT' AND t.correlation_fidelity='EXACT' ORDER BY c.id DESC LIMIT 1;"
 }
 
 assert_contains() {
@@ -104,7 +116,6 @@ assert_replay() {
     assert_contains "$replay" "Host/network environment:   MATCH" "$label replay"
 }
 
-# Private one-day CA and identities used only by this acceptance run.
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -keyout "$TMP_DIR/ca.key" -out "$TMP_DIR/ca.crt" \
     -subj "/CN=NETA-MS35-Test-CA" >/dev/null 2>&1
@@ -163,7 +174,6 @@ run_outbound_observation() {
 # Phase A: native eBPF lifecycle + resolver + exact application TLS + environment.
 start_plain_server
 run_outbound_observation outbound-baseline
-# Ensure enough sparse samples for an explicit target baseline; repeat if necessary.
 for attempt in 1 2 3; do
     sample_count="$(sqlite3 "$DB" "SELECT COUNT(*) FROM transport_samples;")"
     (( sample_count >= 5 )) && break
@@ -174,8 +184,8 @@ sample_count="$(sqlite3 "$DB" "SELECT COUNT(*) FROM transport_samples;")"
 "$BIN" baseline capture --target "localhost:$PORT_OUT" --db "$DB" --ca "$TMP_DIR/ca.crt" \
     >"$TMP_DIR/baseline.log"
 run_outbound_observation outbound-final
-OUT_ID="$(latest_connection OUTBOUND remote_port "$PORT_OUT")"
-[[ -n "$OUT_ID" ]] || fail "no outbound assurance connection captured"
+OUT_ID="$(latest_exact_tls_connection OUTBOUND remote_port "$PORT_OUT" OUTBOUND_SERVER_IDENTITY)"
+[[ -n "$OUT_ID" ]] || fail "no exact outbound OpenSSL assurance connection captured"
 OUT_EVIDENCE="$($BIN evidence "$OUT_ID" --db "$DB")"
 assert_positive_count "$OUT_EVIDENCE" "Lifecycle observations (eBPF observation, not verdict)" "outbound"
 assert_positive_count "$OUT_EVIDENCE" "Name-resolution evidence" "outbound"
@@ -202,7 +212,7 @@ env NETA_TLS_CONTEXT_SOCKET="$ENDPOINT" LD_PRELOAD="$SHIM" \
     -CAfile "$TMP_DIR/ca.crt" -Verify 1 \
     </dev/null >"$TMP_DIR/inbound.server.log" 2>&1 &
 SERVER_PID=$!
-sleep 1
+wait_for_listen "$PORT_IN" || { cat "$TMP_DIR/inbound.server.log" >&2 || true; fail "instrumented mTLS server did not become ready"; }
 if ! (sleep 3) | openssl s_client -quiet -connect "127.0.0.1:$PORT_IN" -servername localhost \
     -CAfile "$TMP_DIR/ca.crt" -verify_return_error -verify_hostname localhost \
     -cert "$TMP_DIR/client.crt" -key "$TMP_DIR/client.key" \
@@ -213,8 +223,8 @@ fi
 wait "$OBSERVER_PID" || { cat "$TMP_DIR/inbound.observe.log" >&2 || true; fail "inbound observer failed"; }
 OBSERVER_PID=""
 stop_server
-IN_ID="$(latest_connection INBOUND local_port "$PORT_IN")"
-[[ -n "$IN_ID" ]] || fail "no inbound accepted assurance connection captured"
+IN_ID="$(latest_exact_tls_connection INBOUND local_port "$PORT_IN" INBOUND_CLIENT_IDENTITY)"
+[[ -n "$IN_ID" ]] || fail "no exact inbound authenticated-client assurance connection captured"
 IN_EVIDENCE="$($BIN evidence "$IN_ID" --db "$DB")"
 assert_positive_count "$IN_EVIDENCE" "Lifecycle observations (eBPF observation, not verdict)" "inbound"
 assert_positive_count "$IN_EVIDENCE" "Application TLS session evidence" "inbound"
@@ -234,7 +244,6 @@ POST_ACCEPT="$($BIN explain "$IN_ID" --db "$DB")"
 assert_contains "$POST_ACCEPT" "Trust: STABLE" "accepted inbound Trust"
 assert_replay "$IN_ID" inbound-accepted
 
-# Persist human-readable demo artifacts before optional cleanup.
 $BIN history show "$OUT_ID" --db "$DB" >"$TMP_DIR/outbound-history.txt"
 $BIN evidence "$OUT_ID" --db "$DB" >"$TMP_DIR/outbound-evidence.txt"
 $BIN explain "$OUT_ID" --db "$DB" >"$TMP_DIR/outbound-explain.txt"
