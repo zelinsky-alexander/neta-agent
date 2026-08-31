@@ -85,6 +85,7 @@ public:
             RouteObservation out;
             out.destination = destination;
             out.observed_ns = wall_now_ns();
+            out.table = route->rtm_table;
             int attr_len = static_cast<int>(RTM_PAYLOAD(nlh));
             for (rtattr* attr = RTM_RTA(route); RTA_OK(attr, attr_len); attr = RTA_NEXT(attr, attr_len)) {
                 if (attr->rta_type == RTA_OIF && RTA_PAYLOAD(attr) >= sizeof(std::uint32_t)) {
@@ -95,11 +96,18 @@ public:
                     out.gateway = addr_string(family, RTA_DATA(attr));
                 } else if (attr->rta_type == RTA_PREFSRC) {
                     out.source = addr_string(family, RTA_DATA(attr));
+                } else if (attr->rta_type == RTA_TABLE && RTA_PAYLOAD(attr) >= sizeof(std::uint32_t)) {
+                    out.table = *reinterpret_cast<std::uint32_t*>(RTA_DATA(attr));
+                } else if (attr->rta_type == RTA_PRIORITY && RTA_PAYLOAD(attr) >= sizeof(std::uint32_t)) {
+                    out.metric = *reinterpret_cast<std::uint32_t*>(RTA_DATA(attr));
                 }
             }
             std::ostringstream canonical;
             canonical << out.destination << '|' << out.source << '|' << out.gateway << '|'
-                      << out.interface_index << '|' << out.interface_name;
+                      << out.interface_index << '|' << out.interface_name << '|';
+            if (out.table) canonical << *out.table;
+            canonical << '|';
+            if (out.metric) canonical << *out.metric;
             out.sha256 = sha256_hex(canonical.str());
             return out;
         }

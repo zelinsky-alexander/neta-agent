@@ -114,16 +114,18 @@ void export_and_replay_preserve_name_evidence(const char* binary) {
         " > " + shell_quote(bundle);
     assert(std::system(export_command.c_str()) == 0);
     const auto exported = read_file(bundle);
-    assert(exported.find("\"schema_version\":5") != std::string::npos);
+    assert(exported.find("\"schema_version\":6") != std::string::npos);
     assert(exported.find("\"kind\":\"NAME_RESOLUTION\"") != std::string::npos);
     assert(exported.find("\"query\":\"api.example.test\"") != std::string::npos);
     assert(exported.find("\"name_resolution_count\":1") != std::string::npos);
+    assert(exported.find("\"environment_present\":false") != std::string::npos);
 
     const auto replay_command = shell_quote(binary) + " replay " + shell_quote(bundle) +
         " > " + shell_quote(replay_output);
     assert(std::system(replay_command.c_str()) == 0);
     const auto replay = read_file(replay_output);
     assert(replay.find("Name-resolution evidence:   MATCH") != std::string::npos);
+    assert(replay.find("Host/network environment:    MATCH") != std::string::npos);
     assert(replay.find("Verdict:                    MATCH") != std::string::npos);
 
     auto tampered = exported;

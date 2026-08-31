@@ -67,6 +67,8 @@ struct RouteObservation {
     std::string gateway;
     std::string interface_name;
     std::uint32_t interface_index{0};
+    std::optional<std::uint32_t> table;
+    std::optional<std::uint32_t> metric;
     std::uint64_t observed_ns{0};
     std::string sha256;
     RouteRelation relation{RouteRelation::Unknown};

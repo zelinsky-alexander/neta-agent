@@ -248,6 +248,11 @@ ObservationRunResult ObservationSession::run(
                     : request->second.direction == ConnectionDirection::Inbound
                         ? RouteRelation::InboundResponseRoute : RouteRelation::Unknown;
                 store_.add_route(connection_id, *route);
+                if (const auto connection = store_.connection(connection_id)) {
+                    const auto environment = platform::capture_host_network_environment(
+                        *connection, *route);
+                    store_.add_host_network_environment(connection_id, environment);
+                }
             }
             route_requests.erase(request);
         }

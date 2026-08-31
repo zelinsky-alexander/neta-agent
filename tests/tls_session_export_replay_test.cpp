@@ -43,6 +43,32 @@ void write_file(const std::filesystem::path& path, const std::string& text) {
     output << text;
 }
 
+neta::HostNetworkEnvironmentEvidence environment_evidence() {
+    neta::HostNetworkEnvironmentEvidence environment;
+    environment.captured_at_ns = 10'050;
+    environment.fidelity = neta::EvidenceFidelity::StronglyCorrelated;
+    environment.source = "test:host-network-environment";
+    environment.host_id = "host-hash";
+    environment.hostname = "test-host";
+    environment.os = "Linux";
+    environment.boot_id = "boot-a";
+    environment.kernel_release = "6.test";
+    environment.architecture = "x86_64";
+    environment.environment_class = "LINUX_HOST";
+    environment.network_namespace_inode = 77;
+    environment.interface_index = 2;
+    environment.interface_name = "eth0";
+    environment.interface_mac = "00:11:22:33:44:55";
+    environment.interface_mtu = 1500;
+    environment.local_address = "192.0.2.10";
+    environment.gateway = "192.0.2.1";
+    environment.preferred_source = "192.0.2.10";
+    environment.route_table = 254;
+    environment.route_metric = 100;
+    environment.environment_fingerprint = neta::host_network_environment_fingerprint(environment);
+    return environment;
+}
+
 neta::TlsSessionEvidence outbound_tls_evidence() {
     neta::TlsSessionEvidence evidence;
     auto& observation = evidence.observation;
@@ -113,6 +139,8 @@ void export_and_replay_outbound_tls_session(const char* binary) {
     const auto replay_output = path_for("outbound-replay.txt");
     const auto tampered_bundle = path_for("outbound-tampered.json");
     const auto tampered_output = path_for("outbound-tampered-replay.txt");
+    const auto env_tampered_bundle = path_for("outbound-env-tampered.json");
+    const auto env_tampered_output = path_for("outbound-env-tampered-replay.txt");
     remove_database(database);
 
     std::int64_t connection_id = 0;
@@ -133,6 +161,7 @@ void export_and_replay_outbound_tls_session(const char* binary) {
         process.executable_path = "/usr/bin/tls-client";
         connection_id = store.begin_connection(socket, process, "api.example.test", 10'000,
                                                neta::ConnectionDirection::Outbound);
+        store.add_host_network_environment(connection_id, environment_evidence());
 
         neta::TcpSnapshot sample;
         sample.observed_ns = 10'100;
@@ -160,17 +189,35 @@ void export_and_replay_outbound_tls_session(const char* binary) {
         " > " + shell_quote(bundle);
     assert(std::system(export_command.c_str()) == 0);
     const auto exported = read_file(bundle);
-    assert(exported.find("\"schema_version\":5") != std::string::npos);
+    assert(exported.find("\"schema_version\":6") != std::string::npos);
     assert(exported.find("\"kind\":\"TLS_SESSION\"") != std::string::npos);
     assert(exported.find("\"relation\":\"OUTBOUND_SERVER_IDENTITY\"") != std::string::npos);
     assert(exported.find("\"tls_session_count\":1") != std::string::npos);
+    assert(exported.find("\"environment_present\":true") != std::string::npos);
+    assert(exported.find("\"kind\":\"HOST_NETWORK_ENVIRONMENT\"") != std::string::npos);
+    assert(exported.find("\"environment_interface_name\":\"eth0\"") != std::string::npos);
 
     const auto replay_command = shell_quote(binary) + " replay " + shell_quote(bundle) +
         " > " + shell_quote(replay_output);
     assert(std::system(replay_command.c_str()) == 0);
     const auto replay = read_file(replay_output);
     assert(replay.find("TLS application sessions:    MATCH") != std::string::npos);
+    assert(replay.find("Host/network environment:    MATCH") != std::string::npos);
     assert(replay.find("Verdict:                    MATCH") != std::string::npos);
+
+    auto env_tampered = exported;
+    const auto env_key = env_tampered.find("\"environment_hostname\":\"");
+    assert(env_key != std::string::npos);
+    const auto env_value = env_key + std::string("\"environment_hostname\":\"").size();
+    assert(env_value < env_tampered.size());
+    env_tampered[env_value] = env_tampered[env_value] == 't' ? 'x' : 't';
+    write_file(env_tampered_bundle, env_tampered);
+    const auto env_tampered_command = shell_quote(binary) + " replay " + shell_quote(env_tampered_bundle) +
+        " > " + shell_quote(env_tampered_output);
+    assert(std::system(env_tampered_command.c_str()) == 0);
+    const auto env_tampered_replay = read_file(env_tampered_output);
+    assert(env_tampered_replay.find("Host/network environment:    MISMATCH") != std::string::npos);
+    assert(env_tampered_replay.find("Verdict:                    MATCH") != std::string::npos);
 
     auto tampered = exported;
     const auto kind = tampered.find("\"kind\":\"TLS_SESSION\"");
@@ -193,6 +240,8 @@ void export_and_replay_outbound_tls_session(const char* binary) {
     std::filesystem::remove(replay_output);
     std::filesystem::remove(tampered_bundle);
     std::filesystem::remove(tampered_output);
+    std::filesystem::remove(env_tampered_bundle);
+    std::filesystem::remove(env_tampered_output);
 }
 
 void export_and_replay_inbound_mtls_policy(const char* binary) {
@@ -262,7 +311,7 @@ void export_and_replay_inbound_mtls_policy(const char* binary) {
         " > " + shell_quote(bundle);
     assert(std::system(export_command.c_str()) == 0);
     const auto exported = read_file(bundle);
-    assert(exported.find("\"schema_version\":5") != std::string::npos);
+    assert(exported.find("\"schema_version\":6") != std::string::npos);
     assert(exported.find("\"direction\":\"INBOUND\"") != std::string::npos);
     assert(exported.find("\"baseline_kind\":\"INBOUND_CLIENT_IDENTITY\"") != std::string::npos);
     assert(exported.find("\"inbound_peer_authenticated\":true") != std::string::npos);
@@ -274,6 +323,7 @@ void export_and_replay_inbound_mtls_policy(const char* binary) {
     assert(std::system(replay_command.c_str()) == 0);
     const auto replay = read_file(replay_output);
     assert(replay.find("Evidence input hash:        MATCH") != std::string::npos);
+    assert(replay.find("Host/network environment:    MATCH") != std::string::npos);
     assert(replay.find("Rule set:                   MATCH") != std::string::npos);
     assert(replay.find("Verdict:                    MATCH") != std::string::npos);
 
@@ -306,5 +356,5 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     export_and_replay_outbound_tls_session(argv[1]);
     export_and_replay_inbound_mtls_policy(argv[1]);
-    std::cout << "TLS-session/MS3.3 export/replay tests passed\n";
+    std::cout << "TLS-session/MS3.3/MS3.4 export/replay tests passed\n";
 }
