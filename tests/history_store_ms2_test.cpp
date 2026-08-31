@@ -31,6 +31,18 @@ void execute(sqlite3* db, const char* sql) {
     }
 }
 
+std::int64_t scalar_count(const std::filesystem::path& path, const char* sql) {
+    sqlite3* db = nullptr;
+    assert(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    const auto result = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    assert(sqlite3_close(db) == SQLITE_OK);
+    return result;
+}
+
 void old_connection_migrates_to_unknown() {
     const auto path = path_for("migration");
     remove_database(path);
@@ -131,10 +143,111 @@ void direction_and_missing_start_are_preserved() {
     remove_database(path);
 }
 
+void host_network_environment_roundtrip_and_dedup() {
+    const auto path = path_for("environment");
+    remove_database(path);
+    {
+        neta::HistoryStore store(path);
+        neta::SocketObservation socket;
+        socket.socket_cookie = 700;
+        socket.local_ip = "10.0.0.10";
+        socket.local_port = 41000;
+        socket.remote_ip = "203.0.113.10";
+        socket.remote_port = 443;
+        socket.network_namespace_inode = 1001;
+
+        const auto first = store.begin_connection(
+            socket, std::nullopt, "example.test", 10,
+            neta::ConnectionDirection::Outbound);
+        socket.socket_cookie = 701;
+        socket.local_port = 41001;
+        const auto second = store.begin_connection(
+            socket, std::nullopt, "example.test", 11,
+            neta::ConnectionDirection::Outbound);
+
+        neta::HostNetworkEnvironmentEvidence environment;
+        environment.captured_at_ns = 123456;
+        environment.fidelity = neta::EvidenceFidelity::StronglyCorrelated;
+        environment.source = "test:host-network-environment";
+        environment.host_id = "host-hash";
+        environment.hostname = "host-a";
+        environment.os = "Linux";
+        environment.boot_id = "boot-a";
+        environment.kernel_release = "6.test";
+        environment.architecture = "x86_64";
+        environment.environment_class = "LINUX_HOST";
+        environment.network_namespace_inode = 1001;
+        environment.interface_index = 2;
+        environment.interface_name = "eth0";
+        environment.interface_mac = "00:11:22:33:44:55";
+        environment.interface_mtu = 1500;
+        environment.local_address = "10.0.0.10";
+        environment.gateway = "10.0.0.1";
+        environment.preferred_source = "10.0.0.10";
+        environment.route_table = 254;
+        environment.route_metric = 100;
+        environment.environment_fingerprint = "environment-a";
+
+        const auto env_one = store.add_host_network_environment(first, environment);
+        environment.captured_at_ns = 123457;
+        const auto env_two = store.add_host_network_environment(second, environment);
+        assert(env_one == env_two);
+
+        const auto restored = store.host_network_environment_for_connection(second);
+        assert(restored);
+        assert(restored->captured_at_ns == 123457);
+        assert(restored->fidelity == neta::EvidenceFidelity::StronglyCorrelated);
+        assert(restored->source == "test:host-network-environment");
+        assert(restored->host_id == "host-hash");
+        assert(restored->hostname == "host-a");
+        assert(restored->boot_id == "boot-a");
+        assert(restored->kernel_release == "6.test");
+        assert(restored->architecture == "x86_64");
+        assert(restored->network_namespace_inode == 1001);
+        assert(restored->interface_index == 2);
+        assert(restored->interface_name == "eth0");
+        assert(restored->interface_mac == "00:11:22:33:44:55");
+        assert(restored->interface_mtu == 1500);
+        assert(restored->local_address == "10.0.0.10");
+        assert(restored->gateway == "10.0.0.1");
+        assert(restored->preferred_source == "10.0.0.10");
+        assert(restored->route_table == 254);
+        assert(restored->route_metric == 100);
+        assert(restored->environment_fingerprint == "environment-a");
+
+        socket.socket_cookie = 702;
+        socket.local_port = 41002;
+        socket.network_namespace_inode = 2002;
+        const auto third = store.begin_connection(
+            socket, std::nullopt, "example.test", 12,
+            neta::ConnectionDirection::Outbound);
+        environment.captured_at_ns = 123458;
+        environment.network_namespace_inode = 2002;
+        environment.interface_index = 7;
+        environment.interface_name = "veth-test";
+        environment.interface_mac = "66:55:44:33:22:11";
+        environment.local_address = "10.200.1.2";
+        environment.gateway.clear();
+        environment.preferred_source = "10.200.1.2";
+        environment.route_metric.reset();
+        environment.environment_fingerprint = "environment-b";
+        const auto env_three = store.add_host_network_environment(third, environment);
+        assert(env_three != env_one);
+    }
+
+    assert(scalar_count(path, "SELECT COUNT(*) FROM connections;") == 3);
+    assert(scalar_count(path, "SELECT COUNT(*) FROM host_identities;") == 1);
+    assert(scalar_count(path, "SELECT COUNT(*) FROM host_boots;") == 1);
+    assert(scalar_count(path, "SELECT COUNT(*) FROM network_environments;") == 2);
+    assert(scalar_count(path, "SELECT COUNT(*) FROM connection_network_environments;") == 3);
+    remove_database(path);
+}
+
 } // namespace
 
 int main() {
     old_connection_migrates_to_unknown();
     direction_and_missing_start_are_preserved();
-    std::cout << "HistoryStore MS2 tests passed\n";
+    host_network_environment_roundtrip_and_dedup();
+    std::cout << "HistoryStore MS2/MS3.4 tests passed\n";
 }
