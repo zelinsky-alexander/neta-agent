@@ -140,6 +140,7 @@ static __always_inline void add_ipv4_address(struct neta_name_resolution_wire_ev
 {
     struct neta_user_sockaddr_in address = {};
     struct neta_name_resolution_wire_address *output;
+    __u32 index;
 
     if (event->address_count >= NETA_NAME_RESOLUTION_MAX_ADDRESSES)
         return;
@@ -148,10 +149,16 @@ static __always_inline void add_ipv4_address(struct neta_name_resolution_wire_ev
         mark_partial(event);
         return;
     }
-    output = &event->addresses[event->address_count];
+
+    // Re-establish the scalar bound after the helper call so newer/stricter
+    // verifiers can prove the variable offset into the fixed-size array.
+    index = event->address_count;
+    if (index >= NETA_NAME_RESOLUTION_MAX_ADDRESSES)
+        return;
+    output = &event->addresses[index];
     output->family = AF_INET;
     __builtin_memcpy(output->address, &address.address, sizeof(address.address));
-    event->address_count++;
+    event->address_count = index + 1;
 }
 
 static __always_inline void add_ipv6_address(struct neta_name_resolution_wire_event *event,
@@ -159,6 +166,7 @@ static __always_inline void add_ipv6_address(struct neta_name_resolution_wire_ev
 {
     struct neta_user_sockaddr_in6 address = {};
     struct neta_name_resolution_wire_address *output;
+    __u32 index;
 
     if (event->address_count >= NETA_NAME_RESOLUTION_MAX_ADDRESSES)
         return;
@@ -167,10 +175,16 @@ static __always_inline void add_ipv6_address(struct neta_name_resolution_wire_ev
         mark_partial(event);
         return;
     }
-    output = &event->addresses[event->address_count];
+
+    // Re-establish the scalar bound after the helper call so newer/stricter
+    // verifiers can prove the variable offset into the fixed-size array.
+    index = event->address_count;
+    if (index >= NETA_NAME_RESOLUTION_MAX_ADDRESSES)
+        return;
+    output = &event->addresses[index];
     output->family = AF_INET6;
     __builtin_memcpy(output->address, address.address, sizeof(address.address));
-    event->address_count++;
+    event->address_count = index + 1;
 }
 
 static __always_inline void read_results(struct neta_name_resolution_wire_event *event,
