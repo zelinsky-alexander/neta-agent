@@ -45,6 +45,49 @@ int auto_vacuum_mode(sqlite3* db) {
     return sqlite3_column_int(statement.get(), 0);
 }
 
+bool table_exists(sqlite3* db, const char* table) {
+    Statement statement(db,
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;");
+    sqlite3_bind_text(statement.get(), 1, table, -1, SQLITE_TRANSIENT);
+    return sqlite3_step(statement.get()) == SQLITE_ROW;
+}
+
+void prune_environment_orphans(sqlite3* db) {
+    if (!table_exists(db, "connection_network_environments") ||
+        !table_exists(db, "network_environments") ||
+        !table_exists(db, "host_boots") ||
+        !table_exists(db, "host_identities")) {
+        return;
+    }
+
+    Statement environments(db, R"SQL(
+DELETE FROM network_environments
+WHERE NOT EXISTS (
+    SELECT 1 FROM connection_network_environments
+    WHERE connection_network_environments.network_environment_id = network_environments.id
+);
+)SQL");
+    environments.step_done();
+
+    Statement boots(db, R"SQL(
+DELETE FROM host_boots
+WHERE NOT EXISTS (
+    SELECT 1 FROM network_environments
+    WHERE network_environments.host_boot_id = host_boots.id
+);
+)SQL");
+    boots.step_done();
+
+    Statement hosts(db, R"SQL(
+DELETE FROM host_identities
+WHERE NOT EXISTS (
+    SELECT 1 FROM host_boots
+    WHERE host_boots.host_identity_id = host_identities.id
+);
+)SQL");
+    hosts.step_done();
+}
+
 void prune_orphans(sqlite3* db) {
     Statement processes(db, R"SQL(
 DELETE FROM processes
@@ -80,6 +123,8 @@ AND EXISTS (
 );
 )SQL");
     baselines.step_done();
+
+    prune_environment_orphans(db);
 }
 
 } // namespace
