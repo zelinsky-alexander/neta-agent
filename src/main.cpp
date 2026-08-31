@@ -174,6 +174,37 @@ std::string name_resolution_addresses(const NameResolutionEvidence& evidence) {
     return out.str();
 }
 
+std::string optional_u64(const std::optional<std::uint64_t>& value) {
+    return value ? std::to_string(*value) : "<unavailable>";
+}
+
+std::string optional_u32(const std::optional<std::uint32_t>& value) {
+    return value ? std::to_string(*value) : "<unavailable>";
+}
+
+void print_environment(const HostNetworkEnvironmentEvidence& environment) {
+    std::cout << "\nHost/network environment (" << to_string(environment.fidelity) << ")"
+              << "\n  Source:       " << environment.source
+              << "\n  Host ID:      " << (environment.host_id.empty() ? "<unavailable>" : environment.host_id)
+              << "\n  Hostname:     " << (environment.hostname.empty() ? "<unavailable>" : environment.hostname)
+              << "\n  Boot ID:      " << (environment.boot_id.empty() ? "<unavailable>" : environment.boot_id)
+              << "\n  OS/kernel:    " << environment.os << ' '
+              << (environment.kernel_release.empty() ? "<unavailable>" : environment.kernel_release)
+              << "\n  Architecture: " << (environment.architecture.empty() ? "<unavailable>" : environment.architecture)
+              << "\n  Class:        " << (environment.environment_class.empty() ? "<unavailable>" : environment.environment_class)
+              << "\n  Netns inode:  " << optional_u64(environment.network_namespace_inode)
+              << "\n  Interface:    " << (environment.interface_name.empty() ? "<unavailable>" : environment.interface_name)
+              << " (index " << optional_u32(environment.interface_index) << ')'
+              << "\n  MAC:          " << (environment.interface_mac.empty() ? "<unavailable>" : environment.interface_mac)
+              << "\n  MTU:          " << optional_u32(environment.interface_mtu)
+              << "\n  Local/source: " << (environment.local_address.empty() ? "<unavailable>" : environment.local_address)
+              << "\n  Gateway:      " << (environment.gateway.empty() ? "<direct/unavailable>" : environment.gateway)
+              << "\n  Preferred src:" << (environment.preferred_source.empty() ? " <unavailable>" : " " + environment.preferred_source)
+              << "\n  Route table:  " << optional_u32(environment.route_table)
+              << "\n  Route metric: " << optional_u32(environment.route_metric)
+              << "\n  Fingerprint:  " << environment.environment_fingerprint << '\n';
+}
+
 void print_usage() {
     std::cout << R"USAGE(neta-agent Milestone 3
 
@@ -255,8 +286,10 @@ void cmd_history(int argc, char** argv) {
     const auto limit = static_cast<std::size_t>(std::stoull(arg_value(argc, argv, "--limit", "50")));
     if (argc >= 3 && std::string(argv[2]) == "show") {
         if (argc < 4) throw std::runtime_error("history show requires ID");
-        auto connection = store.connection(std::stoll(argv[3]));
+        const auto id = std::stoll(argv[3]);
+        auto connection = store.connection(id);
         if (!connection) throw std::runtime_error("connection not found");
+        const auto environment = store.host_network_environment_for_connection(id);
         if (has_arg(argc, argv, "--json")) {
             std::cout << "{\"id\":" << connection->id << ",\"process\":\"" << json_escape(connection->process.comm)
                       << "\",\"local\":\"" << json_escape(connection->local_ip) << ':' << connection->local_port
@@ -264,13 +297,17 @@ void cmd_history(int argc, char** argv) {
                       << "\",\"target\":\"" << json_escape(connection->target_host) << "\",\"captured_at\":\""
                       << format_capture_time(connection->captured_at_ns, true) << "\",\"direction\":\""
                       << to_string(connection->direction) << "\",\"performance\":\"" << to_string(connection->performance)
-                      << "\",\"trust\":\"" << to_string(connection->trust) << "\"}\n";
+                      << "\",\"trust\":\"" << to_string(connection->trust)
+                      << "\",\"environment_present\":" << (environment ? "true" : "false")
+                      << ",\"environment_fingerprint\":\""
+                      << json_escape(environment ? environment->environment_fingerprint : "") << "\"}\n";
         } else {
             std::cout << "CONN-" << connection->id << "  " << connection->process.comm << '[' << connection->process.pid << "]  "
                       << connection->local_ip << ':' << connection->local_port << " -> " << connection->remote_ip << ':'
                       << connection->remote_port << "  " << to_string(connection->direction) << "  "
                       << to_string(connection->performance) << " / " << to_string(connection->trust)
                       << "\nCaptured: " << format_capture_time(connection->captured_at_ns, false) << "\n";
+            if (environment) print_environment(*environment);
         }
         return;
     }
@@ -315,9 +352,7 @@ void cmd_baseline(int argc, char** argv) {
 
         const auto tls_sessions = store.tls_session_evidence_for_connection(connection_id);
         const auto context = inbound_trust_context(tls_sessions);
-        if (context.ambiguous) {
-            throw std::runtime_error("inbound client identity evidence is ambiguous");
-        }
+        if (context.ambiguous) throw std::runtime_error("inbound client identity evidence is ambiguous");
         if (!context.exact_evidence || !context.peer_certificate_present || context.subject.empty()) {
             throw std::runtime_error("client identity baseline requires an EXACT presented client certificate with a subject");
         }
@@ -331,8 +366,7 @@ void cmd_baseline(int argc, char** argv) {
             if (!baseline) throw std::runtime_error("accepted inbound client identity not found");
             std::cout << "Inbound service: "
                       << (connection->process.comm.empty() ? "<unattributed>" : connection->process.comm)
-                      << " uid=" << connection->process.uid
-                      << " local-port=" << connection->local_port
+                      << " uid=" << connection->process.uid << " local-port=" << connection->local_port
                       << "\nClient subject: " << context.subject
                       << "\nAccepted client SPKI: " << baseline->accepted_spki_sha256
                       << "\nAccepted issuer: " << baseline->accepted_issuer
@@ -343,9 +377,7 @@ void cmd_baseline(int argc, char** argv) {
         if (!context.peer_authenticated) {
             throw std::runtime_error("refusing to accept a client certificate that was not authenticated by the server TLS session");
         }
-        if (context.spki_sha256.empty()) {
-            throw std::runtime_error("authenticated client identity has no SPKI hash");
-        }
+        if (context.spki_sha256.empty()) throw std::runtime_error("authenticated client identity has no SPKI hash");
 
         Baseline baseline;
         baseline.target_host = baseline_key;
@@ -357,14 +389,12 @@ void cmd_baseline(int argc, char** argv) {
                                      std::to_string(connection->local_port) + '|' +
                                      context.subject + '|' + context.spki_sha256 + '|' + context.issuer);
         store.save_baseline(baseline);
-
         const auto verdict = evaluate_inbound(
             baseline, aggregate_metrics(store.samples_for_connection(connection_id)), context);
         store.save_verdict(connection_id, verdict);
         std::cout << "Accepted authenticated inbound client identity for "
                   << (connection->process.comm.empty() ? "<unattributed>" : connection->process.comm)
-                  << " uid=" << connection->process.uid
-                  << " local-port=" << connection->local_port
+                  << " uid=" << connection->process.uid << " local-port=" << connection->local_port
                   << "\nClient subject: " << context.subject
                   << "\nClient SPKI: " << context.spki_sha256
                   << "\nIssuer: " << (context.issuer.empty() ? "<unavailable>" : context.issuer)
@@ -405,9 +435,9 @@ void cmd_baseline(int argc, char** argv) {
     baseline.accepted_issuer = tls.issuer;
     baseline.sample_count = samples.size();
     baseline.created_ns = wall_now_ns();
-    baseline.sha256 = sha256_hex(baseline.target_host + ':' + std::to_string(baseline.target_port) + '|'
-                                 + std::to_string(baseline.rtt_median_us) + '|' + std::to_string(baseline.rttvar_median_us)
-                                 + '|' + baseline.accepted_spki_sha256 + '|' + std::to_string(baseline.sample_count));
+    baseline.sha256 = sha256_hex(baseline.target_host + ':' + std::to_string(baseline.target_port) + '|' +
+                                 std::to_string(baseline.rtt_median_us) + '|' + std::to_string(baseline.rttvar_median_us) + '|' +
+                                 baseline.accepted_spki_sha256 + '|' + std::to_string(baseline.sample_count));
     store.save_baseline(baseline);
     std::cout << "Captured baseline for " << target.host << ':' << target.port << " from " << samples.size()
               << " samples. Hash " << baseline.sha256 << "\n";
@@ -420,6 +450,7 @@ void cmd_evidence(int argc, char** argv) {
     const auto data = store.export_data(id);
     const auto names = store.name_resolution_evidence_for_connection(id);
     const auto tls_sessions = store.tls_session_evidence_for_connection(id);
+    const auto environment = store.host_network_environment_for_connection(id);
     std::cout << "Connection CONN-" << id << "\n  Process: "
               << (data.connection.process.comm.empty() ? "<unattributed>" : data.connection.process.comm) << '['
               << data.connection.process.pid << "]\n  Path: " << data.connection.local_ip << ':' << data.connection.local_port
@@ -450,8 +481,7 @@ void cmd_evidence(int argc, char** argv) {
                   << " observation=" << to_string(tls.fidelity)
                   << " correlation=" << to_string(evidence.correlation_fidelity)
                   << " source=" << tls.source << '\n'
-                  << "    Version: " << tls.tls_version
-                  << " cipher=" << tls.cipher
+                  << "    Version: " << tls.tls_version << " cipher=" << tls.cipher
                   << " ALPN=" << (tls.alpn.empty() ? "<none>" : tls.alpn)
                   << " SNI=" << (tls.sni.empty() ? "<none>" : tls.sni) << '\n'
                   << "    Peer cert: " << (tls.peer_certificate_present ? "yes" : "no")
@@ -471,6 +501,7 @@ void cmd_evidence(int argc, char** argv) {
                   << "\n  Gateway:     " << (route.gateway.empty() ? "<direct>" : route.gateway)
                   << "\n  Interface:   " << route.interface_name << " (index " << route.interface_index << ")\n";
     }
+    if (environment) print_environment(*environment);
     if (data.tls) {
         const auto& tls = *data.tls;
         std::cout << "\nTLS active probe (SUPPORTING)\n"
@@ -524,8 +555,7 @@ void cmd_explain(int argc, char** argv) {
                   << "\nObserved client issuer: " << (context.issuer.empty() ? "<unavailable>" : context.issuer)
                   << "\nObserved client SPKI: " << (context.spki_sha256.empty() ? "<unavailable>" : context.spki_sha256)
                   << "\nAccepted issuer: " << (data.baseline ? data.baseline->accepted_issuer : "<none>")
-                  << "\nAccepted client SPKI: "
-                  << (data.baseline ? data.baseline->accepted_spki_sha256 : "<none>");
+                  << "\nAccepted client SPKI: " << (data.baseline ? data.baseline->accepted_spki_sha256 : "<none>");
     } else {
         std::cout << "\nCurrent Trust rule input: SUPPORTING independent active probe"
                   << "\nActual-session TLS evidence remains independently inspectable";
@@ -542,6 +572,7 @@ void cmd_export(int argc, char** argv) {
     const auto data = store.export_data(id);
     const auto names = store.name_resolution_evidence_for_connection(id);
     const auto tls_sessions = store.tls_session_evidence_for_connection(id);
+    const auto environment = store.host_network_environment_for_connection(id);
     if (!data.verdict) throw std::runtime_error("export requires a verdict");
     if (data.connection.direction != ConnectionDirection::Inbound && !data.baseline) {
         throw std::runtime_error("export requires baseline and verdict");
@@ -551,10 +582,9 @@ void cmd_export(int argc, char** argv) {
     const auto tls_session_hash = tls_session_evidence_set_hash(tls_sessions);
     const auto inbound_context = inbound_trust_context(tls_sessions);
     const std::string baseline_kind = !data.baseline ? "NONE" :
-        data.connection.direction == ConnectionDirection::Inbound
-            ? "INBOUND_CLIENT_IDENTITY" : "OUTBOUND_TARGET";
+        data.connection.direction == ConnectionDirection::Inbound ? "INBOUND_CLIENT_IDENTITY" : "OUTBOUND_TARGET";
 
-    std::cout << "{\n  \"schema_version\":5,\n  \"connection_id\":" << id
+    std::cout << "{\n  \"schema_version\":6,\n  \"connection_id\":" << id
               << ",\n  \"direction\":\"" << to_string(data.connection.direction) << "\""
               << ",\n  \"target_host\":\"" << json_escape(data.connection.target_host) << "\",\n  \"target_port\":" << data.connection.remote_port
               << ",\n  \"performance\":\"" << to_string(data.verdict->performance) << "\",\n  \"trust\":\"" << to_string(data.verdict->trust)
@@ -592,16 +622,40 @@ void cmd_export(int argc, char** argv) {
               << ",\n  \"inbound_client_subject\":\"" << json_escape(inbound_context.subject) << "\""
               << ",\n  \"inbound_client_issuer\":\"" << json_escape(inbound_context.issuer) << "\""
               << ",\n  \"inbound_tls_evidence_hash\":\"" << inbound_context.evidence_hash << "\""
+              << ",\n  \"environment_present\":" << (environment ? "true" : "false")
+              << ",\n  \"environment_host_id\":\"" << json_escape(environment ? environment->host_id : "") << "\""
+              << ",\n  \"environment_hostname\":\"" << json_escape(environment ? environment->hostname : "") << "\""
+              << ",\n  \"environment_os\":\"" << json_escape(environment ? environment->os : "") << "\""
+              << ",\n  \"environment_boot_id\":\"" << json_escape(environment ? environment->boot_id : "") << "\""
+              << ",\n  \"environment_kernel_release\":\"" << json_escape(environment ? environment->kernel_release : "") << "\""
+              << ",\n  \"environment_architecture\":\"" << json_escape(environment ? environment->architecture : "") << "\""
+              << ",\n  \"environment_class\":\"" << json_escape(environment ? environment->environment_class : "") << "\""
+              << ",\n  \"environment_netns_present\":" << (environment && environment->network_namespace_inode ? "true" : "false")
+              << ",\n  \"environment_netns\":" << (environment && environment->network_namespace_inode ? *environment->network_namespace_inode : 0)
+              << ",\n  \"environment_ifindex_present\":" << (environment && environment->interface_index ? "true" : "false")
+              << ",\n  \"environment_ifindex\":" << (environment && environment->interface_index ? *environment->interface_index : 0)
+              << ",\n  \"environment_interface_name\":\"" << json_escape(environment ? environment->interface_name : "") << "\""
+              << ",\n  \"environment_interface_mac\":\"" << json_escape(environment ? environment->interface_mac : "") << "\""
+              << ",\n  \"environment_mtu_present\":" << (environment && environment->interface_mtu ? "true" : "false")
+              << ",\n  \"environment_mtu\":" << (environment && environment->interface_mtu ? *environment->interface_mtu : 0)
+              << ",\n  \"environment_local_address\":\"" << json_escape(environment ? environment->local_address : "") << "\""
+              << ",\n  \"environment_gateway\":\"" << json_escape(environment ? environment->gateway : "") << "\""
+              << ",\n  \"environment_preferred_source\":\"" << json_escape(environment ? environment->preferred_source : "") << "\""
+              << ",\n  \"environment_route_table_present\":" << (environment && environment->route_table ? "true" : "false")
+              << ",\n  \"environment_route_table\":" << (environment && environment->route_table ? *environment->route_table : 0)
+              << ",\n  \"environment_route_metric_present\":" << (environment && environment->route_metric ? "true" : "false")
+              << ",\n  \"environment_route_metric\":" << (environment && environment->route_metric ? *environment->route_metric : 0)
+              << ",\n  \"environment_fingerprint\":\"" << json_escape(environment ? environment->environment_fingerprint : "") << "\""
               << ",\n  \"evidence\":[\n";
     bool first = true;
     for (const auto& sample : data.samples) {
-        const auto hash = sha256_hex(std::to_string(sample.observed_ns) + '|' + std::to_string(sample.state) + '|'
-                                     + std::to_string(sample.rtt_us) + '|' + std::to_string(sample.rtt_variance_us) + '|'
-                                     + std::to_string(sample.total_retrans) + '|' + std::to_string(sample.lost) + '|'
-                                     + std::to_string(sample.unacked) + '|' + std::to_string(sample.snd_cwnd) + '|'
-                                     + std::to_string(sample.snd_ssthresh) + '|' + std::to_string(sample.snd_mss) + '|'
-                                     + std::to_string(sample.rcv_mss) + '|' + std::to_string(sample.send_queue_bytes) + '|'
-                                     + std::to_string(sample.recv_queue_bytes));
+        const auto hash = sha256_hex(std::to_string(sample.observed_ns) + '|' + std::to_string(sample.state) + '|' +
+                                     std::to_string(sample.rtt_us) + '|' + std::to_string(sample.rtt_variance_us) + '|' +
+                                     std::to_string(sample.total_retrans) + '|' + std::to_string(sample.lost) + '|' +
+                                     std::to_string(sample.unacked) + '|' + std::to_string(sample.snd_cwnd) + '|' +
+                                     std::to_string(sample.snd_ssthresh) + '|' + std::to_string(sample.snd_mss) + '|' +
+                                     std::to_string(sample.rcv_mss) + '|' + std::to_string(sample.send_queue_bytes) + '|' +
+                                     std::to_string(sample.recv_queue_bytes));
         if (!first) std::cout << ",\n";
         first = false;
         std::cout << "    {\"kind\":\"TCP_SNAPSHOT\",\"fidelity\":\"EXACT\",\"sha256\":\"" << hash << "\"}";
@@ -641,6 +695,13 @@ void cmd_export(int argc, char** argv) {
                   << "\",\"peer_authenticated\":" << (tls.peer_authenticated ? "true" : "false")
                   << ",\"sha256\":\"" << tls_session_evidence_hash(evidence) << "\"}";
     }
+    if (environment) {
+        if (!first) std::cout << ",\n";
+        std::cout << "    {\"kind\":\"HOST_NETWORK_ENVIRONMENT\",\"fidelity\":\""
+                  << to_string(environment->fidelity) << "\",\"source\":\""
+                  << json_escape(environment->source) << "\",\"sha256\":\""
+                  << environment->environment_fingerprint << "\"}";
+    }
     std::cout << "\n  ]\n}\n";
 }
 
@@ -650,7 +711,7 @@ void cmd_replay(int argc, char** argv) {
     if (!in) throw std::runtime_error("cannot open bundle");
     const std::string text((std::istreambuf_iterator<char>(in)), {});
     const auto schema_version = json_u64_value(text, "schema_version");
-    if (schema_version > 5) throw std::runtime_error("unsupported export schema version");
+    if (schema_version > 6) throw std::runtime_error("unsupported export schema version");
 
     const auto direction = connection_direction_from_string(json_string_value(text, "direction"));
     auto original_rule_version = json_string_value(text, "rule_set_version");
@@ -741,12 +802,54 @@ void cmd_replay(int argc, char** argv) {
         tls_session_result = hashes.size() == expected_count && evidence_hash_set_hash(hashes) == expected_hash
             ? "MATCH" : "MISMATCH";
     }
+    std::string environment_result = "NOT PRESENT (schema <6)";
+    if (schema_version >= 6) {
+        const bool present = json_bool_value(text, "environment_present");
+        const auto hashes = evidence_hashes_for_kind(text, "HOST_NETWORK_ENVIRONMENT");
+        if (!present) {
+            environment_result = hashes.empty() ? "MATCH" : "MISMATCH";
+        } else {
+            HostNetworkEnvironmentEvidence environment;
+            environment.host_id = json_string_value(text, "environment_host_id");
+            environment.hostname = json_string_value(text, "environment_hostname");
+            environment.os = json_string_value(text, "environment_os");
+            environment.boot_id = json_string_value(text, "environment_boot_id");
+            environment.kernel_release = json_string_value(text, "environment_kernel_release");
+            environment.architecture = json_string_value(text, "environment_architecture");
+            environment.environment_class = json_string_value(text, "environment_class");
+            if (json_bool_value(text, "environment_netns_present")) {
+                environment.network_namespace_inode = json_u64_value(text, "environment_netns");
+            }
+            if (json_bool_value(text, "environment_ifindex_present")) {
+                environment.interface_index = static_cast<std::uint32_t>(json_u64_value(text, "environment_ifindex"));
+            }
+            environment.interface_name = json_string_value(text, "environment_interface_name");
+            environment.interface_mac = json_string_value(text, "environment_interface_mac");
+            if (json_bool_value(text, "environment_mtu_present")) {
+                environment.interface_mtu = static_cast<std::uint32_t>(json_u64_value(text, "environment_mtu"));
+            }
+            environment.local_address = json_string_value(text, "environment_local_address");
+            environment.gateway = json_string_value(text, "environment_gateway");
+            environment.preferred_source = json_string_value(text, "environment_preferred_source");
+            if (json_bool_value(text, "environment_route_table_present")) {
+                environment.route_table = static_cast<std::uint32_t>(json_u64_value(text, "environment_route_table"));
+            }
+            if (json_bool_value(text, "environment_route_metric_present")) {
+                environment.route_metric = static_cast<std::uint32_t>(json_u64_value(text, "environment_route_metric"));
+            }
+            const auto expected = json_string_value(text, "environment_fingerprint");
+            const auto computed = host_network_environment_fingerprint(environment);
+            environment_result = hashes.size() == 1 && hashes.front() == expected && computed == expected
+                ? "MATCH" : "MISMATCH";
+        }
+    }
     std::cout << "Connection direction:       " << to_string(direction)
               << "\nOriginal Performance/Trust: " << original_performance << " / " << original_trust
               << "\nReplay Performance/Trust:   " << to_string(replay.performance) << " / " << to_string(replay.trust)
               << "\nEvidence input hash:        " << (replay.input_hash == original_input_hash ? "MATCH" : "MISMATCH")
               << "\nName-resolution evidence:   " << name_result
               << "\nTLS application sessions:    " << tls_session_result
+              << "\nHost/network environment:    " << environment_result
               << "\nRule set:                   " << (replay.rule_set_hash == original_rule_hash ? "MATCH" : "MISMATCH")
               << "\nVerdict:                    " << ((to_string(replay.performance) == original_performance &&
                    to_string(replay.trust) == original_trust) ? "MATCH" : "MISMATCH") << "\n";
