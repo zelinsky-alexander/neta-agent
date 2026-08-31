@@ -1,5 +1,6 @@
 #pragma once
 
+#include "neta/host_network_environment.hpp"
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 #include "neta/name_resolution.hpp"
@@ -67,6 +68,8 @@ public:
 };
 
 HostEnvironment host_environment();
+HostNetworkEnvironmentEvidence capture_host_network_environment(
+    const ConnectionSummary& connection, const RouteObservation& route);
 PlatformCapabilities capabilities();
 
 std::unique_ptr<ConnectionObserver> make_connection_observer();
