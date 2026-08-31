@@ -10,7 +10,6 @@
 #include <cctype>
 #include <fstream>
 #include <optional>
-#include <sstream>
 #include <string>
 
 namespace neta::platform {
@@ -52,16 +51,6 @@ std::string host_id() {
     return sha256_hex("neta-host-id-v1|" + machine_id);
 }
 
-void append_optional(std::ostringstream& canonical,
-                     const std::optional<std::uint64_t>& value) {
-    if (value) canonical << *value;
-}
-
-void append_optional(std::ostringstream& canonical,
-                     const std::optional<std::uint32_t>& value) {
-    if (value) canonical << *value;
-}
-
 } // namespace
 
 HostNetworkEnvironmentEvidence capture_host_network_environment(
@@ -97,33 +86,7 @@ HostNetworkEnvironmentEvidence capture_host_network_environment(
         evidence.interface_mtu = read_u32(base + "mtu");
     }
 
-    // The fingerprint describes the complete captured host/network context, not
-    // merely the selected route. Empty fields are kept as empty markers so
-    // unavailable evidence is never fabricated and remains deterministic.
-    std::ostringstream canonical;
-    canonical << "neta-env-v2|"
-              << evidence.host_id << '|'
-              << evidence.hostname << '|'
-              << evidence.os << '|'
-              << evidence.boot_id << '|'
-              << evidence.kernel_release << '|'
-              << evidence.architecture << '|'
-              << evidence.environment_class << '|';
-    append_optional(canonical, evidence.network_namespace_inode);
-    canonical << '|';
-    append_optional(canonical, evidence.interface_index);
-    canonical << '|'
-              << evidence.interface_name << '|'
-              << evidence.interface_mac << '|';
-    append_optional(canonical, evidence.interface_mtu);
-    canonical << '|'
-              << evidence.local_address << '|'
-              << evidence.gateway << '|'
-              << evidence.preferred_source << '|';
-    append_optional(canonical, evidence.route_table);
-    canonical << '|';
-    append_optional(canonical, evidence.route_metric);
-    evidence.environment_fingerprint = sha256_hex(canonical.str());
+    evidence.environment_fingerprint = host_network_environment_fingerprint(evidence);
     return evidence;
 }
 
