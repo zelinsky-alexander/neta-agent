@@ -113,7 +113,7 @@ assert_replay() {
     replay="$($BIN replay "$TMP_DIR/$label.json")"
     assert_contains "$replay" "Rule set:                   MATCH" "$label replay"
     assert_contains "$replay" "Verdict:                    MATCH" "$label replay"
-    assert_contains "$replay" "Host/network environment:   MATCH" "$label replay"
+    assert_contains "$replay" "Host/network environment:    MATCH" "$label replay"
 }
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -197,7 +197,7 @@ assert_contains "$OUT_EVIDENCE" "relation=OUTBOUND_SERVER_IDENTITY" "outbound TL
 assert_contains "$OUT_EVIDENCE" "observation=EXACT" "outbound TLS"
 assert_contains "$OUT_EVIDENCE" "correlation=EXACT" "outbound TLS"
 assert_contains "$OUT_EVIDENCE" "Host/network environment" "outbound environment"
-assert_contains "$OUT_EVIDENCE" "Environment fingerprint:" "outbound environment"
+assert_contains "$OUT_EVIDENCE" "Fingerprint:" "outbound environment"
 assert_replay "$OUT_ID" outbound-final
 stop_server
 
