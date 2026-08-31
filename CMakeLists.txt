@@ -60,6 +60,7 @@ endif()
 
 set(NETA_PLATFORM_SOURCES
     src/platform/linux/environment.cpp
+    src/platform/linux/host_network_environment.cpp
     src/platform/linux/socket_diag.cpp
     src/platform/linux/process_resolver.cpp
     src/platform/linux/route_observer.cpp
@@ -160,6 +161,7 @@ add_library(neta_core
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/history_store.cpp
+    src/core/history_environment.cpp
     src/core/history_name_resolution.cpp
     src/core/history_tls_session.cpp
     src/core/history_schema.cpp
