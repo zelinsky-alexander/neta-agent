@@ -10,13 +10,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ clang libbpf-dev libssl-dev libsqlite3-dev iproute2 curl openssl
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ clang libbpf-dev libssl-dev libsqlite3-dev sqlite3 iproute2 curl openssl
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - name: Build
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: MS3.5 native acceptance harness syntax
+        run: bash -n tests/ms3_native_linux_acceptance.sh
+      - name: MS3.5 native acceptance preflight
+        run: bash tests/ms3_native_linux_acceptance.sh ./build/neta-agent --preflight-only
       - name: Configure without eBPF
         run: cmake -S . -B build-no-ebpf -G Ninja -DCMAKE_BUILD_TYPE=Debug -DNETA_EBPF=OFF
       - name: Build without eBPF
