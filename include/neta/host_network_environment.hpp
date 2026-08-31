@@ -35,4 +35,10 @@ struct HostNetworkEnvironmentEvidence {
     std::string environment_fingerprint;
 };
 
+// Canonical v2 fingerprint for the complete captured host/network context.
+// Empty/absent values remain explicit empty markers; callers must never invent
+// evidence merely to make the fingerprint complete.
+std::string host_network_environment_fingerprint(
+    const HostNetworkEnvironmentEvidence& evidence);
+
 } // namespace neta
