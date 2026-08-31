@@ -43,7 +43,6 @@ std::string detect_environment_class() {
         version.find("wsl") != std::string::npos) {
         return "WSL";
     }
-    if (!read_first_line("/sys/hypervisor/uuid").empty()) return "VIRTUALIZED";
     return "LINUX_HOST";
 }
 
@@ -51,6 +50,16 @@ std::string host_id() {
     const auto machine_id = read_first_line("/etc/machine-id");
     if (machine_id.empty()) return {};
     return sha256_hex("neta-host-id-v1|" + machine_id);
+}
+
+void append_optional(std::ostringstream& canonical,
+                     const std::optional<std::uint64_t>& value) {
+    if (value) canonical << *value;
+}
+
+void append_optional(std::ostringstream& canonical,
+                     const std::optional<std::uint32_t>& value) {
+    if (value) canonical << *value;
 }
 
 } // namespace
@@ -88,16 +97,32 @@ HostNetworkEnvironmentEvidence capture_host_network_environment(
         evidence.interface_mtu = read_u32(base + "mtu");
     }
 
+    // The fingerprint describes the complete captured host/network context, not
+    // merely the selected route. Empty fields are kept as empty markers so
+    // unavailable evidence is never fabricated and remains deterministic.
     std::ostringstream canonical;
-    canonical << "neta-env-v1|" << evidence.host_id << '|' << evidence.boot_id << '|';
-    if (evidence.network_namespace_inode) canonical << *evidence.network_namespace_inode;
+    canonical << "neta-env-v2|"
+              << evidence.host_id << '|'
+              << evidence.hostname << '|'
+              << evidence.os << '|'
+              << evidence.boot_id << '|'
+              << evidence.kernel_release << '|'
+              << evidence.architecture << '|'
+              << evidence.environment_class << '|';
+    append_optional(canonical, evidence.network_namespace_inode);
     canonical << '|';
-    if (evidence.interface_index) canonical << *evidence.interface_index;
-    canonical << '|' << evidence.interface_name << '|' << evidence.local_address << '|'
-              << evidence.gateway << '|' << evidence.preferred_source << '|';
-    if (evidence.route_table) canonical << *evidence.route_table;
+    append_optional(canonical, evidence.interface_index);
+    canonical << '|'
+              << evidence.interface_name << '|'
+              << evidence.interface_mac << '|';
+    append_optional(canonical, evidence.interface_mtu);
+    canonical << '|'
+              << evidence.local_address << '|'
+              << evidence.gateway << '|'
+              << evidence.preferred_source << '|';
+    append_optional(canonical, evidence.route_table);
     canonical << '|';
-    if (evidence.route_metric) canonical << *evidence.route_metric;
+    append_optional(canonical, evidence.route_metric);
     evidence.environment_fingerprint = sha256_hex(canonical.str());
     return evidence;
 }
