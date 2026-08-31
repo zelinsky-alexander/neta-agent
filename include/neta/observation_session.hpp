@@ -25,6 +25,14 @@ struct ObservationRunResult {
     std::vector<std::int64_t> connection_ids;
     std::size_t admitted_connections{0};
     bool lifecycle_events_active{false};
+    bool name_resolution_events_active{false};
+    std::size_t name_resolution_events_observed{0};
+    std::size_t name_resolution_evidence_attached{0};
+    std::size_t ambiguous_name_resolution_matches{0};
+    bool tls_session_events_active{false};
+    std::size_t tls_session_events_observed{0};
+    std::size_t tls_session_evidence_attached{0};
+    std::size_t ambiguous_tls_session_matches{0};
 };
 
 class ObservationSession {
@@ -36,7 +44,9 @@ public:
                        platform::RouteObserver& route_observer,
                        ConnectionAdmissionPolicy admission_policy,
                        std::string target_label,
-                       StorageMaintenance* storage_maintenance = nullptr);
+                       StorageMaintenance* storage_maintenance = nullptr,
+                       NameResolutionObserver* name_resolution_observer = nullptr,
+                       TlsSessionObserver* tls_session_observer = nullptr);
 
     ObservationRunResult run(std::optional<std::chrono::seconds> duration,
                              std::chrono::milliseconds transport_poll_interval,
@@ -52,6 +62,8 @@ private:
     ConnectionAdmissionPolicy admission_policy_;
     std::string target_label_;
     StorageMaintenance* storage_maintenance_;
+    NameResolutionObserver* name_resolution_observer_;
+    TlsSessionObserver* tls_session_observer_;
 };
 
 } // namespace neta

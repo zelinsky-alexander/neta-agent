@@ -77,6 +77,8 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     auto processes = platform::make_process_resolver();
     auto routes = platform::make_route_observer();
     auto lifecycle = platform::make_lifecycle_observer();
+    auto name_resolution = platform::make_name_resolution_observer();
+    auto tls_session = platform::make_tls_session_observer();
     const bool lifecycle_active = lifecycle_supports(lifecycle->capability(), options.mode);
 
     if (options.mode != ObservationMode::Target && !lifecycle_active) {
@@ -87,6 +89,14 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     if (!lifecycle_active) {
         std::cerr << "Lifecycle eBPF unavailable; target observation uses polling with "
                      "UNKNOWN direction: " << lifecycle->capability().unavailable_reason << '\n';
+    }
+    if (!name_resolution->capability().available()) {
+        std::cerr << "Application resolver event collection unavailable: "
+                  << name_resolution->capability().unavailable_reason << '\n';
+    }
+    if (!tls_session->capability().available()) {
+        std::cerr << "Application TLS session collection unavailable: "
+                  << tls_session->capability().unavailable_reason << '\n';
     }
 
     std::optional<TlsObservation> tls;
@@ -107,7 +117,8 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         lifecycle_active ? std::chrono::milliseconds(1000) : std::chrono::milliseconds(100));
     ObservationSession session(store, *sockets, *lifecycle, *processes, *routes,
                                ConnectionAdmissionPolicy(std::move(policy_config)),
-                               target_label, &maintenance);
+                               target_label, &maintenance, name_resolution.get(),
+                               tls_session.get());
     std::future<TlsObservation> tls_probe;
     const auto result = session.run(options.duration, transport_interval,
                                     [] { return stop_requested != 0; }, [&] {
@@ -133,14 +144,37 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     }
     maintenance.run_now();
 
-    const auto health = lifecycle->health();
+    const auto lifecycle_health = lifecycle->health();
+    const auto name_health = name_resolution->health();
+    const auto tls_health = tls_session->health();
     std::cout << "Observed " << result.admitted_connections << " matching connection(s). History: "
               << options.database << '\n'
               << "Lifecycle dropped events: "
-              << (health.dropped_events ? std::to_string(*health.dropped_events) : "UNAVAILABLE")
-              << '\n';
-    if (health.evidence_may_be_incomplete()) {
+              << (lifecycle_health.dropped_events
+                  ? std::to_string(*lifecycle_health.dropped_events) : "UNAVAILABLE") << '\n'
+              << "Resolver API events: " << result.name_resolution_events_observed
+              << " observed, " << result.name_resolution_evidence_attached
+              << " attached, " << result.ambiguous_name_resolution_matches
+              << " ambiguous\n"
+              << "Resolver dropped events: "
+              << (name_health.dropped_events
+                  ? std::to_string(*name_health.dropped_events) : "UNAVAILABLE") << '\n'
+              << "TLS application sessions: " << result.tls_session_events_observed
+              << " observed, " << result.tls_session_evidence_attached
+              << " attached, " << result.ambiguous_tls_session_matches
+              << " ambiguous\n"
+              << "TLS session dropped events: "
+              << (tls_health.dropped_events
+                  ? std::to_string(*tls_health.dropped_events) : "UNAVAILABLE") << '\n'
+              << "TLS session rejected events: " << tls_health.rejected_events << '\n';
+    if (lifecycle_health.evidence_may_be_incomplete()) {
         std::cerr << "Lifecycle evidence may be incomplete because the collector dropped events\n";
+    }
+    if (name_health.evidence_may_be_incomplete()) {
+        std::cerr << "Name-resolution evidence may be incomplete because the collector dropped events\n";
+    }
+    if (tls_health.evidence_may_be_incomplete()) {
+        std::cerr << "Application TLS session evidence may be incomplete because events were dropped or rejected\n";
     }
 }
 

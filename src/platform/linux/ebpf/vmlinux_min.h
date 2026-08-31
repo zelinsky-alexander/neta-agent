@@ -3,12 +3,12 @@
 
 // Curated CO-RE type boundary. Linux UAPI supplies map enums and the native
 // target's tracing register ABI; the declarations below contain only kernel
-// BTF types/fields read by lifecycle.bpf.c.
+// BTF types/fields read by neta-agent BPF programs.
 #include <asm/ptrace.h>
 #include <linux/bpf.h>
 
 #if !defined(__TARGET_ARCH_x86) && !defined(__TARGET_ARCH_arm64)
-#error "lifecycle eBPF requires __TARGET_ARCH_x86 or __TARGET_ARCH_arm64"
+#error "neta-agent eBPF requires __TARGET_ARCH_x86 or __TARGET_ARCH_arm64"
 #endif
 
 #define AF_INET 2
@@ -32,6 +32,10 @@ struct ns_common {
 
 struct net {
     struct ns_common ns;
+} __attribute__((preserve_access_index));
+
+struct nsproxy {
+    struct net *net_ns;
 } __attribute__((preserve_access_index));
 
 typedef struct {
@@ -70,6 +74,7 @@ struct sock {
 
 struct task_struct {
     __u64 start_boottime;
+    struct nsproxy *nsproxy;
 } __attribute__((preserve_access_index));
 
 #endif

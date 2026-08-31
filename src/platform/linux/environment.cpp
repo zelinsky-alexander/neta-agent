@@ -44,6 +44,7 @@ PlatformCapabilities capabilities() {
     c.tcp_retransmissions = true;
     c.tcp_cwnd = true;
     c.route_observation = true;
+
     const auto lifecycle = make_lifecycle_observer();
     const auto& lifecycle_capability = lifecycle->capability();
     c.connection_lifecycle_events = lifecycle_capability.available();
@@ -57,8 +58,37 @@ PlatformCapabilities capabilities() {
     c.btf_core_runtime = lifecycle_capability.btf_core_runtime;
     c.ebpf_built_in = lifecycle_capability.built_in;
     c.lifecycle_unavailable_reason = lifecycle_capability.unavailable_reason;
+
+    const auto name_resolution = make_name_resolution_observer();
+    const auto& name_capability = name_resolution->capability();
+    c.application_name_resolution_events = name_capability.available();
+    c.name_resolution_drop_counter = name_capability.drop_counter;
+    c.name_resolution_dropped_events = name_resolution->health().dropped_events;
+    c.name_resolution_source = name_capability.source;
+    c.name_resolution_unavailable_reason = name_capability.unavailable_reason;
+
+    const auto tls_session = make_tls_session_observer();
+    const auto& tls_capability = tls_session->capability();
+    const auto tls_health = tls_session->health();
+    c.application_tls_session_events = tls_capability.available();
+    c.tls_session_sender_credentials_verified = tls_capability.sender_credentials_verified;
+    c.tls_session_drop_counter = tls_capability.receive_drop_counter;
+    c.tls_session_dropped_events = tls_health.dropped_events;
+    c.tls_session_rejected_events = tls_health.rejected_events;
+    c.tls_session_source = tls_capability.source;
+    c.tls_session_endpoint = tls_capability.endpoint;
+    c.tls_session_unavailable_reason = tls_capability.unavailable_reason;
+
+    // The glibc collector observes an exact application resolver API event. It does not prove
+    // that a network DNS transaction occurred because NSS/cache/hosts may satisfy getaddrinfo().
     c.exact_dns_observation = false;
+#ifdef NETA_TLS_CONTEXT_SHIM_BUILT
+    // Exact TLS here is conditional on the application using the shipped OpenSSL instrumentation
+    // shim. Uninstrumented or non-OpenSSL applications remain outside this capability's coverage.
+    c.exact_tls_observation = tls_capability.available();
+#else
     c.exact_tls_observation = false;
+#endif
     return c;
 }
 

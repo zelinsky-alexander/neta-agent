@@ -9,6 +9,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace neta {
 
@@ -19,7 +20,9 @@ ObservationSession::ObservationSession(HistoryStore& store,
                                        platform::RouteObserver& route_observer,
                                        ConnectionAdmissionPolicy admission_policy,
                                        std::string target_label,
-                                       StorageMaintenance* storage_maintenance)
+                                       StorageMaintenance* storage_maintenance,
+                                       NameResolutionObserver* name_resolution_observer,
+                                       TlsSessionObserver* tls_session_observer)
     : store_(store),
       socket_observer_(socket_observer),
       lifecycle_observer_(lifecycle_observer),
@@ -27,7 +30,9 @@ ObservationSession::ObservationSession(HistoryStore& store,
       route_observer_(route_observer),
       admission_policy_(std::move(admission_policy)),
       target_label_(std::move(target_label)),
-      storage_maintenance_(storage_maintenance) {}
+      storage_maintenance_(storage_maintenance),
+      name_resolution_observer_(name_resolution_observer),
+      tls_session_observer_(tls_session_observer) {}
 
 ObservationRunResult ObservationSession::run(
     std::optional<std::chrono::seconds> duration,
@@ -50,12 +55,137 @@ ObservationRunResult ObservationSession::run(
             result.lifecycle_events_active = capability.available();
             break;
     }
+    result.name_resolution_events_active = name_resolution_observer_ != nullptr &&
+        name_resolution_observer_->capability().available();
+    result.tls_session_events_active = tls_session_observer_ != nullptr &&
+        tls_session_observer_->capability().available();
+
     std::set<std::int64_t> connection_ids;
     struct RouteRequest {
         std::string remote_address;
         ConnectionDirection direction{ConnectionDirection::Unknown};
     };
     std::unordered_map<std::int64_t, RouteRequest> route_requests;
+
+    constexpr std::size_t max_name_resolution_observations = 4096;
+    const NameResolutionCorrelationPolicy name_resolution_policy{};
+    std::vector<NameResolutionObservation> name_resolution_observations;
+
+    constexpr std::size_t max_tls_session_observations = 4096;
+    const TlsSessionCorrelationPolicy tls_session_policy{};
+    std::vector<TlsSessionObservation> tls_session_observations;
+    std::set<std::string> attached_tls_session_keys;
+
+    const auto drain_name_resolution = [&] {
+        if (!result.name_resolution_events_active) return;
+        auto observations = name_resolution_observer_->poll(std::chrono::milliseconds(0));
+        result.name_resolution_events_observed += observations.size();
+        for (auto& observation : observations) {
+            if (observation.completed_ns != 0) {
+                name_resolution_observations.push_back(std::move(observation));
+            }
+        }
+        if (name_resolution_observations.empty()) return;
+        std::sort(name_resolution_observations.begin(), name_resolution_observations.end(),
+                  [](const auto& left, const auto& right) {
+                      return left.completed_ns < right.completed_ns;
+                  });
+        const auto newest = name_resolution_observations.back().completed_ns;
+        const auto threshold = newest > name_resolution_policy.max_age_ns
+            ? newest - name_resolution_policy.max_age_ns : 0;
+        const auto first_current = std::lower_bound(
+            name_resolution_observations.begin(), name_resolution_observations.end(), threshold,
+            [](const auto& observation, std::uint64_t value) {
+                return observation.completed_ns < value;
+            });
+        name_resolution_observations.erase(name_resolution_observations.begin(), first_current);
+        if (name_resolution_observations.size() > max_name_resolution_observations) {
+            const auto excess = name_resolution_observations.size() -
+                                max_name_resolution_observations;
+            name_resolution_observations.erase(
+                name_resolution_observations.begin(),
+                name_resolution_observations.begin() +
+                    static_cast<std::vector<NameResolutionObservation>::difference_type>(excess));
+        }
+    };
+
+    const auto attach_name_resolution = [&](std::int64_t connection_id,
+                                            ConnectionDirection direction) {
+        if (!result.name_resolution_events_active || direction != ConnectionDirection::Outbound) {
+            return;
+        }
+        const auto connection = store_.connection(connection_id);
+        if (!connection) return;
+        const auto correlation = correlate_name_resolution(
+            *connection, name_resolution_observations, name_resolution_policy);
+        if (correlation.status == NameResolutionCorrelationStatus::Ambiguous) {
+            ++result.ambiguous_name_resolution_matches;
+            return;
+        }
+        if (correlation.status == NameResolutionCorrelationStatus::Matched &&
+            correlation.evidence) {
+            store_.add_name_resolution_evidence(connection_id, *correlation.evidence);
+            ++result.name_resolution_evidence_attached;
+        }
+    };
+
+    const auto correlate_tls_sessions = [&] {
+        if (!result.tls_session_events_active || tls_session_observations.empty() ||
+            connection_ids.empty()) {
+            return;
+        }
+        std::vector<ConnectionSummary> connections;
+        connections.reserve(connection_ids.size());
+        for (const auto connection_id : connection_ids) {
+            if (const auto connection = store_.connection(connection_id)) {
+                connections.push_back(*connection);
+            }
+        }
+        if (connections.empty()) return;
+
+        std::vector<TlsSessionObservation> unresolved;
+        unresolved.reserve(tls_session_observations.size());
+        for (auto& observation : tls_session_observations) {
+            const auto correlation = correlate_tls_session(
+                observation, connections, tls_session_policy);
+            if (correlation.status == TlsSessionCorrelationStatus::Ambiguous) {
+                ++result.ambiguous_tls_session_matches;
+                continue;
+            }
+            if (correlation.status == TlsSessionCorrelationStatus::Matched &&
+                correlation.connection_id && correlation.evidence) {
+                const auto key = tls_session_identity_key(correlation.evidence->observation);
+                if (attached_tls_session_keys.insert(key).second) {
+                    store_.add_tls_session_evidence(*correlation.connection_id,
+                                                    *correlation.evidence);
+                    ++result.tls_session_evidence_attached;
+                }
+                continue;
+            }
+            unresolved.push_back(std::move(observation));
+        }
+        tls_session_observations = std::move(unresolved);
+    };
+
+    const auto drain_tls_sessions = [&] {
+        if (!result.tls_session_events_active) return;
+        auto observations = tls_session_observer_->poll(std::chrono::milliseconds(0));
+        result.tls_session_events_observed += observations.size();
+        for (auto& observation : observations) {
+            if (observation.observed_ns != 0) {
+                tls_session_observations.push_back(std::move(observation));
+            }
+        }
+        if (tls_session_observations.size() > max_tls_session_observations) {
+            const auto excess = tls_session_observations.size() -
+                                max_tls_session_observations;
+            tls_session_observations.erase(
+                tls_session_observations.begin(),
+                tls_session_observations.begin() +
+                    static_cast<std::vector<TlsSessionObservation>::difference_type>(excess));
+        }
+        correlate_tls_sessions();
+    };
 
     const auto record_admission = [&](const ConnectionAdmission& admission,
                                       const std::string& remote_address,
@@ -66,9 +196,12 @@ ObservationRunResult ObservationSession::run(
         connection_ids.insert(admission.connection_id);
         route_requests.emplace(admission.connection_id,
                                RouteRequest{remote_address, direction});
+        attach_name_resolution(admission.connection_id, direction);
+        correlate_tls_sessions();
     };
 
     const auto sample_transport = [&] {
+        drain_name_resolution();
         tracker.begin_snapshot();
         for (const auto& socket : socket_observer_.snapshot()) {
             std::optional<std::string> process_name;
@@ -87,6 +220,7 @@ ObservationRunResult ObservationSession::run(
             scheduler.connection_closed(connection_id);
             route_requests.erase(connection_id);
         }
+        drain_tls_sessions();
     };
 
     const auto observe_scheduled_routes = [&] {
@@ -107,6 +241,8 @@ ObservationRunResult ObservationSession::run(
     const auto deadline = duration
         ? std::optional{std::chrono::steady_clock::now() + *duration} : std::nullopt;
     if (observation_started) observation_started();
+    drain_name_resolution();
+    drain_tls_sessions();
     while ((!deadline || std::chrono::steady_clock::now() < *deadline) && !stop_requested()) {
         if (result.lifecycle_events_active) {
             const auto now = std::chrono::steady_clock::now();
@@ -114,7 +250,9 @@ ObservationRunResult ObservationSession::run(
                 ? std::min(scheduler.wait_time(now),
                            std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - now))
                 : scheduler.wait_time(now);
-            for (const auto& event : lifecycle_observer_.poll(timeout)) {
+            const auto lifecycle_events = lifecycle_observer_.poll(timeout);
+            drain_name_resolution();
+            for (const auto& event : lifecycle_events) {
                 const auto decision = admission_policy_.evaluate(event);
                 if (!decision.admit) continue;
                 const auto admission = tracker.observe_lifecycle(event, decision.direction);
@@ -132,6 +270,7 @@ ObservationRunResult ObservationSession::run(
                     observe_scheduled_routes();
                 }
             }
+            drain_tls_sessions();
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -146,6 +285,9 @@ ObservationRunResult ObservationSession::run(
         if (!result.lifecycle_events_active) std::this_thread::sleep_for(transport_poll_interval);
     }
 
+    drain_name_resolution();
+    drain_tls_sessions();
+    correlate_tls_sessions();
     tracker.finish_observation(!result.lifecycle_events_active);
     result.connection_ids.assign(connection_ids.begin(), connection_ids.end());
     return result;
