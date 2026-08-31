@@ -59,7 +59,7 @@ struct TlsSessionEvidence {
     EvidenceFidelity correlation_fidelity{EvidenceFidelity::Contextual};
 };
 
-enum class TlsSessionCorrelationStatus { NoMatch, Matched, Ambiguous };
+enum class TlsSessionCorrelationStatus { NoMatch, AwaitingIdentity, Matched, Ambiguous };
 
 struct TlsSessionCorrelationPolicy {
     std::uint64_t tuple_max_age_ns{30'000'000'000ULL};

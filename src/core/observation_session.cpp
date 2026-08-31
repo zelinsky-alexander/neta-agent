@@ -143,9 +143,24 @@ ObservationRunResult ObservationSession::run(
         }
         if (connections.empty()) return;
 
+        std::uint64_t correlation_watermark_ns = 0;
+        for (const auto& connection : connections) {
+            correlation_watermark_ns = std::max(correlation_watermark_ns,
+                                                connection.last_seen_ns);
+        }
+        for (const auto& observation : tls_session_observations) {
+            correlation_watermark_ns = std::max(correlation_watermark_ns,
+                                                observation.observed_ns);
+        }
+
         std::vector<TlsSessionObservation> unresolved;
         unresolved.reserve(tls_session_observations.size());
         for (auto& observation : tls_session_observations) {
+            if (correlation_watermark_ns > observation.observed_ns &&
+                correlation_watermark_ns - observation.observed_ns >
+                    tls_session_policy.tuple_max_age_ns) {
+                continue;
+            }
             const auto correlation = correlate_tls_session(
                 observation, connections, tls_session_policy);
             if (correlation.status == TlsSessionCorrelationStatus::Ambiguous) {

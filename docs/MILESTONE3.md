@@ -21,6 +21,7 @@ instrumented application
         |
         | SSL_connect / SSL_accept / SSL_do_handshake
         | SSL_read[_ex] / SSL_write[_ex] completed-handshake state
+        | SSL BIO read/write completed-handshake state
         v
 libneta_tls_context.so
         |
@@ -41,8 +42,12 @@ HistoryStore connection_tls_session_evidence
 ```
 
 Only a completed handshake on a stream socket is emitted, including one driven implicitly by
-OpenSSL read or write APIs. Each live `SSL*` emits at most once; `SSL_free` removes that
-deduplication state. The shim calls the real OpenSSL function first, preserves `errno`,
+OpenSSL read or write APIs or by an OpenSSL SSL BIO (`BIO_f_ssl`). The BIO path records a direct
+socket-BIO-to-`SSL*` association only when the documented `SSL_set_bio` ownership-transfer API
+supplies that socket BIO; a later internal `BIO_read`/`BIO_write` on an unassociated socket BIO
+does not produce TLS evidence. Replacing BIOs or `SSL_free` removes the association before pointer
+reuse can be observed. Each live `SSL*` emits at most once; `SSL_free` removes that deduplication
+state. The shim calls the real OpenSSL function first, preserves `errno`,
 isolates its OpenSSL error-queue use, contains exceptions inside the C ABI boundary, and sends
 evidence non-blockingly so instrumentation failure cannot fail the application handshake.
 
@@ -271,7 +276,7 @@ Instrumentation is explicit and opt-in.
 
 ## Coverage limitations
 
-Actual-session TLS coverage currently applies only to supported dynamically linked OpenSSL 3 applications that execute the instrumented public handshake entry points and expose an ordinary stream socket through `SSL_get_fd()`.
+Actual-session TLS coverage currently applies only to supported dynamically linked OpenSSL 3 applications that execute the instrumented public handshake/read/write entry points, or use an SSL BIO whose stream socket was supplied through `SSL_set_bio`.
 
 It does not claim exact application TLS coverage for:
 

@@ -25,10 +25,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -37,6 +39,12 @@ thread_local bool g_inside_wrapper = false;
 
 std::mutex g_emitted_sessions_mutex;
 std::unordered_set<SSL*> g_emitted_sessions;
+
+// SSL_set_bio transfers ownership of its BIO arguments to the SSL object. Keep only
+// direct socket BIOs supplied through that documented API: a socket BIO is useful
+// only after this exact association has been established.
+std::recursive_mutex g_ssl_bio_associations_mutex;
+std::unordered_map<BIO*, SSL*> g_ssl_bio_associations;
 
 class ErrorQueueGuard {
 public:
@@ -272,10 +280,8 @@ void fill_certificate(neta_tls_session_wire_event& event, X509* certificate) {
     if (!complete) event.availability |= NETA_TLS_PARTIAL;
 }
 
-bool emit_session(SSL* ssl, std::uint8_t role_hint) {
-    if (!ssl) return false;
-    const int fd = SSL_get_fd(ssl);
-    if (fd < 0) return false;
+bool emit_session(SSL* ssl, std::uint8_t role_hint, int fd) {
+    if (!ssl || fd < 0) return false;
     int socket_type = 0;
     socklen_t socket_type_length = sizeof(socket_type);
     if (::getsockopt(fd, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_length) != 0 ||
@@ -375,7 +381,7 @@ bool emit_session(SSL* ssl, std::uint8_t role_hint) {
     return send_event(event);
 }
 
-void maybe_emit_completed_session(SSL* ssl, std::uint8_t role_hint) {
+void maybe_emit_completed_session(SSL* ssl, std::uint8_t role_hint, int fd) {
     if (!ssl || SSL_is_init_finished(ssl) != 1) return;
 
     // Keep the SSL pointer reserved while collecting its immutable completed-session
@@ -383,11 +389,50 @@ void maybe_emit_completed_session(SSL* ssl, std::uint8_t role_hint) {
     // eligible to emit again.
     std::lock_guard<std::mutex> lock(g_emitted_sessions_mutex);
     if (g_emitted_sessions.contains(ssl)) return;
-    if (emit_session(ssl, role_hint)) g_emitted_sessions.insert(ssl);
+    if (emit_session(ssl, role_hint, fd)) g_emitted_sessions.insert(ssl);
+}
+
+void maybe_emit_completed_session(SSL* ssl, std::uint8_t role_hint) {
+    maybe_emit_completed_session(ssl, role_hint, SSL_get_fd(ssl));
+}
+
+void forget_ssl_bio_associations(SSL* ssl) {
+    if (!ssl) return;
+    for (auto it = g_ssl_bio_associations.begin(); it != g_ssl_bio_associations.end();) {
+        if (it->second == ssl) {
+            it = g_ssl_bio_associations.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void remember_ssl_socket_bio(SSL* ssl, BIO* bio) {
+    if (ssl && bio && BIO_method_type(bio) == BIO_TYPE_SOCKET) {
+        g_ssl_bio_associations[bio] = ssl;
+    }
+}
+
+void maybe_emit_completed_associated_socket_bio_session(BIO* bio) {
+    if (!bio || BIO_method_type(bio) != BIO_TYPE_SOCKET) return;
+
+    // SSL_free removes the association under this lock. Holding it while collecting
+    // the completed-session facts prevents a concurrent free and pointer reuse from
+    // turning a socket operation into evidence for a different SSL object.
+    std::lock_guard<std::recursive_mutex> lock(g_ssl_bio_associations_mutex);
+    const auto association = g_ssl_bio_associations.find(bio);
+    if (association == g_ssl_bio_associations.end()) return;
+    SSL* ssl = association->second;
+    const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
+    const long descriptor = BIO_get_fd(bio, nullptr);
+    if (descriptor < 0 || descriptor > std::numeric_limits<int>::max()) return;
+    maybe_emit_completed_session(ssl, role, static_cast<int>(descriptor));
 }
 
 void forget_session(SSL* ssl) {
     if (!ssl) return;
+    std::lock_guard<std::recursive_mutex> association_lock(g_ssl_bio_associations_mutex);
+    forget_ssl_bio_associations(ssl);
     std::lock_guard<std::mutex> lock(g_emitted_sessions_mutex);
     g_emitted_sessions.erase(ssl);
 }
@@ -408,6 +453,34 @@ int call_and_observe(SSL* ssl, const char* symbol, std::uint8_t role_hint,
     if (outer) {
         try {
             maybe_emit_completed_session(ssl, role_hint);
+        } catch (...) {
+            // Instrumentation is observational only. Never let evidence collection
+            // alter application control flow across the OpenSSL C ABI.
+        }
+    }
+    if (outer) g_inside_wrapper = false;
+    errno = saved_errno;
+    return result;
+}
+
+template <typename Function, typename... Arguments>
+int call_bio_and_observe(BIO* bio, const char* symbol, Arguments... arguments) {
+    const int entry_errno = errno;
+    auto* resolved = reinterpret_cast<Function>(::dlsym(RTLD_NEXT, symbol));
+    if (!resolved) {
+        errno = entry_errno;
+        return -1;
+    }
+    const bool outer = !g_inside_wrapper;
+    if (outer) g_inside_wrapper = true;
+    const int result = resolved(bio, arguments...);
+    const int saved_errno = errno;
+    // SSL BIO internals call BIO_read/write on the downstream socket while this
+    // wrapper is already active. Observe those nested exact socket calls too.
+    {
+        try {
+            ErrorQueueGuard errors;
+            if (errors.safe()) maybe_emit_completed_associated_socket_bio_session(bio);
         } catch (...) {
             // Instrumentation is observational only. Never let evidence collection
             // alter application control flow across the OpenSSL C ABI.
@@ -460,6 +533,62 @@ extern "C" int SSL_write_ex(SSL* ssl, const void* buffer, std::size_t size,
     using Function = int (*)(SSL*, const void*, std::size_t, std::size_t*);
     const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
     return call_and_observe<Function>(ssl, "SSL_write_ex", role, buffer, size, bytes_written);
+}
+
+extern "C" void SSL_set_bio(SSL* ssl, BIO* read_bio, BIO* write_bio) {
+    using Function = void (*)(SSL*, BIO*, BIO*);
+    const int entry_errno = errno;
+    auto* resolved = reinterpret_cast<Function>(::dlsym(RTLD_NEXT, "SSL_set_bio"));
+    if (!resolved) {
+        errno = entry_errno;
+        return;
+    }
+
+    int saved_errno = entry_errno;
+    bool real_called = false;
+    try {
+        std::lock_guard<std::recursive_mutex> lock(g_ssl_bio_associations_mutex);
+        // The real call can release the BIOs previously owned by ssl. Remove their
+        // identities before an allocator can reuse them, then record precisely the
+        // socket BIO arguments whose ownership has transferred to ssl.
+        forget_ssl_bio_associations(ssl);
+        resolved(ssl, read_bio, write_bio);
+        real_called = true;
+        saved_errno = errno;
+        remember_ssl_socket_bio(ssl, read_bio);
+        remember_ssl_socket_bio(ssl, write_bio);
+    } catch (...) {
+        // Allocation for optional bookkeeping must not cross the OpenSSL C ABI.
+        // Do not retry a completed setup call; if bookkeeping failed before that
+        // call, still preserve the application's requested OpenSSL operation.
+        if (!real_called) {
+            resolved(ssl, read_bio, write_bio);
+            saved_errno = errno;
+        }
+    }
+    errno = saved_errno;
+}
+
+extern "C" int BIO_read(BIO* bio, void* buffer, int size) {
+    using Function = int (*)(BIO*, void*, int);
+    return call_bio_and_observe<Function>(bio, "BIO_read", buffer, size);
+}
+
+extern "C" int BIO_read_ex(BIO* bio, void* buffer, std::size_t size,
+                            std::size_t* bytes_read) {
+    using Function = int (*)(BIO*, void*, std::size_t, std::size_t*);
+    return call_bio_and_observe<Function>(bio, "BIO_read_ex", buffer, size, bytes_read);
+}
+
+extern "C" int BIO_write(BIO* bio, const void* buffer, int size) {
+    using Function = int (*)(BIO*, const void*, int);
+    return call_bio_and_observe<Function>(bio, "BIO_write", buffer, size);
+}
+
+extern "C" int BIO_write_ex(BIO* bio, const void* buffer, std::size_t size,
+                             std::size_t* bytes_written) {
+    using Function = int (*)(BIO*, const void*, std::size_t, std::size_t*);
+    return call_bio_and_observe<Function>(bio, "BIO_write_ex", buffer, size, bytes_written);
 }
 
 extern "C" void SSL_free(SSL* ssl) {

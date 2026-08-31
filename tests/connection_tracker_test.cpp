@@ -119,6 +119,32 @@ void ambiguous_tuple_is_not_promoted() {
     remove_database(path);
 }
 
+void close_cookie_promotes_fallback_identity() {
+    const auto path = database_path("close-promotion");
+    remove_database(path);
+    {
+        neta::HistoryStore store(path);
+        NoProcessResolver resolver;
+        neta::ConnectionTracker tracker(store, resolver, "");
+        const auto admission = tracker.observe_lifecycle(
+            accepted(1'000), neta::ConnectionDirection::Inbound);
+        assert(admission && admission->newly_admitted);
+
+        auto close = accepted(2'000);
+        close.type = neta::ConnectionLifecycleEventType::Close;
+        close.socket_cookie = 9876;
+        const auto closed = tracker.observe_lifecycle(
+            close, neta::ConnectionDirection::Unknown);
+        assert(closed && closed->closed);
+        assert(closed->connection_id == admission->connection_id);
+        const auto connection = store.connection(admission->connection_id);
+        assert(connection);
+        assert(connection->socket_cookie == 9876);
+        assert(connection->lifecycle_state == "CLOSED");
+    }
+    remove_database(path);
+}
+
 void different_network_namespace_is_not_correlated() {
     const auto path = database_path("netns");
     remove_database(path);
@@ -222,6 +248,7 @@ void missing_close_is_reconciled_from_snapshots() {
 int main() {
     promotion_preserves_connection();
     ambiguous_tuple_is_not_promoted();
+    close_cookie_promotes_fallback_identity();
     different_network_namespace_is_not_correlated();
     canonical_identity_collision_is_rejected();
     closed_connections_leave_bounded_tracker_state();

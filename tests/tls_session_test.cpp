@@ -75,6 +75,45 @@ void cookie_mismatch_never_falls_back_to_tuple() {
     assert(result.status == neta::TlsSessionCorrelationStatus::NoMatch);
 }
 
+void cookie_waits_for_canonical_connection_identity() {
+    auto pending = connection(neta::ConnectionDirection::Inbound, 9, 0);
+    pending.local_ip = "::ffff:127.0.0.1";
+    pending.local_port = 9443;
+    pending.remote_ip = "::ffff:127.0.0.1";
+    pending.remote_port = 55000;
+    auto event = outbound_event(902);
+    event.local_role = neta::TlsSessionRole::Server;
+    event.local = {"::ffff:127.0.0.1", 9443};
+    event.remote = {"::ffff:127.0.0.1", 55000};
+
+    auto result = neta::correlate_tls_session(event, {pending});
+    assert(result.status == neta::TlsSessionCorrelationStatus::AwaitingIdentity);
+    assert(result.candidate_count == 1);
+    assert(!result.connection_id);
+    assert(!result.evidence);
+
+    pending.socket_cookie = 902;
+    result = neta::correlate_tls_session(event, {pending});
+    assert(result.status == neta::TlsSessionCorrelationStatus::Matched);
+    assert(result.evidence);
+    assert(result.evidence->correlation_fidelity == neta::EvidenceFidelity::Exact);
+
+    pending.socket_cookie = 903;
+    result = neta::correlate_tls_session(event, {pending});
+    assert(result.status == neta::TlsSessionCorrelationStatus::NoMatch);
+}
+
+void multiple_connections_awaiting_identity_are_ambiguous() {
+    auto first = connection(neta::ConnectionDirection::Outbound, 7, 0);
+    auto second = first;
+    second.id = 8;
+    const auto result = neta::correlate_tls_session(
+        outbound_event(900), {first, second});
+    assert(result.status == neta::TlsSessionCorrelationStatus::Ambiguous);
+    assert(result.candidate_count == 2);
+    assert(!result.evidence);
+}
+
 void tuple_ambiguity_is_not_guessed() {
     auto first = connection(neta::ConnectionDirection::Outbound, 7, 0);
     auto second = first;
@@ -118,6 +157,8 @@ int main() {
     cookie_match_is_exact();
     tuple_fallback_is_strongly_correlated();
     cookie_mismatch_never_falls_back_to_tuple();
+    cookie_waits_for_canonical_connection_identity();
+    multiple_connections_awaiting_identity_are_ambiguous();
     tuple_ambiguity_is_not_guessed();
     direction_and_inbound_identity_are_explicit();
     partial_observation_caps_fidelity();

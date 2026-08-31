@@ -246,10 +246,123 @@ void io_driven_handshake_emits_client_once() {
     SSL_CTX_free(server_context);
 }
 
+void ssl_bio_driven_server_handshake_emits_once() {
+    auto observer = neta::platform::make_tls_session_observer();
+    assert(observer->capability().available());
+
+    const auto material = make_certificate();
+    SSL_CTX* server_context = SSL_CTX_new(TLS_server_method());
+    SSL_CTX* client_context = SSL_CTX_new(TLS_client_method());
+    assert(server_context && client_context);
+    assert(SSL_CTX_use_certificate(server_context, material.certificate) == 1);
+    assert(SSL_CTX_use_PrivateKey(server_context, material.key) == 1);
+    // Use this self-signed certificate as the test trust anchor and client identity.
+    // This keeps the test local while exercising a verified client certificate.
+    assert(X509_STORE_add_cert(SSL_CTX_get_cert_store(server_context), material.certificate) == 1);
+    SSL_CTX_set_verify(server_context, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+    assert(SSL_CTX_use_certificate(client_context, material.certificate) == 1);
+    assert(SSL_CTX_use_PrivateKey(client_context, material.key) == 1);
+    SSL_CTX_set_verify(client_context, SSL_VERIFY_NONE, nullptr);
+
+    std::uint16_t port = 0;
+    const int listener = listening_socket(port);
+    int server_result = 0;
+    std::thread server([&] {
+        const int accepted = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        assert(accepted >= 0);
+        SSL* ssl = SSL_new(server_context);
+        BIO* ssl_bio = BIO_new(BIO_f_ssl());
+        BIO* socket_bio = BIO_new_socket(accepted, BIO_NOCLOSE);
+        assert(ssl && ssl_bio && socket_bio);
+        // SSL_set_bio is the documented ownership transfer that proves this raw
+        // socket BIO belongs to this SSL*. BIO_f_ssl later reaches it internally.
+        SSL_set_bio(ssl, socket_bio, socket_bio);
+        assert(BIO_set_ssl(ssl_bio, ssl, BIO_NOCLOSE) == 1);
+        SSL_set_accept_state(ssl);
+
+        unsigned char received = 0;
+        server_result = BIO_read(ssl_bio, &received, 1);
+        if (server_result == 1) {
+            const unsigned char response = 'r';
+            assert(BIO_write(ssl_bio, &response, 1) == 1);
+            // A further operation on the SSL BIO must not emit a duplicate session.
+            assert(BIO_read(ssl_bio, &received, 1) == 1);
+        }
+        static_cast<void>(SSL_shutdown(ssl));
+        BIO_free_all(ssl_bio);
+        SSL_free(ssl);
+        ::close(accepted);
+    });
+
+    const int client_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    assert(client_fd >= 0);
+    sockaddr_in remote{};
+    remote.sin_family = AF_INET;
+    remote.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    remote.sin_port = htons(port);
+    assert(::connect(client_fd, reinterpret_cast<sockaddr*>(&remote), sizeof(remote)) == 0);
+    SSL* client = SSL_new(client_context);
+    assert(client && SSL_set_fd(client, client_fd) == 1);
+    const unsigned char request = 'q';
+    assert(SSL_connect(client) == 1);
+    assert(SSL_write(client, &request, 1) == 1);
+    unsigned char response = 0;
+    assert(SSL_read(client, &response, 1) == 1 && response == 'r');
+    assert(SSL_write(client, &request, 1) == 1);
+    static_cast<void>(SSL_shutdown(client));
+    SSL_free(client);
+    ::close(client_fd);
+
+    server.join();
+    ::close(listener);
+    assert(server_result == 1);
+
+    const auto events = poll_events(observer, 2);
+    const auto server_events = std::count_if(events.begin(), events.end(), [](const auto& event) {
+        return event.local_role == neta::TlsSessionRole::Server;
+    });
+    const auto server_event = std::find_if(events.begin(), events.end(), [](const auto& event) {
+        return event.local_role == neta::TlsSessionRole::Server;
+    });
+    assert(server_events == 1);
+    assert(server_event != events.end());
+    assert(server_event->fidelity == neta::EvidenceFidelity::Exact);
+    assert(server_event->socket_cookie);
+    assert(server_event->local.port == port && server_event->remote.port != 0);
+    assert(server_event->peer_certificate_present);
+    assert(server_event->peer_verification_required);
+    assert(server_event->peer_authenticated);
+    assert(!server_event->subject.empty() && !server_event->issuer.empty());
+    assert(!server_event->leaf_sha256.empty() && !server_event->spki_sha256.empty());
+    assert(observer->health().rejected_events == 0);
+
+    SSL_CTX_free(client_context);
+    SSL_CTX_free(server_context);
+}
+
+void non_associated_socket_bio_does_not_emit_tls_evidence() {
+    auto observer = neta::platform::make_tls_session_observer();
+    assert(observer->capability().available());
+    int sockets[2] = {-1, -1};
+    assert(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0);
+    BIO* bio = BIO_new_socket(sockets[0], BIO_NOCLOSE);
+    assert(bio);
+    const char input = 'x';
+    char output = 0;
+    assert(BIO_write(bio, &input, 1) == 1);
+    assert(::read(sockets[1], &output, 1) == 1 && output == input);
+    BIO_free(bio);
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+    assert(observer->poll(std::chrono::milliseconds(50)).empty());
+}
+
 } // namespace
 
 int main() {
     actual_openssl_sessions_emit_exact_events();
     io_driven_handshake_emits_client_once();
+    ssl_bio_driven_server_handshake_emits_once();
+    non_associated_socket_bio_does_not_emit_tls_evidence();
     std::cout << "OpenSSL actual-session instrumentation test passed\n";
 }

@@ -149,6 +149,13 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_lifecycle(
             if (tuple_match) existing = connections_.find(*tuple_match);
         }
         if (existing == connections_.end()) return std::nullopt;
+        if (event.socket_cookie && valid_cookie(*event.socket_cookie) &&
+            existing->first != *identity) {
+            const auto previous_identity = existing->first;
+            if (promote_identity(previous_identity, *identity, *event.socket_cookie)) {
+                existing = connections_.find(*identity);
+            }
+        }
         const auto connection_id = existing->second.connection_id;
         const auto tracked_identity = existing->first;
         store_.touch_connection(connection_id, event.timestamp_ns, "CLOSED");

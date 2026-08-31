@@ -67,27 +67,37 @@ bool within_connection_time(const TlsSessionObservation& observation,
     return true;
 }
 
-bool is_candidate(const TlsSessionObservation& observation,
-                  const ConnectionSummary& connection,
-                  const TlsSessionCorrelationPolicy& policy,
-                  bool& cookie_match) {
-    cookie_match = false;
+enum class CandidateKind { None, AwaitingIdentity, Exact, Tuple };
+
+CandidateKind candidate_kind(const TlsSessionObservation& observation,
+                             const ConnectionSummary& connection,
+                             const TlsSessionCorrelationPolicy& policy) {
     const auto direction = direction_for(observation.local_role);
-    if (direction == ConnectionDirection::Unknown || connection.direction != direction) return false;
+    if (direction == ConnectionDirection::Unknown || connection.direction != direction) {
+        return CandidateKind::None;
+    }
     if (!same_process(observation, connection) || !same_namespace(observation, connection)) {
-        return false;
+        return CandidateKind::None;
     }
 
     if (valid_cookie(observation.socket_cookie)) {
-        if (connection.socket_cookie == 0 ||
-            *observation.socket_cookie != connection.socket_cookie) {
-            return false;
+        if (connection.socket_cookie != 0) {
+            if (*observation.socket_cookie != connection.socket_cookie) {
+                return CandidateKind::None;
+            }
+            return within_connection_time(observation, connection, policy, true)
+                ? CandidateKind::Exact : CandidateKind::None;
         }
-        cookie_match = true;
-    } else if (!same_tuple(observation, connection)) {
-        return false;
+        // A tuple match identifies a connection whose canonical identity may become
+        // exact later. It is deliberately not sufficient to attach cookie-bearing
+        // evidence weakly.
+        if (!same_tuple(observation, connection)) return CandidateKind::None;
+        return within_connection_time(observation, connection, policy, false)
+            ? CandidateKind::AwaitingIdentity : CandidateKind::None;
     }
-    return within_connection_time(observation, connection, policy, cookie_match);
+    if (!same_tuple(observation, connection)) return CandidateKind::None;
+    return within_connection_time(observation, connection, policy, false)
+        ? CandidateKind::Tuple : CandidateKind::None;
 }
 
 TlsSessionRelation relation_for(const TlsSessionObservation& observation) {
@@ -183,6 +193,7 @@ std::string to_string(TlsSessionRelation value) {
 std::string to_string(TlsSessionCorrelationStatus value) {
     switch (value) {
         case TlsSessionCorrelationStatus::NoMatch: return "NO_MATCH";
+        case TlsSessionCorrelationStatus::AwaitingIdentity: return "AWAITING_IDENTITY";
         case TlsSessionCorrelationStatus::Matched: return "MATCHED";
         case TlsSessionCorrelationStatus::Ambiguous: return "AMBIGUOUS";
     }
@@ -210,14 +221,26 @@ TlsSessionCorrelationResult correlate_tls_session(
     TlsSessionCorrelationResult result;
     const ConnectionSummary* match = nullptr;
     bool matched_by_cookie = false;
+    std::size_t awaiting_identity_count = 0;
     for (const auto& connection : connections) {
-        bool cookie_match = false;
-        if (!is_candidate(observation, connection, policy, cookie_match)) continue;
+        const auto kind = candidate_kind(observation, connection, policy);
+        if (kind == CandidateKind::AwaitingIdentity) {
+            ++awaiting_identity_count;
+            continue;
+        }
+        if (kind == CandidateKind::None) continue;
         ++result.candidate_count;
         if (!match) {
             match = &connection;
-            matched_by_cookie = cookie_match;
+            matched_by_cookie = kind == CandidateKind::Exact;
         }
+    }
+    if (result.candidate_count == 0 && awaiting_identity_count != 0) {
+        result.candidate_count = awaiting_identity_count;
+        result.status = awaiting_identity_count == 1
+            ? TlsSessionCorrelationStatus::AwaitingIdentity
+            : TlsSessionCorrelationStatus::Ambiguous;
+        return result;
     }
     if (result.candidate_count == 0) return result;
     if (result.candidate_count != 1 || !match) {
