@@ -20,6 +20,7 @@ MS3.2 adds opt-in OpenSSL 3 application instrumentation that observes the real T
 instrumented application
         |
         | SSL_connect / SSL_accept / SSL_do_handshake
+        | SSL_read[_ex] / SSL_write[_ex] completed-handshake state
         v
 libneta_tls_context.so
         |
@@ -39,7 +40,11 @@ ObservationSession
 HistoryStore connection_tls_session_evidence
 ```
 
-Only a successful handshake on a stream socket is emitted. The shim calls the real OpenSSL function first, preserves `errno`, isolates its OpenSSL error-queue use, contains exceptions inside the C ABI boundary, and sends evidence non-blockingly so instrumentation failure cannot fail the application handshake.
+Only a completed handshake on a stream socket is emitted, including one driven implicitly by
+OpenSSL read or write APIs. Each live `SSL*` emits at most once; `SSL_free` removes that
+deduplication state. The shim calls the real OpenSSL function first, preserves `errno`,
+isolates its OpenSSL error-queue use, contains exceptions inside the C ABI boundary, and sends
+evidence non-blockingly so instrumentation failure cannot fail the application handshake.
 
 ### Exact session facts
 

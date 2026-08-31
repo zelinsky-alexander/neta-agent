@@ -29,10 +29,14 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 
 namespace {
 
 thread_local bool g_inside_wrapper = false;
+
+std::mutex g_emitted_sessions_mutex;
+std::unordered_set<SSL*> g_emitted_sessions;
 
 class ErrorQueueGuard {
 public:
@@ -222,14 +226,15 @@ int evidence_socket() {
     return socket_fd;
 }
 
-void send_event(const neta_tls_session_wire_event& event) {
+bool send_event(const neta_tls_session_wire_event& event) {
     const int fd = evidence_socket();
-    if (fd < 0) return;
+    if (fd < 0) return false;
     sockaddr_un address{};
     socklen_t length = 0;
-    if (!unix_address(default_endpoint(), address, length)) return;
-    static_cast<void>(::sendto(fd, &event, sizeof(event), MSG_DONTWAIT,
-                               reinterpret_cast<const sockaddr*>(&address), length));
+    if (!unix_address(default_endpoint(), address, length)) return false;
+    return ::sendto(fd, &event, sizeof(event), MSG_DONTWAIT,
+                    reinterpret_cast<const sockaddr*>(&address), length) ==
+           static_cast<ssize_t>(sizeof(event));
 }
 
 void fill_certificate(neta_tls_session_wire_event& event, X509* certificate) {
@@ -267,19 +272,19 @@ void fill_certificate(neta_tls_session_wire_event& event, X509* certificate) {
     if (!complete) event.availability |= NETA_TLS_PARTIAL;
 }
 
-void emit_session(SSL* ssl, std::uint8_t role_hint) {
-    if (!ssl) return;
+bool emit_session(SSL* ssl, std::uint8_t role_hint) {
+    if (!ssl) return false;
     const int fd = SSL_get_fd(ssl);
-    if (fd < 0) return;
+    if (fd < 0) return false;
     int socket_type = 0;
     socklen_t socket_type_length = sizeof(socket_type);
     if (::getsockopt(fd, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_length) != 0 ||
         socket_type != SOCK_STREAM) {
-        return;
+        return false;
     }
 
     ErrorQueueGuard errors;
-    if (!errors.safe()) return;
+    if (!errors.safe()) return false;
 
     neta_tls_session_wire_event event{};
     event.version = NETA_TLS_SESSION_WIRE_VERSION;
@@ -367,20 +372,42 @@ void emit_session(SSL* ssl, std::uint8_t role_hint) {
         X509_free(peer);
     }
     if (!complete) event.availability |= NETA_TLS_PARTIAL;
-    send_event(event);
+    return send_event(event);
 }
 
-template <typename Function>
-int call_and_observe(SSL* ssl, const char* symbol, std::uint8_t role_hint) {
+void maybe_emit_completed_session(SSL* ssl, std::uint8_t role_hint) {
+    if (!ssl || SSL_is_init_finished(ssl) != 1) return;
+
+    // Keep the SSL pointer reserved while collecting its immutable completed-session
+    // facts. SSL_free removes it, so a later OpenSSL allocation at this address is
+    // eligible to emit again.
+    std::lock_guard<std::mutex> lock(g_emitted_sessions_mutex);
+    if (g_emitted_sessions.contains(ssl)) return;
+    if (emit_session(ssl, role_hint)) g_emitted_sessions.insert(ssl);
+}
+
+void forget_session(SSL* ssl) {
+    if (!ssl) return;
+    std::lock_guard<std::mutex> lock(g_emitted_sessions_mutex);
+    g_emitted_sessions.erase(ssl);
+}
+
+template <typename Function, typename... Arguments>
+int call_and_observe(SSL* ssl, const char* symbol, std::uint8_t role_hint,
+                     Arguments... arguments) {
+    const int entry_errno = errno;
     auto* resolved = reinterpret_cast<Function>(::dlsym(RTLD_NEXT, symbol));
-    if (!resolved) return -1;
+    if (!resolved) {
+        errno = entry_errno;
+        return -1;
+    }
     const bool outer = !g_inside_wrapper;
     if (outer) g_inside_wrapper = true;
-    const int result = resolved(ssl);
+    const int result = resolved(ssl, arguments...);
     const int saved_errno = errno;
-    if (outer && result == 1) {
+    if (outer) {
         try {
-            emit_session(ssl, role_hint);
+            maybe_emit_completed_session(ssl, role_hint);
         } catch (...) {
             // Instrumentation is observational only. Never let evidence collection
             // alter application control flow across the OpenSSL C ABI.
@@ -407,4 +434,44 @@ extern "C" int SSL_do_handshake(SSL* ssl) {
     using Function = int (*)(SSL*);
     const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
     return call_and_observe<Function>(ssl, "SSL_do_handshake", role);
+}
+
+extern "C" int SSL_read(SSL* ssl, void* buffer, int size) {
+    using Function = int (*)(SSL*, void*, int);
+    const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
+    return call_and_observe<Function>(ssl, "SSL_read", role, buffer, size);
+}
+
+extern "C" int SSL_read_ex(SSL* ssl, void* buffer, std::size_t size,
+                             std::size_t* bytes_read) {
+    using Function = int (*)(SSL*, void*, std::size_t, std::size_t*);
+    const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
+    return call_and_observe<Function>(ssl, "SSL_read_ex", role, buffer, size, bytes_read);
+}
+
+extern "C" int SSL_write(SSL* ssl, const void* buffer, int size) {
+    using Function = int (*)(SSL*, const void*, int);
+    const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
+    return call_and_observe<Function>(ssl, "SSL_write", role, buffer, size);
+}
+
+extern "C" int SSL_write_ex(SSL* ssl, const void* buffer, std::size_t size,
+                              std::size_t* bytes_written) {
+    using Function = int (*)(SSL*, const void*, std::size_t, std::size_t*);
+    const auto role = SSL_is_server(ssl) ? NETA_TLS_ROLE_SERVER : NETA_TLS_ROLE_CLIENT;
+    return call_and_observe<Function>(ssl, "SSL_write_ex", role, buffer, size, bytes_written);
+}
+
+extern "C" void SSL_free(SSL* ssl) {
+    using Function = void (*)(SSL*);
+    const int entry_errno = errno;
+    auto* resolved = reinterpret_cast<Function>(::dlsym(RTLD_NEXT, "SSL_free"));
+    if (!resolved) {
+        errno = entry_errno;
+        return;
+    }
+    forget_session(ssl);
+    resolved(ssl);
+    const int saved_errno = errno;
+    errno = saved_errno;
 }
