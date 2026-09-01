@@ -59,6 +59,12 @@ class ProcessResolver {
 public:
     virtual ~ProcessResolver() = default;
     virtual std::optional<ProcessIdentity> resolve(std::uint64_t socket_inode) = 0;
+
+    // Platforms that receive process ownership directly with the socket observation
+    // can override this without inventing Linux-specific inode identities.
+    virtual std::optional<ProcessIdentity> resolve(const SocketObservation& socket) {
+        return resolve(socket.socket_inode);
+    }
 };
 
 class RouteObserver {
