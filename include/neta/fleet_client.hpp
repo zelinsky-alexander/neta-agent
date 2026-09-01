@@ -29,6 +29,7 @@ struct FleetIdentity {
 
 struct FindingAnnouncementInput {
     std::string finding_id;
+    std::string finding_key;
     std::string host;
     std::uint16_t port{0};
     std::string transport{"tcp"};
