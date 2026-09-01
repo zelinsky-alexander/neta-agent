@@ -9,10 +9,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace neta::platform {
 namespace {
@@ -48,6 +50,20 @@ bool parse_destination(const std::string& text, SOCKADDR_INET& out) {
     return false;
 }
 
+std::string interface_name_utf8(const NET_LUID& luid) {
+    wchar_t name[IF_MAX_STRING_SIZE + 1]{};
+    if (ConvertInterfaceLuidToNameW(&luid, name, static_cast<SIZE_T>(std::size(name))) != NO_ERROR)
+        return {};
+
+    const int required = WideCharToMultiByte(CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr);
+    if (required <= 1) return {};
+    std::string utf8(static_cast<std::size_t>(required), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8.data(), required, nullptr, nullptr) <= 0)
+        return {};
+    utf8.pop_back();
+    return utf8;
+}
+
 class WindowsRouteObserver final : public RouteObserver {
 public:
     std::optional<RouteObservation> route_to(const std::string& destination) override {
@@ -68,17 +84,8 @@ public:
         out.observed_ns = wall_now_ns();
 
         NET_LUID luid{};
-        if (ConvertInterfaceIndexToLuid(route.InterfaceIndex, &luid) == NO_ERROR) {
-            wchar_t name[IF_MAX_STRING_SIZE + 1]{};
-            if (ConvertInterfaceLuidToNameW(&luid, name, static_cast<SIZE_T>(std::size(name))) == NO_ERROR) {
-                const int required = WideCharToMultiByte(CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr);
-                if (required > 1) {
-                    std::string utf8(static_cast<std::size_t>(required - 1), '\0');
-                    WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8.data(), required, nullptr, nullptr);
-                    out.interface_name = std::move(utf8);
-                }
-            }
-        }
+        if (ConvertInterfaceIndexToLuid(route.InterfaceIndex, &luid) == NO_ERROR)
+            out.interface_name = interface_name_utf8(luid);
 
         std::ostringstream canonical;
         canonical << out.destination << '|' << out.source << '|' << out.gateway << '|'
