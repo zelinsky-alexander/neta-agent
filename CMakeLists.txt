@@ -203,7 +203,8 @@ else()
     message(STATUS "OpenSSL TLS context shim disabled for this build")
 endif()
 
-add_executable(neta-agent src/main.cpp)
+set_source_files_properties(src/main.cpp PROPERTIES COMPILE_DEFINITIONS "main=neta_legacy_main")
+add_executable(neta-agent src/main.cpp src/entrypoint.cpp)
 target_link_libraries(neta-agent PRIVATE neta_core)
 target_compile_options(neta-agent PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 
