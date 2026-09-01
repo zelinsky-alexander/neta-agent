@@ -33,3 +33,31 @@ jobs:
         run: ./build/neta-agent capabilities
       - name: SQLite on-demand creation smoke
         run: ./build/neta-agent storage status --db "$RUNNER_TEMP/neta-smoke.db" --max-db-mb 1
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Windows dependencies
+        shell: pwsh
+        run: |
+          vcpkg install openssl:x64-windows sqlite3:x64-windows
+      - name: Configure Windows x64
+        shell: pwsh
+        run: |
+          cmake -S . -B build-windows -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DNETA_EBPF=OFF
+      - name: Build Windows x64
+        shell: pwsh
+        run: cmake --build build-windows --config Debug
+      - name: Test Windows platform foundation
+        shell: pwsh
+        run: ctest --test-dir build-windows -C Debug --output-on-failure
+      - name: Windows capabilities smoke
+        shell: pwsh
+        run: .\build-windows\Debug\neta-agent.exe capabilities
+      - name: Windows NAP/1 CLI smoke
+        shell: pwsh
+        run: .\build-windows\Debug\neta-agent.exe fleet status --state-dir "$env:RUNNER_TEMP\missing-neta-identity" 2>&1 | Out-String
+        continue-on-error: true
