@@ -1,6 +1,7 @@
 #include "neta/cli/observation_command.hpp"
 
 #include "neta/cli/observation_options.hpp"
+#include "neta/fleet_reporting.hpp"
 #include "neta/history_store.hpp"
 #include "neta/platform.hpp"
 #include "neta/storage_maintenance.hpp"
@@ -165,6 +166,16 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         finalize_target_connections(result.connection_ids, store, baseline, tls, tls_id);
     }
     finalize_inbound_connections(result.connection_ids, store);
+
+    const auto reporting_policy = fleet_reporting_policy_from_environment();
+    const auto reporting = auto_report_connections(store, result.connection_ids, reporting_policy);
+    if (reporting.considered != 0 || reporting.announced != 0 || reporting.failed != 0) {
+        std::cout << "Fleet reporting: " << reporting.announced << " announced, "
+                  << reporting.suppressed_policy << " suppressed by policy, "
+                  << reporting.suppressed_cooldown << " suppressed by cooldown, "
+                  << reporting.failed << " failed\n";
+    }
+
     maintenance.run_now();
 
     const auto lifecycle_health = lifecycle->health();
