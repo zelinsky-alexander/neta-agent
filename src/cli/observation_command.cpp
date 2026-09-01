@@ -8,7 +8,10 @@
 #include "neta/tls_probe.hpp"
 #include "neta/verdict.hpp"
 
+#include <chrono>
 #include <csignal>
+#include <cstdlib>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <optional>
@@ -50,6 +53,14 @@ bool lifecycle_supports(const LifecycleCapability& capability, ObservationMode m
     return false;
 }
 
+std::chrono::seconds fleet_heartbeat_interval() {
+    const char* value = std::getenv("NETA_FLEET_HEARTBEAT_SECONDS");
+    if (value == nullptr || *value == '\0') return std::chrono::seconds(300);
+    const auto seconds = std::stoll(value);
+    if (seconds <= 0) throw std::runtime_error("NETA_FLEET_HEARTBEAT_SECONDS must be positive");
+    return std::chrono::seconds(seconds);
+}
+
 void finalize_target_connections(const std::vector<std::int64_t>& connection_ids,
                                  HistoryStore& store,
                                  const std::optional<Baseline>& baseline,
@@ -64,26 +75,39 @@ void finalize_target_connections(const std::vector<std::int64_t>& connection_ids
     }
 }
 
+bool finalize_inbound_connection(std::int64_t connection_id, HistoryStore& store) {
+    const auto connection = store.connection(connection_id);
+    if (!connection || connection->direction != ConnectionDirection::Inbound) return false;
+
+    const auto tls_sessions = store.tls_session_evidence_for_connection(connection_id);
+    const auto context = inbound_trust_context(tls_sessions);
+    std::optional<Baseline> accepted_identity;
+    const auto baseline_key = inbound_client_baseline_key(*connection, context.subject);
+    if (!baseline_key.empty()) {
+        accepted_identity = store.baseline_for(baseline_key, connection->local_port);
+    }
+
+    const auto verdict = evaluate_inbound(
+        accepted_identity,
+        aggregate_metrics(store.samples_for_connection(connection_id)),
+        context);
+    store.save_verdict(connection_id, verdict);
+    return true;
+}
+
 void finalize_inbound_connections(const std::vector<std::int64_t>& connection_ids,
                                   HistoryStore& store) {
     for (const auto connection_id : connection_ids) {
-        const auto connection = store.connection(connection_id);
-        if (!connection || connection->direction != ConnectionDirection::Inbound) continue;
-
-        const auto tls_sessions = store.tls_session_evidence_for_connection(connection_id);
-        const auto context = inbound_trust_context(tls_sessions);
-        std::optional<Baseline> accepted_identity;
-        const auto baseline_key = inbound_client_baseline_key(*connection, context.subject);
-        if (!baseline_key.empty()) {
-            accepted_identity = store.baseline_for(baseline_key, connection->local_port);
-        }
-
-        const auto verdict = evaluate_inbound(
-            accepted_identity,
-            aggregate_metrics(store.samples_for_connection(connection_id)),
-            context);
-        store.save_verdict(connection_id, verdict);
+        static_cast<void>(finalize_inbound_connection(connection_id, store));
     }
+}
+
+void log_reporting_result(const FleetReportingResult& reporting, const char* prefix) {
+    if (reporting.considered == 0 && reporting.announced == 0 && reporting.failed == 0) return;
+    std::cout << prefix << ": " << reporting.announced << " announced, "
+              << reporting.suppressed_policy << " suppressed by policy, "
+              << reporting.suppressed_cooldown << " suppressed by cooldown, "
+              << reporting.failed << " failed\n";
 }
 
 } // namespace
@@ -136,6 +160,12 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         baseline = store.baseline_for(options.target->host, options.target->port);
     }
 
+    const auto reporting_policy = fleet_reporting_policy_from_environment();
+    const bool fleet_identity_available =
+        std::filesystem::exists(reporting_policy.state_dir / "identity.conf");
+    const auto heartbeat_interval = fleet_heartbeat_interval();
+    auto next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
+
     const auto transport_interval = options.transport_interval.value_or(
         lifecycle_active ? std::chrono::milliseconds(1000) : std::chrono::milliseconds(100));
     ObservationSession session(store, *sockets, *lifecycle, *processes, *routes,
@@ -143,14 +173,53 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
                                target_label, &maintenance, name_resolution.get(),
                                tls_session.get());
     std::future<TlsObservation> tls_probe;
+
+    ObservationRuntimeCallbacks callbacks;
+    callbacks.started = [&] {
+        if (options.target) {
+            tls_probe = std::async(std::launch::async, [&] {
+                return TlsProbe{}.probe(options.target->host, options.target->port,
+                                        options.ca_file, std::chrono::milliseconds(100));
+            });
+        }
+        if (service_mode && fleet_identity_available) {
+            try {
+                static_cast<void>(FleetClient::send_agent_hello(reporting_policy.state_dir));
+                std::cout << "Fleet service: AgentHello accepted\n";
+            } catch (const std::exception& error) {
+                std::cerr << "Fleet service AgentHello failed; observation continues: "
+                          << error.what() << '\n';
+            }
+        }
+    };
+    callbacks.periodic = [&] {
+        if (!service_mode || !fleet_identity_available) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_heartbeat) return;
+        next_heartbeat = now + heartbeat_interval;
+        try {
+            static_cast<void>(FleetClient::send_heartbeat(reporting_policy.state_dir));
+            std::cout << "Fleet service: heartbeat accepted\n";
+        } catch (const std::exception& error) {
+            std::cerr << "Fleet service heartbeat failed; observation continues: "
+                      << error.what() << '\n';
+        }
+    };
+    callbacks.connection_completed = [&](std::int64_t connection_id) {
+        if (!service_mode) return;
+        try {
+            if (!finalize_inbound_connection(connection_id, store)) return;
+            const auto reporting = auto_report_connections(
+                store, std::vector<std::int64_t>{connection_id}, reporting_policy);
+            log_reporting_result(reporting, "Fleet live reporting");
+        } catch (const std::exception& error) {
+            std::cerr << "Fleet live finalize/report failed for CONN-" << connection_id
+                      << "; observation continues: " << error.what() << '\n';
+        }
+    };
+
     const auto result = session.run(options.duration, transport_interval,
-                                    [] { return stop_requested != 0; }, [&] {
-        if (!options.target) return;
-        tls_probe = std::async(std::launch::async, [&] {
-            return TlsProbe{}.probe(options.target->host, options.target->port,
-                                    options.ca_file, std::chrono::milliseconds(100));
-        });
-    });
+                                    [] { return stop_requested != 0; }, callbacks);
     if (tls_probe.valid()) {
         try {
             tls = tls_probe.get();
@@ -167,14 +236,8 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     }
     finalize_inbound_connections(result.connection_ids, store);
 
-    const auto reporting_policy = fleet_reporting_policy_from_environment();
     const auto reporting = auto_report_connections(store, result.connection_ids, reporting_policy);
-    if (reporting.considered != 0 || reporting.announced != 0 || reporting.failed != 0) {
-        std::cout << "Fleet reporting: " << reporting.announced << " announced, "
-                  << reporting.suppressed_policy << " suppressed by policy, "
-                  << reporting.suppressed_cooldown << " suppressed by cooldown, "
-                  << reporting.failed << " failed\n";
-    }
+    log_reporting_result(reporting, "Fleet reporting");
 
     maintenance.run_now();
 
