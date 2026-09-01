@@ -35,6 +35,12 @@ struct ObservationRunResult {
     std::size_t ambiguous_tls_session_matches{0};
 };
 
+struct ObservationRuntimeCallbacks {
+    std::function<void()> started;
+    std::function<void()> periodic;
+    std::function<void(std::int64_t)> connection_completed;
+};
+
 class ObservationSession {
 public:
     ObservationSession(HistoryStore& store,
@@ -52,6 +58,11 @@ public:
                              std::chrono::milliseconds transport_poll_interval,
                              const std::function<bool()>& stop_requested,
                              const std::function<void()>& observation_started = {});
+
+    ObservationRunResult run(std::optional<std::chrono::seconds> duration,
+                             std::chrono::milliseconds transport_poll_interval,
+                             const std::function<bool()>& stop_requested,
+                             const ObservationRuntimeCallbacks& callbacks);
 
 private:
     HistoryStore& store_;
