@@ -160,6 +160,7 @@ add_library(neta_core
     src/core/crypto.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
+    src/core/fleet_client.cpp
     src/core/history_store.cpp
     src/core/history_environment.cpp
     src/core/history_name_resolution.cpp
@@ -175,6 +176,7 @@ add_library(neta_core
     src/core/storage_maintenance.cpp
     src/cli/observation_options.cpp
     src/cli/observation_command.cpp
+    src/cli/fleet_command.cpp
     ${NETA_PLATFORM_SOURCES}
 )
 
