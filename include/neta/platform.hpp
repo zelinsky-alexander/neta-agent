@@ -1,5 +1,6 @@
 #pragma once
 
+#include "neta/platform_compat.hpp"
 #include "neta/host_network_environment.hpp"
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
