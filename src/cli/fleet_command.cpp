@@ -1,4 +1,5 @@
 #include "neta/cli/fleet_command.hpp"
+#include "neta/crypto.hpp"
 #include "neta/fleet_client.hpp"
 #include "neta/history_store.hpp"
 #include "neta/tls_session.hpp"
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -123,6 +125,18 @@ FindingAnnouncementInput finding_from_connection(const std::filesystem::path& db
         throw std::runtime_error("connection has no stable evidence hash to announce");
     }
 
+    std::ostringstream semantic;
+    semantic << "direction=" << to_string(data.connection.direction)
+             << "|target=" << finding.host << ':' << finding.port
+             << "|transport=" << finding.transport
+             << "|performance=" << finding.performance_verdict
+             << "|trust=" << finding.trust_verdict;
+    if (data.verdict) {
+        semantic << "|performance_hypothesis=" << data.verdict->performance_hypothesis
+                 << "|trust_hypothesis=" << data.verdict->trust_hypothesis;
+    }
+    finding.finding_key = "sha256:" + sha256_hex(semantic.str());
+
     std::string root_suffix = finding.evidence_root;
     if (root_suffix.starts_with("sha256:")) root_suffix.erase(0, 7);
     if (root_suffix.size() > 12) root_suffix.resize(12);
@@ -186,6 +200,7 @@ void run_fleet_command(int argc, char** argv) {
     if (action == "announce") {
         FindingAnnouncementInput finding;
         finding.finding_id = arg_value(argc, argv, "--finding-id");
+        finding.finding_key = arg_value(argc, argv, "--finding-key");
         finding.host = arg_value(argc, argv, "--host");
         finding.port = static_cast<std::uint16_t>(std::stoul(arg_value(argc, argv, "--port", "0")));
         finding.transport = arg_value(argc, argv, "--transport", "tcp");
