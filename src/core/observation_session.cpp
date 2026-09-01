@@ -39,6 +39,16 @@ ObservationRunResult ObservationSession::run(
     std::chrono::milliseconds transport_poll_interval,
     const std::function<bool()>& stop_requested,
     const std::function<void()>& observation_started) {
+    ObservationRuntimeCallbacks callbacks;
+    callbacks.started = observation_started;
+    return run(duration, transport_poll_interval, stop_requested, callbacks);
+}
+
+ObservationRunResult ObservationSession::run(
+    std::optional<std::chrono::seconds> duration,
+    std::chrono::milliseconds transport_poll_interval,
+    const std::function<bool()>& stop_requested,
+    const ObservationRuntimeCallbacks& callbacks) {
     ConnectionTracker tracker(store_, process_resolver_, target_label_);
     EvidenceScheduler scheduler(transport_poll_interval);
     ObservationRunResult result;
@@ -61,6 +71,8 @@ ObservationRunResult ObservationSession::run(
         tls_session_observer_->capability().available();
 
     std::set<std::int64_t> connection_ids;
+    std::set<std::int64_t> pending_completed_connections;
+    std::set<std::int64_t> dispatched_completed_connections;
     struct RouteRequest {
         std::string remote_address;
         ConnectionDirection direction{ConnectionDirection::Unknown};
@@ -202,6 +214,19 @@ ObservationRunResult ObservationSession::run(
         correlate_tls_sessions();
     };
 
+    const auto dispatch_completed = [&] {
+        if (!callbacks.connection_completed) {
+            pending_completed_connections.clear();
+            return;
+        }
+        for (const auto connection_id : pending_completed_connections) {
+            if (dispatched_completed_connections.insert(connection_id).second) {
+                callbacks.connection_completed(connection_id);
+            }
+        }
+        pending_completed_connections.clear();
+    };
+
     const auto record_admission = [&](const ConnectionAdmission& admission,
                                       const std::string& remote_address,
                                       ConnectionDirection direction) {
@@ -234,8 +259,10 @@ ObservationRunResult ObservationSession::run(
              tracker.end_snapshot(!result.lifecycle_events_active)) {
             scheduler.connection_closed(connection_id);
             route_requests.erase(connection_id);
+            pending_completed_connections.insert(connection_id);
         }
         drain_tls_sessions();
+        dispatch_completed();
     };
 
     const auto observe_scheduled_routes = [&] {
@@ -260,7 +287,7 @@ ObservationRunResult ObservationSession::run(
 
     const auto deadline = duration
         ? std::optional{std::chrono::steady_clock::now() + *duration} : std::nullopt;
-    if (observation_started) observation_started();
+    if (callbacks.started) callbacks.started();
     drain_name_resolution();
     drain_tls_sessions();
     while ((!deadline || std::chrono::steady_clock::now() < *deadline) && !stop_requested()) {
@@ -279,18 +306,17 @@ ObservationRunResult ObservationSession::run(
                 if (admission && admission->closed) {
                     scheduler.connection_closed(admission->connection_id);
                     route_requests.erase(admission->connection_id);
+                    pending_completed_connections.insert(admission->connection_id);
                 }
                 if (admission && admission->newly_admitted && event.remote) {
                     record_admission(*admission, event.remote->address, decision.direction);
-                    // A lifecycle poll may also contain CLOSE for a short-lived socket.
-                    // Sample while the admission is being handled, before a later event
-                    // can retire its scheduler state.
                     sample_transport();
                     scheduler.transport_sampled(std::chrono::steady_clock::now());
                     observe_scheduled_routes();
                 }
             }
             drain_tls_sessions();
+            dispatch_completed();
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -302,11 +328,13 @@ ObservationRunResult ObservationSession::run(
         if (storage_maintenance_) {
             static_cast<void>(storage_maintenance_->run_if_due(now));
         }
+        if (callbacks.periodic) callbacks.periodic();
         if (!result.lifecycle_events_active) std::this_thread::sleep_for(transport_poll_interval);
     }
 
     drain_name_resolution();
     drain_tls_sessions();
+    dispatch_completed();
     correlate_tls_sessions();
     tracker.finish_observation(!result.lifecycle_events_active);
     result.connection_ids.assign(connection_ids.begin(), connection_ids.end());
