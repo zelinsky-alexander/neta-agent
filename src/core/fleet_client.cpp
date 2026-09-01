@@ -16,7 +16,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -163,6 +165,36 @@ std::string json_string_value(const std::string& text, const std::string& key) {
         }
     }
     throw std::runtime_error("unterminated JSON string in coordinator response");
+}
+
+std::string decode_chunked_body(const std::string& body) {
+    std::size_t pos = 0;
+    std::string decoded;
+    bool saw_chunk = false;
+    for (;;) {
+        const auto line_end = body.find("\r\n", pos);
+        if (line_end == std::string::npos) return body;
+        std::string size_text = body.substr(pos, line_end - pos);
+        const auto extension = size_text.find(';');
+        if (extension != std::string::npos) size_text.resize(extension);
+        if (size_text.empty() || !std::all_of(size_text.begin(), size_text.end(), [](unsigned char c) {
+                return std::isxdigit(c) != 0;
+            })) return body;
+        std::size_t chunk_size = 0;
+        try {
+            chunk_size = static_cast<std::size_t>(std::stoull(size_text, nullptr, 16));
+        } catch (...) {
+            return body;
+        }
+        saw_chunk = true;
+        pos = line_end + 2;
+        if (chunk_size == 0) return saw_chunk ? decoded : body;
+        if (chunk_size > body.size() - pos) return body;
+        decoded.append(body, pos, chunk_size);
+        pos += chunk_size;
+        if (body.size() - pos < 2 || body.compare(pos, 2, "\r\n") != 0) return body;
+        pos += 2;
+    }
 }
 
 std::string read_file(const std::filesystem::path& path) {
@@ -320,7 +352,7 @@ HttpResponse https_post(const std::string& coordinator, const std::filesystem::p
     std::string http_version;
     HttpResponse result;
     status_line >> http_version >> result.status;
-    result.body = response.substr(header_end + 4);
+    result.body = decode_chunked_body(response.substr(header_end + 4));
     return result;
 }
 
@@ -420,7 +452,7 @@ std::string send_payload(const std::filesystem::path& state_dir, const std::stri
              << "\"correlation_id\":null,"
              << "\"payload_hash\":\"" << payload_hash << "\","
              << "\"payload\":" << payload << ','
-             << "\"signature\":{" 
+             << "\"signature\":{"
              << "\"algorithm\":\"UNSIGNED-NAP1-DRAFT\","
              << "\"key_id\":\"" << json_escape(identity.certificate_sha256) << "\","
              << "\"value\":\"transport-mtls-only\"}"
@@ -530,8 +562,11 @@ std::string FleetClient::send_finding(const std::filesystem::path& state_dir,
 
     std::ostringstream payload;
     payload << "{"
-            << "\"finding_id\":\"" << json_escape(finding.finding_id) << "\","
-            << "\"target\":{" 
+            << "\"finding_id\":\"" << json_escape(finding.finding_id) << "\",";
+    if (!finding.finding_key.empty()) {
+        payload << "\"finding_key\":\"" << json_escape(finding.finding_key) << "\",";
+    }
+    payload << "\"target\":{"
             << "\"host\":\"" << json_escape(finding.host) << "\","
             << "\"port\":" << finding.port << ','
             << "\"transport\":\"" << json_escape(finding.transport) << "\"},"
