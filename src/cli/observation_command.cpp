@@ -15,6 +15,7 @@
 #include <future>
 #include <iostream>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -59,6 +60,29 @@ std::chrono::seconds fleet_heartbeat_interval() {
     const auto seconds = std::stoll(value);
     if (seconds <= 0) throw std::runtime_error("NETA_FLEET_HEARTBEAT_SECONDS must be positive");
     return std::chrono::seconds(seconds);
+}
+
+unsigned fleet_heartbeat_jitter_percent() {
+    const char* value = std::getenv("NETA_FLEET_HEARTBEAT_JITTER_PERCENT");
+    if (value == nullptr || *value == '\0') return 20U;
+    const auto percent = std::stoll(value);
+    if (percent < 0 || percent > 100) {
+        throw std::runtime_error(
+            "NETA_FLEET_HEARTBEAT_JITTER_PERCENT must be between 0 and 100");
+    }
+    return static_cast<unsigned>(percent);
+}
+
+std::chrono::milliseconds jittered_heartbeat_delay(std::chrono::seconds base,
+                                                   unsigned jitter_percent) {
+    const auto base_ms = std::chrono::duration_cast<std::chrono::milliseconds>(base).count();
+    if (jitter_percent == 0U) return std::chrono::milliseconds(base_ms);
+
+    const auto spread_ms = static_cast<long long>(
+        (static_cast<long double>(base_ms) * static_cast<long double>(jitter_percent)) / 100.0L);
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+    std::uniform_int_distribution<long long> distribution(-spread_ms, spread_ms);
+    return std::chrono::milliseconds(std::max<long long>(1, base_ms + distribution(rng)));
 }
 
 void finalize_target_connections(const std::vector<std::int64_t>& connection_ids,
@@ -164,7 +188,10 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     const bool fleet_identity_available =
         std::filesystem::exists(reporting_policy.state_dir / "identity.conf");
     const auto heartbeat_interval = fleet_heartbeat_interval();
-    auto next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
+    const auto heartbeat_jitter_percent = fleet_heartbeat_jitter_percent();
+    auto next_heartbeat = std::chrono::steady_clock::now() +
+                          jittered_heartbeat_delay(heartbeat_interval,
+                                                   heartbeat_jitter_percent);
 
     const auto transport_interval = options.transport_interval.value_or(
         lifecycle_active ? std::chrono::milliseconds(1000) : std::chrono::milliseconds(100));
@@ -196,7 +223,6 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         if (!service_mode || !fleet_identity_available) return;
         const auto now = std::chrono::steady_clock::now();
         if (now < next_heartbeat) return;
-        next_heartbeat = now + heartbeat_interval;
         try {
             static_cast<void>(FleetClient::send_heartbeat(reporting_policy.state_dir));
             std::cout << "Fleet service: heartbeat accepted\n";
@@ -204,6 +230,9 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
             std::cerr << "Fleet service heartbeat failed; observation continues: "
                       << error.what() << '\n';
         }
+        next_heartbeat = std::chrono::steady_clock::now() +
+                         jittered_heartbeat_delay(heartbeat_interval,
+                                                  heartbeat_jitter_percent);
     };
     callbacks.connection_completed = [&](std::int64_t connection_id) {
         if (!service_mode) return;
