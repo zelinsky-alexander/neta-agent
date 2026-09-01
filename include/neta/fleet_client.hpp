@@ -1,5 +1,8 @@
 #pragma once
 
+#include <openssl/core_names.h>
+#include <openssl/params.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
