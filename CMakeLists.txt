@@ -76,6 +76,7 @@ if(WIN32)
         src/platform/windows/environment.cpp
         src/platform/windows/host_network_environment.cpp
         src/platform/windows/connection_observer.cpp
+        src/platform/windows/etw_lifecycle.cpp
         src/platform/windows/process_resolver.cpp
         src/platform/windows/route_observer.cpp
     )
@@ -187,6 +188,7 @@ add_library(neta_core
     src/core/tls_probe.cpp
     ${NETA_FLEET_CLIENT_SOURCE}
     src/core/history_store.cpp
+    src/core/history_reconciliation.cpp
     src/core/history_environment.cpp
     src/core/history_name_resolution.cpp
     src/core/history_tls_session.cpp
@@ -211,7 +213,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3 ${CMAKE_DL_LIBS})
 if(WIN32)
-    target_link_libraries(neta_core PUBLIC iphlpapi ws2_32)
+    target_link_libraries(neta_core PUBLIC iphlpapi ws2_32 advapi32 tdh)
 endif()
 if(NETA_HAVE_EBPF)
     target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
