@@ -505,17 +505,16 @@ private:
                                                decoded->destination_port};
             }
         } else {
-            if (connect) {
-                event.type = ConnectionLifecycleEventType::Connect;
-                event.local = NetworkEndpoint{decoded->source_address, decoded->source_port};
-                event.remote = NetworkEndpoint{decoded->destination_address,
-                                               decoded->destination_port};
-            } else {
-                event.type = ConnectionLifecycleEventType::Accept;
-                event.local = NetworkEndpoint{decoded->destination_address,
-                                              decoded->destination_port};
-                event.remote = NetworkEndpoint{decoded->source_address, decoded->source_port};
-            }
+            // For both CONNECT and ACCEPT the kernel TCP/IP MOF payload is expressed from
+            // the process/socket perspective: saddr/sport is the process-local endpoint and
+            // daddr/dport is the peer. Keeping that orientation is required for accepted
+            // sockets on Win10/Win11; reversing ACCEPT turns the client port into the local
+            // server port and breaks exact inbound correlation.
+            event.type = connect ? ConnectionLifecycleEventType::Connect
+                                 : ConnectionLifecycleEventType::Accept;
+            event.local = NetworkEndpoint{decoded->source_address, decoded->source_port};
+            event.remote = NetworkEndpoint{decoded->destination_address,
+                                           decoded->destination_port};
             evict_active_connection_if_needed();
             const auto generation = ++next_generation_;
             active_connections_[key] = ActiveConnection{event.address_family, *event.local,
