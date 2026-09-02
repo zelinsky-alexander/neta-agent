@@ -18,7 +18,8 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-BUILD_DIR="${NETA_BUILD_DIR:-$REPO_DIR/build-release}"
+TEST_BUILD_DIR="${NETA_TEST_BUILD_DIR:-$REPO_DIR/build-install-test}"
+RELEASE_BUILD_DIR="${NETA_BUILD_DIR:-$REPO_DIR/build-release}"
 JOBS="${NETA_BUILD_JOBS:-$(nproc)}"
 
 run_as_caller() {
@@ -45,23 +46,36 @@ run_as_caller git fetch origin main
 run_as_caller git checkout main
 run_as_caller git pull --ff-only origin main
 
-echo "==> Configuring release build with eBPF required"
-run_as_caller cmake -S "$REPO_DIR" -B "$BUILD_DIR" \
-  -DCMAKE_BUILD_TYPE=Release \
+# The current test suite uses assertions as test checks. CMake Release defines
+# NDEBUG, which disables those checks and makes some legacy tests invalid.
+# Validate the source in Debug (same mode used by CI), then build a separate
+# production Release binary with tests disabled.
+echo "==> Configuring validation build with eBPF required"
+run_as_caller cmake -S "$REPO_DIR" -B "$TEST_BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Debug \
   -DNETA_EBPF=ON \
   -DNETA_ENABLE_TESTS=ON
 
-echo "==> Building"
-run_as_caller cmake --build "$BUILD_DIR" -j "$JOBS"
+echo "==> Building validation targets"
+run_as_caller cmake --build "$TEST_BUILD_DIR" -j "$JOBS"
 
 echo "==> Running tests"
-run_as_caller ctest --test-dir "$BUILD_DIR" --output-on-failure
+run_as_caller ctest --test-dir "$TEST_BUILD_DIR" --output-on-failure
+
+echo "==> Configuring production Release build"
+run_as_caller cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNETA_EBPF=ON \
+  -DNETA_ENABLE_TESTS=OFF
+
+echo "==> Building production Release binary"
+run_as_caller cmake --build "$RELEASE_BUILD_DIR" -j "$JOBS"
 
 echo "==> Installing binary and TLS context shim"
-install -m 0755 "$BUILD_DIR/neta-agent" /usr/local/bin/neta-agent
+install -m 0755 "$RELEASE_BUILD_DIR/neta-agent" /usr/local/bin/neta-agent
 mkdir -p /usr/local/lib/neta
-if [[ -f "$BUILD_DIR/libneta_tls_context.so" ]]; then
-  install -m 0755 "$BUILD_DIR/libneta_tls_context.so" /usr/local/lib/neta/libneta_tls_context.so
+if [[ -f "$RELEASE_BUILD_DIR/libneta_tls_context.so" ]]; then
+  install -m 0755 "$RELEASE_BUILD_DIR/libneta_tls_context.so" /usr/local/lib/neta/libneta_tls_context.so
 fi
 
 mkdir -p /var/lib/neta/identity /etc/neta
