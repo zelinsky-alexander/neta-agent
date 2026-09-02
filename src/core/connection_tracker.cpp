@@ -88,12 +88,11 @@ std::string ConnectionTracker::identity_for(const SocketObservation& socket) con
 std::string ConnectionTracker::correlation_key(
     const std::string& tuple, const std::optional<ProcessIdentity>& process,
     bool require_process_start) const {
-    if (!process) return tuple;
-    std::string key = tuple + "|pid:" + std::to_string(process->pid);
-    if (require_process_start) {
-        key += "|start:" + std::to_string(process->start_ticks.value_or(0));
-    }
-    return key;
+    // Preserve the established Linux tuple/cookie reconciliation contract. Windows owner-PID
+    // snapshots opt into the stronger PID + process-start bridge explicitly.
+    if (!require_process_start || !process) return tuple;
+    return tuple + "|pid:" + std::to_string(process->pid) +
+           "|start:" + std::to_string(process->start_ticks.value_or(0));
 }
 
 void ConnectionTracker::index_correlation(const std::string& key,
@@ -172,9 +171,6 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_lifecycle(
         if (const auto correlated = unique_active_correlation_match(key)) {
             existing = connections_.find(*correlated);
         }
-        // Disconnect events from a pre-existing connection can arrive without a prior connid
-        // binding. If the provider presents the tuple in the opposite orientation, try that
-        // orientation only for CLOSE; it never establishes direction.
         if (existing == connections_.end() && event.type == ConnectionLifecycleEventType::Close) {
             const auto reverse_key = correlation_key(
                 tuple_for(*event.remote, *event.local, event.network_namespace_inode), process,
@@ -232,7 +228,8 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_lifecycle(
     SocketObservation socket;
     socket.socket_cookie = event.socket_cookie.value_or(0);
     socket.network_namespace_inode = event.network_namespace_inode;
-    socket.owning_pid = process->pid;
+    socket.owning_pid = event.platform_connection_id ? std::optional<std::int64_t>{process->pid}
+                                                     : std::nullopt;
     socket.uid = event.process.uid.value_or(0);
     socket.local_ip = event.local->address;
     socket.local_port = event.local->port.value_or(0);
@@ -326,7 +323,7 @@ void ConnectionTracker::begin_snapshot() {
 
 std::vector<std::int64_t> ConnectionTracker::end_snapshot(
     bool polling_controls_lifecycle, bool lifecycle_evidence_incomplete) {
-    constexpr std::size_t degraded_lifecycle_reconciliation_miss_limit = 3;
+    constexpr std::size_t reconciliation_miss_limit = 3;
     std::vector<std::int64_t> inactive;
     for (auto current = connections_.begin(); current != connections_.end();) {
         auto& tracked = current->second;
@@ -336,15 +333,21 @@ std::vector<std::int64_t> ConnectionTracker::end_snapshot(
             continue;
         }
         ++tracked.consecutive_snapshot_misses;
+        const bool snapshot_owned =
+            tracked.origin == ConnectionObservationOrigin::SnapshotPreexisting ||
+            tracked.origin == ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss;
         const bool reconcile_absent = polling_controls_lifecycle ||
-            (lifecycle_evidence_incomplete &&
-             tracked.consecutive_snapshot_misses >= degraded_lifecycle_reconciliation_miss_limit);
+            ((snapshot_owned || lifecycle_evidence_incomplete) &&
+             tracked.consecutive_snapshot_misses >= reconciliation_miss_limit);
         if (reconcile_absent) {
             const auto identity = current->first;
             const auto connection_id = tracked.connection_id;
-            store_.touch_connection(connection_id, tracked.last_seen.observed_ns,
-                                    polling_controls_lifecycle
-                                        ? "DISAPPEARED" : "RECONCILED_ABSENT_AFTER_LIFECYCLE_LOSS");
+            const char* state = polling_controls_lifecycle
+                ? "DISAPPEARED"
+                : lifecycle_evidence_incomplete
+                    ? "RECONCILED_ABSENT_AFTER_LIFECYCLE_LOSS"
+                    : "PREEXISTING_DISAPPEARED";
+            store_.touch_connection(connection_id, tracked.last_seen.observed_ns, state);
             remove_correlation_identity(identity);
             current = connections_.erase(current);
             inactive.push_back(connection_id);
@@ -360,8 +363,7 @@ void ConnectionTracker::finish_observation(bool polling_controls_lifecycle) {
         static_cast<void>(identity);
         const char* state = polling_controls_lifecycle && !tracked.present_in_snapshot
             ? "DISAPPEARED" : "OBSERVATION_ENDED";
-        store_.touch_connection(tracked.connection_id, tracked.last_seen.observed_ns,
-                                state);
+        store_.touch_connection(tracked.connection_id, tracked.last_seen.observed_ns, state);
     }
 }
 
