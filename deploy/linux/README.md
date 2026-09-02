@@ -10,12 +10,23 @@ From an existing checkout of `neta-agent`:
 sudo ./deploy/linux/install-or-update.sh
 ```
 
+The installer is architecture-aware. It supports native Linux builds on:
+
+- `x86_64` / Debian `amd64`;
+- `aarch64` / Debian `arm64`.
+
+It detects the running kernel/package architecture, rejects unsupported or mismatched architectures, reports kernel BTF availability, and uses architecture-specific build directories so a stale CMake cache from another CPU architecture is not reused. CMake then selects the matching eBPF target (`x86` for x86_64, `arm64` for aarch64/arm64). Before installation, the script verifies that the produced ELF binary matches the detected native architecture.
+
+This means the same command is used on both the x86_64 WSL endpoint and an AWS ARM64 Ubuntu endpoint; no cross-compilation flag is needed.
+
 The script:
 
 - installs build prerequisites;
 - fast-forwards the checkout to `origin/main` and refuses to overwrite local changes;
+- detects and validates the native x86_64 or ARM64 platform;
 - validates a Debug build with eBPF required by running the full test suite;
-- builds a production Release binary with eBPF required;
+- builds a production Release binary with eBPF required for the detected architecture;
+- verifies the generated executable architecture;
 - installs `/usr/local/bin/neta-agent`;
 - installs the optional OpenSSL TLS context shim at `/usr/local/lib/neta/libneta_tls_context.so`;
 - creates `/var/lib/neta`, `/var/lib/neta/identity`, and `/etc/neta`;
@@ -23,6 +34,24 @@ The script:
 - installs/enables/restarts `neta-agent.service`.
 
 The system service observes all eligible directions, stores history in `/var/lib/neta/neta.db` with a 200 MB cap, and uses the shared TLS-context endpoint `@neta-agent-tls-service`.
+
+### AWS ARM64 preflight
+
+On the ARM instance, these should normally report `aarch64`, `arm64`, and a readable BTF file:
+
+```bash
+uname -m
+dpkg --print-architecture
+ls -lh /sys/kernel/btf/vmlinux
+```
+
+Then use the normal installer:
+
+```bash
+sudo ./deploy/linux/install-or-update.sh
+```
+
+A successful ARM install will print `NETA native build architecture: arm64` and `Installed arm64 build`.
 
 ## Enroll
 
