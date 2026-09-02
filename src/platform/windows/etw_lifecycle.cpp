@@ -35,7 +35,14 @@ namespace {
 
 constexpr GUID kTcpIpGuid{
     0x9a280ac0, 0xc8e0, 0x11d1, {0x84, 0xe2, 0x00, 0xc0, 0x4f, 0xb9, 0x98, 0xa2}};
+constexpr GUID kProcessGuid{
+    0x3d6fa8d0, 0xfe05, 0x11d0, {0x9d, 0xda, 0x00, 0xc0, 0x4f, 0xd7, 0xba, 0x7c}};
 
+constexpr UCHAR kProcessStart = 1;
+constexpr UCHAR kProcessEnd = 2;
+constexpr UCHAR kProcessDcStart = 3;
+constexpr UCHAR kProcessDcEnd = 4;
+constexpr UCHAR kProcessDefunct = 39;
 constexpr UCHAR kConnectIpv4 = 12;
 constexpr UCHAR kDisconnectIpv4 = 13;
 constexpr UCHAR kAcceptIpv4 = 15;
@@ -44,6 +51,7 @@ constexpr UCHAR kDisconnectIpv6 = 29;
 constexpr UCHAR kAcceptIpv6 = 31;
 constexpr std::size_t kMaxQueuedEvents = 8192;
 constexpr std::size_t kMaxActiveConnections = 16384;
+constexpr std::size_t kMaxProcessIdentityCache = 32768;
 constexpr std::uint64_t kMaxDecodeDiagnostics = 64;
 
 bool same_guid(const GUID& left, const GUID& right) noexcept {
@@ -87,6 +95,22 @@ std::optional<T> scalar_from_bytes(const std::vector<std::byte>& bytes) {
 template <typename T>
 std::optional<T> scalar_property(const EVENT_RECORD& record, const wchar_t* name) {
     return scalar_from_bytes<T>(property_bytes(record, name));
+}
+
+std::optional<std::string> ansi_string_property(const EVENT_RECORD& record,
+                                                const wchar_t* name) {
+    const auto bytes = property_bytes(record, name);
+    if (bytes.empty()) return std::nullopt;
+    const auto* begin = reinterpret_cast<const char*>(bytes.data());
+    std::size_t length = 0;
+    while (length < bytes.size() && begin[length] != '\0') ++length;
+    if (length == 0) return std::nullopt;
+    return std::string(begin, length);
+}
+
+std::string leaf_name(std::string path) {
+    const auto slash = path.find_last_of("\\/");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 std::optional<std::uint32_t> pid_property(const EVENT_RECORD& record) {
@@ -163,15 +187,6 @@ std::optional<std::uint16_t> raw_port(const EVENT_RECORD& record, std::size_t of
     return ntohs(*raw);
 }
 
-struct DecodedTcpPayload {
-    std::uint32_t pid{0};
-    std::uint64_t connid{0};
-    std::string source_address;
-    std::string destination_address;
-    std::uint16_t source_port{0};
-    std::uint16_t destination_port{0};
-};
-
 std::optional<std::uint64_t> raw_pointer_value(const EVENT_RECORD& record, std::size_t offset) {
     const bool provider_32_bit =
         (record.EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0;
@@ -184,15 +199,18 @@ std::optional<std::uint64_t> raw_pointer_value(const EVENT_RECORD& record, std::
     return std::nullopt;
 }
 
+struct DecodedTcpPayload {
+    std::uint32_t pid{0};
+    std::uint64_t connid{0};
+    std::string source_address;
+    std::string destination_address;
+    std::uint16_t source_port{0};
+    std::uint16_t destination_port{0};
+};
+
 std::optional<DecodedTcpPayload> decode_documented_mof_layout(const EVENT_RECORD& record,
                                                               bool ipv6,
                                                               bool connect_or_accept) {
-    // Microsoft documents the Vista+ kernel TCP/IP MOF payloads as:
-    // PID, size, daddr, saddr, dport, sport, ... , connid.  The Pointer
-    // qualifier on connid makes the final field pointer-sized on a 64-bit
-    // provider.  TDH normally decodes these fields; this raw path is a bounded
-    // compatibility fallback for hosts where TDH does not expose one of the
-    // extension properties consistently.
     constexpr std::size_t pid_offset = 0;
     const std::size_t destination_address_offset = 8;
     const std::size_t source_address_offset = ipv6 ? 24U : 12U;
@@ -267,6 +285,30 @@ std::optional<std::string> process_name(DWORD pid) {
     return result;
 }
 
+std::optional<std::uint32_t> process_event_pid(const EVENT_RECORD& record) {
+    if (const auto pid = scalar_property<std::uint32_t>(record, L"ProcessId")) return pid;
+    const bool provider_32_bit =
+        (record.EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0;
+    const std::size_t process_id_offset = provider_32_bit ? 4U : 8U;
+    return raw_scalar<std::uint32_t>(record, process_id_offset);
+}
+
+std::optional<std::uint64_t> process_event_unique_key(const EVENT_RECORD& record) {
+    auto bytes = property_bytes(record, L"UniqueProcessKey");
+    if (bytes.size() >= sizeof(std::uint64_t)) return scalar_from_bytes<std::uint64_t>(bytes);
+    if (const auto value = scalar_from_bytes<std::uint32_t>(bytes)) {
+        return static_cast<std::uint64_t>(*value);
+    }
+    return raw_pointer_value(record, 0);
+}
+
+struct CachedProcessIdentity {
+    std::optional<std::uint64_t> unique_key;
+    std::optional<std::uint64_t> start_ticks;
+    std::string comm;
+    std::string executable_path;
+};
+
 struct ActiveKey {
     std::uint32_t pid{0};
     std::uint64_t connid{0};
@@ -310,7 +352,7 @@ std::vector<std::byte> trace_properties_buffer(const std::wstring& name) {
     properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
     properties->Wnode.ClientContext = 1;
     properties->Wnode.Guid = session_guid();
-    properties->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP;
+    properties->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
     properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
     properties->FlushTimer = 1;
     properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
@@ -458,8 +500,51 @@ private:
         }
     }
 
+    void consume_process_event(const EVENT_RECORD& record) {
+        const UCHAR opcode = record.EventHeader.EventDescriptor.Opcode;
+        if (opcode == kProcessStart || opcode == kProcessDcStart) {
+            const auto pid = process_event_pid(record);
+            if (!pid || *pid == 0) return;
+
+            CachedProcessIdentity identity;
+            identity.unique_key = process_event_unique_key(record);
+            identity.start_ticks = process_start_identity(*pid);
+            if (const auto image = ansi_string_property(record, L"ImageFileName")) {
+                identity.executable_path = *image;
+                identity.comm = leaf_name(*image);
+            }
+            if (identity.comm.empty()) {
+                identity.comm = process_name(*pid).value_or(std::string{});
+            }
+
+            if (process_identity_cache_.size() >= kMaxProcessIdentityCache &&
+                !process_identity_cache_.contains(*pid)) {
+                process_identity_cache_.erase(process_identity_cache_.begin());
+            }
+            process_identity_cache_[*pid] = std::move(identity);
+            return;
+        }
+
+        if (opcode == kProcessEnd || opcode == kProcessDcEnd || opcode == kProcessDefunct) {
+            const auto pid = process_event_pid(record);
+            if (!pid) return;
+            const auto current = process_identity_cache_.find(*pid);
+            if (current == process_identity_cache_.end()) return;
+            const auto ended_key = process_event_unique_key(record);
+            if (!ended_key || !current->second.unique_key ||
+                *ended_key == *current->second.unique_key) {
+                process_identity_cache_.erase(current);
+            }
+        }
+    }
+
     void consume(const EVENT_RECORD& record) {
+        if (same_guid(record.EventHeader.ProviderId, kProcessGuid)) {
+            consume_process_event(record);
+            return;
+        }
         if (!same_guid(record.EventHeader.ProviderId, kTcpIpGuid)) return;
+
         const UCHAR opcode = record.EventHeader.EventDescriptor.Opcode;
         const bool ipv6 = opcode == kConnectIpv6 || opcode == kAcceptIpv6 ||
                           opcode == kDisconnectIpv6;
@@ -481,8 +566,18 @@ private:
         event.process.agent_visible.tgid = static_cast<std::int64_t>(decoded->pid);
         event.process.kernel = event.process.agent_visible;
         event.process.uid = 0;
-        event.process.start_ticks = process_start_identity(decoded->pid);
-        event.process.comm = process_name(decoded->pid);
+
+        const auto cached_process = process_identity_cache_.find(decoded->pid);
+        if (cached_process != process_identity_cache_.end()) {
+            event.process.start_ticks = cached_process->second.start_ticks;
+            if (!cached_process->second.comm.empty()) {
+                event.process.comm = cached_process->second.comm;
+            }
+        } else {
+            event.process.start_ticks = process_start_identity(decoded->pid);
+            event.process.comm = process_name(decoded->pid);
+        }
+
         event.address_family = ipv6 ? NetworkAddressFamily::IPv6 : NetworkAddressFamily::IPv4;
         event.protocol = TransportProtocol::Tcp;
         event.endpoint_kind = disconnect ? TcpEndpointKind::LifecycleTail
@@ -505,11 +600,6 @@ private:
                                                decoded->destination_port};
             }
         } else {
-            // For both CONNECT and ACCEPT the kernel TCP/IP MOF payload is expressed from
-            // the process/socket perspective: saddr/sport is the process-local endpoint and
-            // daddr/dport is the peer. Keeping that orientation is required for accepted
-            // sockets on Win10/Win11; reversing ACCEPT turns the client port into the local
-            // server port and breaks exact inbound correlation.
             event.type = connect ? ConnectionLifecycleEventType::Connect
                                  : ConnectionLifecycleEventType::Accept;
             event.local = NetworkEndpoint{decoded->source_address, decoded->source_port};
@@ -551,6 +641,7 @@ private:
     mutable std::atomic<std::uint64_t> locally_dropped_{0};
     std::atomic<std::uint64_t> decode_diagnostics_{0};
 
+    std::unordered_map<std::uint32_t, CachedProcessIdentity> process_identity_cache_;
     std::unordered_map<ActiveKey, ActiveConnection, ActiveKeyHash> active_connections_;
     std::deque<std::pair<ActiveKey, std::uint64_t>> active_order_;
     std::uint64_t next_generation_{0};
