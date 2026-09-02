@@ -3,6 +3,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "tdh.lib")
+
+// Keep the first W3 collector in the Windows platform translation unit so the current
+// branch does not broaden CMake churn while ETW semantics are being validated.
+#include "etw_lifecycle.cpp"
+
 #include <chrono>
 #include <memory>
 
