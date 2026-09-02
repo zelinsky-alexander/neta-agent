@@ -8,7 +8,17 @@ int main() {
     assert(capabilities.connection_discovery);
     assert(capabilities.process_attribution);
     assert(capabilities.route_observation);
-    assert(!capabilities.connection_lifecycle_events);
+    assert(capabilities.lifecycle_source == "windows:etw-tcpip");
+    if (capabilities.connection_lifecycle_events) {
+        assert(capabilities.lifecycle_connect_events);
+        assert(capabilities.lifecycle_accept_events);
+        assert(capabilities.lifecycle_close_events);
+        assert(capabilities.exact_lifecycle_direction);
+        assert(capabilities.lifecycle_drop_counter);
+        assert(capabilities.lifecycle_dropped_events.has_value());
+    } else {
+        assert(!capabilities.lifecycle_unavailable_reason.empty());
+    }
     assert(!capabilities.application_name_resolution_events);
     assert(!capabilities.application_tls_session_events);
 
@@ -33,6 +43,8 @@ int main() {
     assert(loopback.has_value());
     assert(loopback->interface_index != 0);
 
-    std::cout << "Windows platform foundation OK; sockets=" << sockets.size() << '\n';
+    std::cout << "Windows platform foundation OK; sockets=" << sockets.size()
+              << ", lifecycle=" << (capabilities.connection_lifecycle_events ? "ETW" : "unavailable")
+              << '\n';
     return 0;
 }
