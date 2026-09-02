@@ -9,20 +9,6 @@
 namespace neta::platform {
 namespace {
 
-class UnavailableLifecycleObserver final : public LifecycleObserver {
-public:
-    UnavailableLifecycleObserver() {
-        capability_.unavailable_reason = "Windows ETW lifecycle collector is not implemented yet";
-    }
-
-    const LifecycleCapability& capability() const noexcept override { return capability_; }
-    LifecycleHealth health() const override { return {}; }
-    std::vector<ConnectionLifecycleEvent> poll(std::chrono::milliseconds) override { return {}; }
-
-private:
-    LifecycleCapability capability_;
-};
-
 class UnavailableNameResolutionObserver final : public NameResolutionObserver {
 public:
     UnavailableNameResolutionObserver() {
@@ -80,16 +66,25 @@ PlatformCapabilities capabilities() {
     c.connection_discovery = true;
     c.process_attribution = true;
     c.route_observation = true;
-    c.lifecycle_unavailable_reason = "Windows ETW lifecycle collector is not implemented yet";
+
+    const auto lifecycle = make_lifecycle_observer();
+    const auto& lifecycle_capability = lifecycle->capability();
+    c.connection_lifecycle_events = lifecycle_capability.available();
+    c.lifecycle_connect_events = lifecycle_capability.connect_events;
+    c.lifecycle_accept_events = lifecycle_capability.accept_events;
+    c.lifecycle_close_events = lifecycle_capability.close_events;
+    c.lifecycle_source = lifecycle_capability.source;
+    c.exact_lifecycle_direction = lifecycle_capability.connect_events &&
+                                  lifecycle_capability.accept_events;
+    c.lifecycle_drop_counter = lifecycle_capability.drop_counter;
+    c.lifecycle_dropped_events = lifecycle->health().dropped_events;
+    c.lifecycle_unavailable_reason = lifecycle_capability.unavailable_reason;
+
     c.name_resolution_source = "windows:dns";
     c.name_resolution_unavailable_reason = "Windows DNS ETW collector is not implemented yet";
     c.tls_session_source = "windows:tls";
     c.tls_session_unavailable_reason = "Windows application TLS collector is not implemented yet";
     return c;
-}
-
-std::unique_ptr<LifecycleObserver> make_lifecycle_observer() {
-    return std::make_unique<UnavailableLifecycleObserver>();
 }
 
 std::unique_ptr<NameResolutionObserver> make_name_resolution_observer() {
