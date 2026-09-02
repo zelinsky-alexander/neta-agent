@@ -302,7 +302,7 @@ void cmd_history(int argc, char** argv) {
                       << "\",\"environment_present\":" << (environment ? "true" : "false")
                       << ",\"environment_fingerprint\":\""
                       << json_escape(environment ? environment->environment_fingerprint : "")
-                      << "\",\"tls_session_count\":" << tls_sessions.size() << '}\n';
+                      << "\",\"tls_session_count\":" << tls_sessions.size() << "}\n";
         } else {
             std::cout << "CONN-" << connection->id << "  " << connection->process.comm << '[' << connection->process.pid << "]  "
                       << connection->local_ip << ':' << connection->local_port << " -> " << connection->remote_ip << ':'
@@ -331,7 +331,7 @@ void cmd_history(int argc, char** argv) {
                           << "\n    SPKI SHA-256: " << (tls.spki_sha256.empty() ? "<unavailable>" : tls.spki_sha256)
                           << "\n    Subject: " << (tls.subject.empty() ? "<unavailable>" : tls.subject)
                           << "\n    Issuer: " << (tls.issuer.empty() ? "<unavailable>" : tls.issuer)
-                          << "\n    Evidence SHA-256: " << evidence.sha256 << '\n';
+                          << "\n    Evidence SHA-256: " << tls_session_evidence_hash(evidence) << '\n';
             }
         }
         return;
