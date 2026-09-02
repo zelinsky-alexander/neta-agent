@@ -1,17 +1,14 @@
 #include "neta/platform.hpp"
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
-
-#pragma comment(lib, "advapi32.lib")
-#pragma comment(lib, "tdh.lib")
-
-// Keep the first W3 collector in the Windows platform translation unit so the current
-// branch does not broaden CMake churn while ETW semantics are being validated.
-#include "etw_lifecycle.cpp"
 
 #include <chrono>
 #include <memory>
+#include <string>
 
 namespace neta::platform {
 namespace {
@@ -46,6 +43,26 @@ private:
     TlsSessionCapability capability_;
 };
 
+std::string native_windows_version() {
+    // GetVersionExW is subject to application-manifest version lying and reported
+    // 6.2.9200 on a real Windows 10 22H2 acceptance host. RtlGetVersion returns the
+    // native kernel version and is dynamically resolved so this platform seam stays
+    // independent of SDK-private headers/import libraries.
+    using RtlGetVersionFn = LONG (WINAPI*)(OSVERSIONINFOW*);
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll == nullptr) return {};
+    const auto rtl_get_version = reinterpret_cast<RtlGetVersionFn>(
+        GetProcAddress(ntdll, "RtlGetVersion"));
+    if (rtl_get_version == nullptr) return {};
+
+    OSVERSIONINFOW version{};
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (rtl_get_version(&version) < 0) return {};
+    return std::to_string(version.dwMajorVersion) + "." +
+           std::to_string(version.dwMinorVersion) + "." +
+           std::to_string(version.dwBuildNumber);
+}
+
 } // namespace
 
 HostEnvironment host_environment() {
@@ -54,17 +71,7 @@ HostEnvironment host_environment() {
     result.boot_id.clear();
     result.is_wsl = false;
     result.network_namespace_inode = 0;
-
-    OSVERSIONINFOW version{};
-    version.dwOSVersionInfoSize = sizeof(version);
-#pragma warning(push)
-#pragma warning(disable:4996)
-    if (GetVersionExW(&version) != FALSE) {
-        result.kernel_release = std::to_string(version.dwMajorVersion) + "." +
-                                std::to_string(version.dwMinorVersion) + "." +
-                                std::to_string(version.dwBuildNumber);
-    }
-#pragma warning(pop)
+    result.kernel_release = native_windows_version();
     return result;
 }
 
