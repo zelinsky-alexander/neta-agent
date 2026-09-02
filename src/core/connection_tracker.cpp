@@ -50,10 +50,10 @@ std::string ConnectionTracker::tuple_for(const SocketObservation& socket) const 
 
 std::optional<ProcessIdentity> ConnectionTracker::process_from(
     const ConnectionLifecycleEvent& event) const {
-    if (!event.process.agent_visible.tgid || !event.process.uid) return std::nullopt;
+    if (!event.process.agent_visible.tgid) return std::nullopt;
     ProcessIdentity process;
     process.pid = *event.process.agent_visible.tgid;
-    process.uid = *event.process.uid;
+    process.uid = event.process.uid.value_or(0);
     if (event.process.start_ticks && *event.process.start_ticks != 0) {
         process.start_ticks = event.process.start_ticks;
     }
@@ -65,6 +65,12 @@ std::optional<std::string> ConnectionTracker::identity_for(
     const ConnectionLifecycleEvent& event) const {
     if (event.socket_cookie && valid_cookie(*event.socket_cookie)) {
         return "c:" + std::to_string(*event.socket_cookie);
+    }
+    if (event.platform_connection_id) {
+        const auto process = event.process.agent_visible.tgid.value_or(-1);
+        const auto start = event.process.start_ticks.value_or(0);
+        return "p:" + std::to_string(process) + '|' + std::to_string(start) + '|' +
+               std::to_string(*event.platform_connection_id);
     }
     if (!event.local || !event.remote) return std::nullopt;
     const auto process = event.process.agent_visible.tgid.value_or(-1);
@@ -79,52 +85,68 @@ std::string ConnectionTracker::identity_for(const SocketObservation& socket) con
     return "i:" + std::to_string(socket.socket_inode) + '|' + tuple_for(socket);
 }
 
-void ConnectionTracker::index_tuple(const std::string& tuple, const std::string& identity) {
-    tuple_index_.emplace(tuple, identity);
-    tuple_by_identity_.emplace(identity, tuple);
+std::string ConnectionTracker::correlation_key(
+    const std::string& tuple, const std::optional<ProcessIdentity>& process,
+    bool require_process_start) const {
+    if (!process) return tuple;
+    std::string key = tuple + "|pid:" + std::to_string(process->pid);
+    if (require_process_start) {
+        key += "|start:" + std::to_string(process->start_ticks.value_or(0));
+    }
+    return key;
 }
 
-void ConnectionTracker::remove_tuple_identity(const std::string& identity) {
-    const auto indexed = tuple_by_identity_.find(identity);
-    if (indexed == tuple_by_identity_.end()) return;
-    const auto [first, last] = tuple_index_.equal_range(indexed->second);
+void ConnectionTracker::index_correlation(const std::string& key,
+                                          const std::string& identity) {
+    correlation_index_.emplace(key, identity);
+    correlation_by_identity_.emplace(identity, key);
+}
+
+void ConnectionTracker::remove_correlation_identity(const std::string& identity) {
+    const auto indexed = correlation_by_identity_.find(identity);
+    if (indexed == correlation_by_identity_.end()) return;
+    const auto [first, last] = correlation_index_.equal_range(indexed->second);
     for (auto current = first; current != last;) {
-        if (current->second == identity) current = tuple_index_.erase(current);
+        if (current->second == identity) current = correlation_index_.erase(current);
         else ++current;
     }
-    tuple_by_identity_.erase(indexed);
+    correlation_by_identity_.erase(indexed);
 }
 
-bool ConnectionTracker::promote_identity(const std::string& previous,
-                                         const std::string& canonical,
-                                         std::uint64_t socket_cookie) {
+bool ConnectionTracker::rekey_identity(const std::string& previous,
+                                       const std::string& canonical) {
     if (previous == canonical) return true;
     if (connections_.contains(canonical)) return false;
-    const auto previous_connection = connections_.find(previous);
-    if (previous_connection == connections_.end()) return false;
-    if (!store_.update_socket_cookie(previous_connection->second.connection_id,
-                                     socket_cookie)) {
-        return false;
-    }
     auto node = connections_.extract(previous);
     if (node.empty()) return false;
     node.key() = canonical;
     connections_.insert(std::move(node));
-    auto indexed = tuple_by_identity_.extract(previous);
+    auto indexed = correlation_by_identity_.extract(previous);
     if (!indexed.empty()) {
-        const auto [first, last] = tuple_index_.equal_range(indexed.mapped());
+        const auto [first, last] = correlation_index_.equal_range(indexed.mapped());
         for (auto current = first; current != last; ++current) {
             if (current->second == previous) current->second = canonical;
         }
         indexed.key() = canonical;
-        tuple_by_identity_.insert(std::move(indexed));
+        correlation_by_identity_.insert(std::move(indexed));
     }
     return true;
 }
 
-std::optional<std::string> ConnectionTracker::unique_active_tuple_match(
-    const std::string& tuple) const {
-    const auto [first, last] = tuple_index_.equal_range(tuple);
+bool ConnectionTracker::promote_socket_cookie_identity(const std::string& previous,
+                                                       const std::string& canonical,
+                                                       std::uint64_t socket_cookie) {
+    const auto previous_connection = connections_.find(previous);
+    if (previous_connection == connections_.end()) return false;
+    if (!store_.update_socket_cookie(previous_connection->second.connection_id, socket_cookie)) {
+        return false;
+    }
+    return rekey_identity(previous, canonical);
+}
+
+std::optional<std::string> ConnectionTracker::unique_active_correlation_match(
+    const std::string& key) const {
+    const auto [first, last] = correlation_index_.equal_range(key);
     std::optional<std::string> match;
     for (auto it = first; it != last; ++it) {
         const auto tracked = connections_.find(it->second);
@@ -140,44 +162,77 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_lifecycle(
     if (event.protocol != TransportProtocol::Tcp) return std::nullopt;
     const auto identity = identity_for(event);
     if (!identity) return std::nullopt;
+    const auto process = process_from(event);
 
     auto existing = connections_.find(*identity);
-    if (event.type == ConnectionLifecycleEventType::Close) {
-        if (existing == connections_.end() && event.local && event.remote) {
-            const auto tuple_match = unique_active_tuple_match(
-                tuple_for(*event.local, *event.remote, event.network_namespace_inode));
-            if (tuple_match) existing = connections_.find(*tuple_match);
+    if (existing == connections_.end() && event.local && event.remote) {
+        const auto key = correlation_key(
+            tuple_for(*event.local, *event.remote, event.network_namespace_inode), process,
+            event.platform_connection_id.has_value());
+        if (const auto correlated = unique_active_correlation_match(key)) {
+            existing = connections_.find(*correlated);
         }
-        if (existing == connections_.end()) return std::nullopt;
-        if (event.socket_cookie && valid_cookie(*event.socket_cookie) &&
-            existing->first != *identity) {
-            const auto previous_identity = existing->first;
-            if (promote_identity(previous_identity, *identity, *event.socket_cookie)) {
-                existing = connections_.find(*identity);
+        // Disconnect events from a pre-existing connection can arrive without a prior connid
+        // binding. If the provider presents the tuple in the opposite orientation, try that
+        // orientation only for CLOSE; it never establishes direction.
+        if (existing == connections_.end() && event.type == ConnectionLifecycleEventType::Close) {
+            const auto reverse_key = correlation_key(
+                tuple_for(*event.remote, *event.local, event.network_namespace_inode), process,
+                event.platform_connection_id.has_value());
+            if (const auto correlated = unique_active_correlation_match(reverse_key)) {
+                existing = connections_.find(*correlated);
             }
         }
+    }
+
+    if (event.type == ConnectionLifecycleEventType::Close) {
+        if (existing == connections_.end()) return std::nullopt;
+        if (existing->first != *identity) {
+            const auto previous = existing->first;
+            const bool promoted = event.socket_cookie && valid_cookie(*event.socket_cookie)
+                ? promote_socket_cookie_identity(previous, *identity, *event.socket_cookie)
+                : rekey_identity(previous, *identity);
+            if (promoted) existing = connections_.find(*identity);
+        }
+        if (existing == connections_.end()) return std::nullopt;
         const auto connection_id = existing->second.connection_id;
         const auto tracked_identity = existing->first;
         store_.touch_connection(connection_id, event.timestamp_ns, "CLOSED");
         store_.add_lifecycle_event(connection_id, event);
-        remove_tuple_identity(tracked_identity);
+        remove_correlation_identity(tracked_identity);
         connections_.erase(existing);
-        return ConnectionAdmission{connection_id, false, true};
+        return ConnectionAdmission{connection_id, false, true, false,
+                                   ConnectionDirection::Unknown};
     }
 
     if (!eligible_connection_seed(event.endpoint_kind)) return std::nullopt;
-    if (!event.local || !event.remote || !event.remote->port) return std::nullopt;
-    if (existing != connections_.end()) {
-        store_.add_lifecycle_event(existing->second.connection_id, event);
-        return ConnectionAdmission{existing->second.connection_id, false};
-    }
+    if (!event.local || !event.remote || !event.remote->port || !process) return std::nullopt;
 
-    const auto process = process_from(event);
-    if (!process) return std::nullopt;
+    if (existing != connections_.end()) {
+        if (existing->first != *identity) {
+            const auto previous = existing->first;
+            const bool promoted = event.socket_cookie && valid_cookie(*event.socket_cookie)
+                ? promote_socket_cookie_identity(previous, *identity, *event.socket_cookie)
+                : rekey_identity(previous, *identity);
+            if (promoted) existing = connections_.find(*identity);
+        }
+        if (existing == connections_.end()) return std::nullopt;
+        store_.add_lifecycle_event(existing->second.connection_id, event);
+        const bool direction_promoted =
+            store_.promote_connection_direction(existing->second.connection_id, direction);
+        existing->second.process_pid = process->pid;
+        existing->second.process_start_ticks = process->start_ticks;
+        existing->second.origin = existing->second.has_transport_sample
+            ? ConnectionObservationOrigin::LifecyclePlusSnapshot
+            : ConnectionObservationOrigin::LifecycleExact;
+        return ConnectionAdmission{existing->second.connection_id, false, false,
+                                   direction_promoted, direction};
+    }
 
     SocketObservation socket;
     socket.socket_cookie = event.socket_cookie.value_or(0);
     socket.network_namespace_inode = event.network_namespace_inode;
+    socket.owning_pid = process->pid;
     socket.uid = event.process.uid.value_or(0);
     socket.local_ip = event.local->address;
     socket.local_port = event.local->port.value_or(0);
@@ -188,10 +243,15 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_lifecycle(
     const auto id = store_.begin_connection(socket, process, target_host_, event.timestamp_ns,
                                             direction);
     store_.add_lifecycle_event(id, event);
-    connections_.emplace(*identity, TrackedConnection{id, socket.transport, {}, 0,
-                                                       false, false});
-    index_tuple(tuple_for(*event.local, *event.remote, event.network_namespace_inode), *identity);
-    return ConnectionAdmission{id, true};
+    TrackedConnection tracked{id, socket.transport, {}, 0, false, false, 0,
+                              process->pid, process->start_ticks,
+                              ConnectionObservationOrigin::LifecycleExact};
+    connections_.emplace(*identity, tracked);
+    const auto key = correlation_key(tuple_for(*event.local, *event.remote,
+                                                event.network_namespace_inode),
+                                     process, event.platform_connection_id.has_value());
+    index_correlation(key, *identity);
+    return ConnectionAdmission{id, true, false, false, direction};
 }
 
 void ConnectionTracker::persist_sample(TrackedConnection& tracked, const TcpSnapshot& sample) {
@@ -209,44 +269,52 @@ void ConnectionTracker::persist_sample(TrackedConnection& tracked, const TcpSnap
 
 std::optional<ConnectionAdmission> ConnectionTracker::observe_socket(
     const SocketObservation& socket, ConnectionDirection direction,
-    bool allow_new_connection) {
+    bool allow_new_connection, ConnectionObservationOrigin origin) {
+    const auto process = resolver_.resolve(socket);
     const auto canonical = identity_for(socket);
     auto identity = canonical;
     auto existing = connections_.find(identity);
-    const auto tuple_match = unique_active_tuple_match(tuple_for(socket));
-    if (existing != connections_.end() && tuple_match && *tuple_match != identity) {
+    const auto key = correlation_key(tuple_for(socket), process, socket.owning_pid.has_value());
+    const auto correlated = unique_active_correlation_match(key);
+    if (existing != connections_.end() && correlated && *correlated != identity) {
         return std::nullopt;
     }
-    if (existing == connections_.end()) {
-        if (tuple_match) {
-            identity = *tuple_match;
-            if (valid_cookie(socket.socket_cookie) && identity != canonical) {
-                if (!promote_identity(identity, canonical, socket.socket_cookie)) {
-                    return std::nullopt;
-                }
-                identity = canonical;
+    if (existing == connections_.end() && correlated) {
+        identity = *correlated;
+        if (valid_cookie(socket.socket_cookie) && identity != canonical) {
+            if (!promote_socket_cookie_identity(identity, canonical, socket.socket_cookie)) {
+                return std::nullopt;
             }
-            existing = connections_.find(identity);
+            identity = canonical;
         }
+        existing = connections_.find(identity);
     }
 
     if (existing != connections_.end()) {
         persist_sample(existing->second, socket.transport);
-        return ConnectionAdmission{existing->second.connection_id, false};
+        if (existing->second.origin == ConnectionObservationOrigin::LifecycleExact) {
+            existing->second.origin = ConnectionObservationOrigin::LifecyclePlusSnapshot;
+        }
+        return ConnectionAdmission{existing->second.connection_id, false, false, false, direction};
     }
 
     if (!allow_new_connection) return std::nullopt;
-    if (!eligible_connection_seed(socket.endpoint_kind)) return std::nullopt;
-    const auto process = resolver_.resolve(socket.socket_inode);
-    if (!process) return std::nullopt;
+    if (!eligible_connection_seed(socket.endpoint_kind) || !process) return std::nullopt;
     const auto id = store_.begin_connection(socket, process, target_host_,
                                             socket.transport.observed_ns, direction);
     TrackedConnection tracked{id, socket.transport, socket.transport,
-                              socket.transport.observed_ns, true, true};
+                              socket.transport.observed_ns, true, true, 0,
+                              process->pid, process->start_ticks, origin};
     store_.add_tcp_sample(id, socket.transport);
+    if (origin == ConnectionObservationOrigin::SnapshotPreexisting) {
+        store_.touch_connection(id, socket.transport.observed_ns, "PREEXISTING");
+    } else if (origin == ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss) {
+        store_.touch_connection(id, socket.transport.observed_ns,
+                                "RECONCILED_AFTER_LIFECYCLE_LOSS");
+    }
     connections_.emplace(identity, tracked);
-    index_tuple(tuple_for(socket), identity);
-    return ConnectionAdmission{id, true};
+    index_correlation(key, identity);
+    return ConnectionAdmission{id, true, false, false, direction};
 }
 
 void ConnectionTracker::begin_snapshot() {
@@ -256,8 +324,9 @@ void ConnectionTracker::begin_snapshot() {
     }
 }
 
-std::vector<std::int64_t> ConnectionTracker::end_snapshot(bool polling_controls_lifecycle) {
-    constexpr std::size_t lifecycle_reconciliation_miss_limit = 3;
+std::vector<std::int64_t> ConnectionTracker::end_snapshot(
+    bool polling_controls_lifecycle, bool lifecycle_evidence_incomplete) {
+    constexpr std::size_t degraded_lifecycle_reconciliation_miss_limit = 3;
     std::vector<std::int64_t> inactive;
     for (auto current = connections_.begin(); current != connections_.end();) {
         auto& tracked = current->second;
@@ -268,14 +337,15 @@ std::vector<std::int64_t> ConnectionTracker::end_snapshot(bool polling_controls_
         }
         ++tracked.consecutive_snapshot_misses;
         const bool reconcile_absent = polling_controls_lifecycle ||
-            tracked.consecutive_snapshot_misses >= lifecycle_reconciliation_miss_limit;
+            (lifecycle_evidence_incomplete &&
+             tracked.consecutive_snapshot_misses >= degraded_lifecycle_reconciliation_miss_limit);
         if (reconcile_absent) {
             const auto identity = current->first;
             const auto connection_id = tracked.connection_id;
             store_.touch_connection(connection_id, tracked.last_seen.observed_ns,
                                     polling_controls_lifecycle
-                                        ? "DISAPPEARED" : "RECONCILED_ABSENT");
-            remove_tuple_identity(identity);
+                                        ? "DISAPPEARED" : "RECONCILED_ABSENT_AFTER_LIFECYCLE_LOSS");
+            remove_correlation_identity(identity);
             current = connections_.erase(current);
             inactive.push_back(connection_id);
         } else {
