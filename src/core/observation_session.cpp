@@ -8,10 +8,44 @@
 #include <set>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace neta {
+namespace {
+
+constexpr std::uint64_t snapshot_reconciliation_grace_ns = 250'000'000ULL;
+constexpr std::uint64_t snapshot_candidate_stale_ns = 5'000'000'000ULL;
+constexpr std::size_t max_snapshot_reconciliation_candidates = 4096;
+
+std::string snapshot_tuple_key(const SocketObservation& socket,
+                               const std::optional<ProcessIdentity>& process) {
+    std::string key = socket.local_ip + ':' + std::to_string(socket.local_port) + "->" +
+                      socket.remote_ip + ':' + std::to_string(socket.remote_port);
+    if (process) {
+        key += "|pid:" + std::to_string(process->pid) +
+               "|start:" + std::to_string(process->start_ticks.value_or(0));
+    } else if (socket.owning_pid) {
+        key += "|pid:" + std::to_string(*socket.owning_pid) + "|start:0";
+    }
+    return key;
+}
+
+std::string lifecycle_tuple_key(const ConnectionLifecycleEvent& event, bool reverse = false) {
+    if (!event.local || !event.remote) return {};
+    const auto& local = reverse ? *event.remote : *event.local;
+    const auto& remote = reverse ? *event.local : *event.remote;
+    std::string key = local.address + ':' + std::to_string(local.port.value_or(0)) + "->" +
+                      remote.address + ':' + std::to_string(remote.port.value_or(0));
+    if (event.process.agent_visible.tgid) {
+        key += "|pid:" + std::to_string(*event.process.agent_visible.tgid) +
+               "|start:" + std::to_string(event.process.start_ticks.value_or(0));
+    }
+    return key;
+}
+
+} // namespace
 
 ObservationSession::ObservationSession(HistoryStore& store,
                                        platform::ConnectionObserver& socket_observer,
@@ -78,6 +112,15 @@ ObservationRunResult ObservationSession::run(
         ConnectionDirection direction{ConnectionDirection::Unknown};
     };
     std::unordered_map<std::int64_t, RouteRequest> route_requests;
+
+    struct PendingSnapshotCandidate {
+        SocketObservation socket;
+        std::optional<ProcessIdentity> process;
+        std::uint64_t first_seen_ns{0};
+        std::uint64_t last_seen_ns{0};
+        bool startup{false};
+    };
+    std::unordered_map<std::string, PendingSnapshotCandidate> pending_snapshot_candidates;
 
     constexpr std::size_t max_name_resolution_observations = 4096;
     const NameResolutionCorrelationPolicy name_resolution_policy{};
@@ -240,23 +283,129 @@ ObservationRunResult ObservationSession::run(
         correlate_tls_sessions();
     };
 
-    const auto sample_transport = [&] {
+    const auto record_direction_promotion = [&](const ConnectionAdmission& admission,
+                                                const std::string& remote_address) {
+        if (!admission.direction_promoted) return;
+        auto route = route_requests.find(admission.connection_id);
+        if (route != route_requests.end()) {
+            route->second.direction = admission.direction;
+            route->second.remote_address = remote_address;
+        }
+        attach_name_resolution(admission.connection_id, admission.direction);
+    };
+
+    const auto erase_candidate_for_lifecycle = [&](const ConnectionLifecycleEvent& event) {
+        const auto key = lifecycle_tuple_key(event);
+        if (!key.empty()) pending_snapshot_candidates.erase(key);
+        if (event.type == ConnectionLifecycleEventType::Close) {
+            const auto reverse = lifecycle_tuple_key(event, true);
+            if (!reverse.empty()) pending_snapshot_candidates.erase(reverse);
+        }
+    };
+
+    const auto sample_transport = [&](bool startup_snapshot) {
         drain_name_resolution();
         tracker.begin_snapshot();
+        const bool lifecycle_degraded = result.lifecycle_events_active &&
+            lifecycle_observer_.health().evidence_may_be_incomplete();
+        std::unordered_set<std::string> candidates_seen;
+
         for (const auto& socket : socket_observer_.snapshot()) {
-            std::optional<std::string> process_name;
-            if (admission_policy_.has_process_filters()) {
-                if (const auto process = process_resolver_.resolve(socket.socket_inode)) {
-                    process_name = process->comm;
+            const auto process = process_resolver_.resolve(socket);
+            const std::optional<std::string> process_name = process
+                ? std::optional<std::string>{process->comm} : std::nullopt;
+
+            if (result.lifecycle_events_active) {
+                // ETW owns lifetime/direction. A snapshot first gets an opportunity to enrich an
+                // ETW-created connection and is never allowed to create a competing object here.
+                if (const auto enrichment = tracker.observe_socket(
+                        socket, ConnectionDirection::Unknown, false)) {
+                    pending_snapshot_candidates.erase(snapshot_tuple_key(socket, process));
+                    static_cast<void>(enrichment);
+                    continue;
                 }
+
+                const auto decision = admission_policy_.evaluate_reconciliation_socket(
+                    socket, process_name);
+                if (!decision.admit) continue;
+                const auto key = snapshot_tuple_key(socket, process);
+                candidates_seen.insert(key);
+                auto [candidate_it, inserted] = pending_snapshot_candidates.try_emplace(
+                    key, PendingSnapshotCandidate{socket, process, socket.transport.observed_ns,
+                                                  socket.transport.observed_ns, startup_snapshot});
+                if (!inserted) {
+                    candidate_it->second.socket = socket;
+                    candidate_it->second.process = process;
+                    candidate_it->second.last_seen_ns = socket.transport.observed_ns;
+                    candidate_it->second.startup = candidate_it->second.startup || startup_snapshot;
+                }
+
+                auto& candidate = candidate_it->second;
+                const bool grace_elapsed = candidate.last_seen_ns >= candidate.first_seen_ns &&
+                    candidate.last_seen_ns - candidate.first_seen_ns >=
+                        snapshot_reconciliation_grace_ns;
+                if (lifecycle_degraded || grace_elapsed) {
+                    const auto origin = lifecycle_degraded
+                        ? ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss
+                        : ConnectionObservationOrigin::SnapshotPreexisting;
+                    const auto admission = tracker.observe_socket(
+                        candidate.socket, ConnectionDirection::Unknown, true, origin);
+                    if (admission) {
+                        record_admission(*admission, candidate.socket.remote_ip,
+                                         ConnectionDirection::Unknown);
+                    }
+                    pending_snapshot_candidates.erase(candidate_it);
+                }
+                continue;
             }
+
             const auto decision = admission_policy_.evaluate_new_socket(socket, process_name);
             const auto admission = tracker.observe_socket(
-                socket, decision.direction, decision.admit);
+                socket, decision.direction, decision.admit,
+                ConnectionObservationOrigin::SnapshotPreexisting);
             if (admission) record_admission(*admission, socket.remote_ip, decision.direction);
         }
-        for (const auto connection_id :
-             tracker.end_snapshot(!result.lifecycle_events_active)) {
+
+        if (result.lifecycle_events_active) {
+            for (auto current = pending_snapshot_candidates.begin();
+                 current != pending_snapshot_candidates.end();) {
+                if (candidates_seen.contains(current->first)) {
+                    ++current;
+                    continue;
+                }
+                auto& candidate = current->second;
+                if (lifecycle_degraded) {
+                    const auto admission = tracker.observe_socket(
+                        candidate.socket, ConnectionDirection::Unknown, true,
+                        ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss);
+                    if (admission) {
+                        record_admission(*admission, candidate.socket.remote_ip,
+                                         ConnectionDirection::Unknown);
+                    }
+                }
+                current = pending_snapshot_candidates.erase(current);
+            }
+
+            if (pending_snapshot_candidates.size() > max_snapshot_reconciliation_candidates) {
+                while (pending_snapshot_candidates.size() >
+                       max_snapshot_reconciliation_candidates) {
+                    pending_snapshot_candidates.erase(pending_snapshot_candidates.begin());
+                }
+            }
+            for (auto current = pending_snapshot_candidates.begin();
+                 current != pending_snapshot_candidates.end();) {
+                const auto& candidate = current->second;
+                if (candidate.last_seen_ns >= candidate.first_seen_ns &&
+                    candidate.last_seen_ns - candidate.first_seen_ns > snapshot_candidate_stale_ns) {
+                    current = pending_snapshot_candidates.erase(current);
+                } else {
+                    ++current;
+                }
+            }
+        }
+
+        for (const auto connection_id : tracker.end_snapshot(
+                 !result.lifecycle_events_active, lifecycle_degraded)) {
             scheduler.connection_closed(connection_id);
             route_requests.erase(connection_id);
             pending_completed_connections.insert(connection_id);
@@ -290,6 +439,16 @@ ObservationRunResult ObservationSession::run(
     if (callbacks.started) callbacks.started();
     drain_name_resolution();
     drain_tls_sessions();
+
+    // ETW is already running before ObservationSession::run(). Take one snapshot after it starts
+    // and stage unmatched sockets as pre-existing. The grace window prevents snapshot-before-ETW
+    // races from creating duplicate history objects.
+    if (result.lifecycle_events_active) {
+        sample_transport(true);
+        scheduler.transport_sampled(std::chrono::steady_clock::now());
+        observe_scheduled_routes();
+    }
+
     while ((!deadline || std::chrono::steady_clock::now() < *deadline) && !stop_requested()) {
         if (result.lifecycle_events_active) {
             const auto now = std::chrono::steady_clock::now();
@@ -300,9 +459,13 @@ ObservationRunResult ObservationSession::run(
             const auto lifecycle_events = lifecycle_observer_.poll(timeout);
             drain_name_resolution();
             for (const auto& event : lifecycle_events) {
+                erase_candidate_for_lifecycle(event);
                 const auto decision = admission_policy_.evaluate(event);
                 if (!decision.admit) continue;
                 const auto admission = tracker.observe_lifecycle(event, decision.direction);
+                if (admission && event.remote) {
+                    record_direction_promotion(*admission, event.remote->address);
+                }
                 if (admission && admission->closed) {
                     scheduler.connection_closed(admission->connection_id);
                     route_requests.erase(admission->connection_id);
@@ -310,7 +473,7 @@ ObservationRunResult ObservationSession::run(
                 }
                 if (admission && admission->newly_admitted && event.remote) {
                     record_admission(*admission, event.remote->address, decision.direction);
-                    sample_transport();
+                    sample_transport(false);
                     scheduler.transport_sampled(std::chrono::steady_clock::now());
                     observe_scheduled_routes();
                 }
@@ -321,7 +484,7 @@ ObservationRunResult ObservationSession::run(
 
         const auto now = std::chrono::steady_clock::now();
         if (scheduler.transport_due(now, !result.lifecycle_events_active)) {
-            sample_transport();
+            sample_transport(false);
             scheduler.transport_sampled(std::chrono::steady_clock::now());
             observe_scheduled_routes();
         }
