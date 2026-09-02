@@ -46,8 +46,8 @@ AdmissionDecision ConnectionAdmissionPolicy::evaluate_new_socket(
     const SocketObservation& socket,
     const std::optional<std::string>& process_name) const {
     if (!eligible_connection_seed(socket.endpoint_kind)) return {};
-    // SOCK_DIAG has no lifecycle direction evidence. Only target mode may use
-    // it as a discovery fallback, and its direction remains explicitly unknown.
+    // Snapshot discovery has no lifecycle direction evidence. Only target mode may use
+    // it as the legacy discovery fallback, and direction remains explicitly unknown.
     if (config_.mode != ObservationMode::Target ||
         socket.remote_port != config_.target_port ||
         !config_.target_addresses.contains(socket.remote_ip) ||
@@ -55,6 +55,27 @@ AdmissionDecision ConnectionAdmissionPolicy::evaluate_new_socket(
         return {};
     }
     return {true, ConnectionDirection::Unknown};
+}
+
+AdmissionDecision ConnectionAdmissionPolicy::evaluate_reconciliation_socket(
+    const SocketObservation& socket,
+    const std::optional<std::string>& process_name) const {
+    if (!eligible_connection_seed(socket.endpoint_kind)) return {};
+    if (!matches_filter(config_.filter, socket.local_port, socket.remote_port, process_name)) {
+        return {};
+    }
+    if (config_.mode == ObservationMode::Target) {
+        if (socket.remote_port != config_.target_port ||
+            !config_.target_addresses.contains(socket.remote_ip)) {
+            return {};
+        }
+        return {true, ConnectionDirection::Unknown};
+    }
+    if (config_.mode == ObservationMode::All) {
+        return {true, ConnectionDirection::Unknown};
+    }
+    // OUTBOUND/INBOUND modes must not convert an UNKNOWN snapshot into a directional claim.
+    return {};
 }
 
 bool ConnectionAdmissionPolicy::has_process_filters() const noexcept {
