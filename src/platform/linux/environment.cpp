@@ -48,6 +48,11 @@ PlatformCapabilities capabilities() {
     const auto lifecycle = make_lifecycle_observer();
     const auto& lifecycle_capability = lifecycle->capability();
     c.connection_lifecycle_events = lifecycle_capability.available();
+    c.lifecycle_connect_events = lifecycle_capability.connect_events;
+    c.lifecycle_accept_events = lifecycle_capability.accept_events;
+    c.lifecycle_close_events = lifecycle_capability.close_events;
+    c.lifecycle_source = lifecycle_capability.source.empty() ? "linux:ebpf-core" :
+                                                              lifecycle_capability.source;
     c.ebpf_connect_events = lifecycle_capability.connect_events;
     c.ebpf_accept_events = lifecycle_capability.accept_events;
     c.ebpf_close_events = lifecycle_capability.close_events;
@@ -79,12 +84,8 @@ PlatformCapabilities capabilities() {
     c.tls_session_endpoint = tls_capability.endpoint;
     c.tls_session_unavailable_reason = tls_capability.unavailable_reason;
 
-    // The glibc collector observes an exact application resolver API event. It does not prove
-    // that a network DNS transaction occurred because NSS/cache/hosts may satisfy getaddrinfo().
     c.exact_dns_observation = false;
 #ifdef NETA_TLS_CONTEXT_SHIM_BUILT
-    // Exact TLS here is conditional on the application using the shipped OpenSSL instrumentation
-    // shim. Uninstrumented or non-OpenSSL applications remain outside this capability's coverage.
     c.exact_tls_observation = tls_capability.available();
 #else
     c.exact_tls_observation = false;
