@@ -1,9 +1,58 @@
+#include "neta/connection_admission_policy.hpp"
 #include "neta/platform.hpp"
 
 #include <cassert>
 #include <iostream>
 
+namespace {
+
+neta::ConnectionLifecycleEvent lifecycle_event(neta::ConnectionLifecycleEventType type,
+                                               neta::TcpEndpointKind endpoint_kind) {
+    neta::ConnectionLifecycleEvent event;
+    event.type = type;
+    event.provenance = neta::LifecycleProvenance::WindowsEtw;
+    event.protocol = neta::TransportProtocol::Tcp;
+    event.endpoint_kind = endpoint_kind;
+    event.local = neta::NetworkEndpoint{"127.0.0.1", 50000};
+    event.remote = neta::NetworkEndpoint{"127.0.0.1", 9443};
+    return event;
+}
+
+void verify_direction_semantics() {
+    neta::AdmissionPolicyConfig config;
+    config.mode = neta::ObservationMode::All;
+    neta::ConnectionAdmissionPolicy policy(config);
+
+    const auto connect = policy.evaluate(
+        lifecycle_event(neta::ConnectionLifecycleEventType::Connect,
+                        neta::TcpEndpointKind::Connection));
+    assert(connect.admit);
+    assert(connect.direction == neta::ConnectionDirection::Outbound);
+
+    const auto accept = policy.evaluate(
+        lifecycle_event(neta::ConnectionLifecycleEventType::Accept,
+                        neta::TcpEndpointKind::Connection));
+    assert(accept.admit);
+    assert(accept.direction == neta::ConnectionDirection::Inbound);
+
+    const auto listener = policy.evaluate(
+        lifecycle_event(neta::ConnectionLifecycleEventType::Accept,
+                        neta::TcpEndpointKind::Listener));
+    assert(!listener.admit);
+    assert(listener.direction == neta::ConnectionDirection::Unknown);
+
+    const auto close = policy.evaluate(
+        lifecycle_event(neta::ConnectionLifecycleEventType::Close,
+                        neta::TcpEndpointKind::LifecycleTail));
+    assert(close.admit);
+    assert(close.direction == neta::ConnectionDirection::Unknown);
+}
+
+} // namespace
+
 int main() {
+    verify_direction_semantics();
+
     const auto capabilities = neta::platform::capabilities();
     assert(capabilities.connection_discovery);
     assert(capabilities.process_attribution);
@@ -43,7 +92,7 @@ int main() {
     assert(loopback.has_value());
     assert(loopback->interface_index != 0);
 
-    std::cout << "Windows platform foundation OK; sockets=" << sockets.size()
+    std::cout << "Windows platform W3 foundation OK; sockets=" << sockets.size()
               << ", lifecycle=" << (capabilities.connection_lifecycle_events ? "ETW" : "unavailable")
               << '\n';
     return 0;
