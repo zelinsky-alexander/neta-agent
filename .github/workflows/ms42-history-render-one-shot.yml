@@ -1,0 +1,59 @@
+name: MS4.2 history renderer one-shot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/ms42-history-render-one-shot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Patch history show TLS rendering
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/main.cpp')
+          text = path.read_text()
+
+          old = '''        const auto environment = store.host_network_environment_for_connection(id);\n        if (has_arg(argc, argv, "--json")) {'''
+          new = '''        const auto environment = store.host_network_environment_for_connection(id);\n        const auto tls_sessions = store.tls_session_evidence_for_connection(id);\n        if (has_arg(argc, argv, "--json")) {'''
+          if old not in text:
+              raise SystemExit('history show TLS lookup insertion point not found')
+          text = text.replace(old, new, 1)
+
+          old = '''                      << ",\\\"environment_fingerprint\\\":\\\""\n                      << json_escape(environment ? environment->environment_fingerprint : "") << "\\\"}\\n";'''
+          new = '''                      << ",\\\"environment_fingerprint\\\":\\\""\n                      << json_escape(environment ? environment->environment_fingerprint : "")\n                      << "\\\",\\\"tls_session_count\\\":" << tls_sessions.size() << '}\\n';'''
+          if old not in text:
+              raise SystemExit('history show JSON insertion point not found')
+          text = text.replace(old, new, 1)
+
+          old = '''            if (environment) print_environment(*environment);\n        }'''
+          new = '''            if (environment) print_environment(*environment);\n            std::cout << "\\nApplication TLS session evidence: " << tls_sessions.size() << "\\n";\n            for (const auto& evidence : tls_sessions) {\n                const auto& tls = evidence.observation;\n                std::cout << "  Role: " << to_string(tls.local_role)\n                          << " relation=" << to_string(evidence.relation)\n                          << " observation=" << to_string(tls.fidelity)\n                          << " correlation=" << to_string(evidence.correlation_fidelity)\n                          << " source=" << tls.source << '\\n'\n                          << "    Version: " << tls.tls_version << " cipher=" << tls.cipher\n                          << " ALPN=" << (tls.alpn.empty() ? "<none>" : tls.alpn)\n                          << " SNI=" << (tls.sni.empty() ? "<none>" : tls.sni) << '\\n'\n                          << "    Peer cert: " << (tls.peer_certificate_present ? "yes" : "no")\n                          << " verify-required=" << (tls.peer_verification_required ? "yes" : "no")\n                          << " authenticated=" << (tls.peer_authenticated ? "yes" : "no")\n                          << " verify=" << (tls.verify_result ? std::to_string(*tls.verify_result) : "<unavailable>") << '\\n'\n                          << "    Expected name: " << tls.expected_peer_name.value_or("<unavailable>")\n                          << " matched name: " << tls.matched_peer_name.value_or("<unavailable>") << '\\n'\n                          << "    Leaf SHA-256: " << (tls.leaf_sha256.empty() ? "<unavailable>" : tls.leaf_sha256)\n                          << "\\n    SPKI SHA-256: " << (tls.spki_sha256.empty() ? "<unavailable>" : tls.spki_sha256)\n                          << "\\n    Subject: " << (tls.subject.empty() ? "<unavailable>" : tls.subject)\n                          << "\\n    Issuer: " << (tls.issuer.empty() ? "<unavailable>" : tls.issuer)\n                          << "\\n    Evidence SHA-256: " << evidence.sha256 << '\\n';\n            }\n        }'''
+          if old not in text:
+              raise SystemExit('history show plain rendering insertion point not found')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Remove one-shot workflow and commit
+        shell: bash
+        run: |
+          git rm .github/workflows/ms42-history-render-one-shot.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.cpp
+          git commit -m "Render persisted TLS evidence in history show"
+          git push origin HEAD:main
