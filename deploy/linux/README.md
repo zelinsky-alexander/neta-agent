@@ -14,8 +14,8 @@ The script:
 
 - installs build prerequisites;
 - fast-forwards the checkout to `origin/main` and refuses to overwrite local changes;
-- builds a Release binary with eBPF required;
-- runs the test suite;
+- validates a Debug build with eBPF required by running the full test suite;
+- builds a production Release binary with eBPF required;
 - installs `/usr/local/bin/neta-agent`;
 - installs the optional OpenSSL TLS context shim at `/usr/local/lib/neta/libneta_tls_context.so`;
 - creates `/var/lib/neta`, `/var/lib/neta/identity`, and `/etc/neta`;
@@ -40,7 +40,17 @@ The script creates the protected identity in `/var/lib/neta/identity`, verifies 
 
 It refuses to overwrite an existing `agent.key`. Re-enrollment therefore requires an intentional identity migration/removal rather than an accidental script rerun.
 
-## Verify
+## Health check
+
+Run the small read-only health check with:
+
+```bash
+sudo ./deploy/linux/health-check.sh
+```
+
+It reports the installed binary, systemd service state/PID/start time, boot enablement, fleet identity, local storage status, and recent AgentHello/heartbeat/live-reporting events. It does not send a heartbeat or mutate fleet sequence state.
+
+## Verify manually
 
 ```bash
 sudo systemctl status neta-agent --no-pager
