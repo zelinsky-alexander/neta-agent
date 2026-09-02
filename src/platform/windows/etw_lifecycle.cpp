@@ -1,11 +1,14 @@
 #include "neta/platform.hpp"
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
 #include <windows.h>
 #include <evntrace.h>
 #include <evntcons.h>
 #include <tdh.h>
-#include <winsock2.h>
 #include <ws2tcpip.h>
 
 #include <algorithm>
@@ -17,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -40,6 +44,7 @@ constexpr UCHAR kDisconnectIpv6 = 29;
 constexpr UCHAR kAcceptIpv6 = 31;
 constexpr std::size_t kMaxQueuedEvents = 8192;
 constexpr std::size_t kMaxActiveConnections = 16384;
+constexpr std::uint64_t kMaxDecodeDiagnostics = 64;
 
 bool same_guid(const GUID& left, const GUID& right) noexcept {
     return std::memcmp(&left, &right, sizeof(GUID)) == 0;
@@ -72,18 +77,43 @@ std::vector<std::byte> property_bytes(const EVENT_RECORD& record, const wchar_t*
 }
 
 template <typename T>
-std::optional<T> scalar_property(const EVENT_RECORD& record, const wchar_t* name) {
-    const auto bytes = property_bytes(record, name);
+std::optional<T> scalar_from_bytes(const std::vector<std::byte>& bytes) {
     if (bytes.size() < sizeof(T)) return std::nullopt;
     T value{};
     std::memcpy(&value, bytes.data(), sizeof(T));
     return value;
 }
 
+template <typename T>
+std::optional<T> scalar_property(const EVENT_RECORD& record, const wchar_t* name) {
+    return scalar_from_bytes<T>(property_bytes(record, name));
+}
+
+std::optional<std::uint32_t> pid_property(const EVENT_RECORD& record) {
+    if (const auto pid = scalar_property<std::uint32_t>(record, L"PID")) return pid;
+    return scalar_property<std::uint32_t>(record, L"pid");
+}
+
+std::optional<std::uint64_t> connid_property(const EVENT_RECORD& record) {
+    auto bytes = property_bytes(record, L"connid");
+    if (bytes.empty()) bytes = property_bytes(record, L"ConnId");
+    if (bytes.size() >= sizeof(std::uint64_t)) {
+        return scalar_from_bytes<std::uint64_t>(bytes);
+    }
+    if (const auto value = scalar_from_bytes<std::uint32_t>(bytes)) {
+        return static_cast<std::uint64_t>(*value);
+    }
+    return std::nullopt;
+}
+
 std::optional<std::uint16_t> port_property(const EVENT_RECORD& record, const wchar_t* name) {
-    const auto raw = scalar_property<std::uint16_t>(record, name);
-    if (!raw) return std::nullopt;
-    return ntohs(*raw);
+    const auto bytes = property_bytes(record, name);
+    if (bytes.size() >= sizeof(std::uint16_t)) {
+        std::uint16_t raw{};
+        std::memcpy(&raw, bytes.data(), sizeof(raw));
+        return ntohs(raw);
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> address_property(const EVENT_RECORD& record, const wchar_t* name,
@@ -97,6 +127,106 @@ std::optional<std::string> address_property(const EVENT_RECORD& record, const wc
         return std::nullopt;
     }
     return std::string(output);
+}
+
+template <typename T>
+std::optional<T> raw_scalar(const EVENT_RECORD& record, std::size_t offset) {
+    if (record.UserData == nullptr || offset > record.UserDataLength ||
+        record.UserDataLength - offset < sizeof(T)) {
+        return std::nullopt;
+    }
+    T value{};
+    const auto* bytes = static_cast<const std::byte*>(record.UserData);
+    std::memcpy(&value, bytes + offset, sizeof(T));
+    return value;
+}
+
+std::optional<std::string> raw_address(const EVENT_RECORD& record, std::size_t offset,
+                                       bool ipv6) {
+    const std::size_t size = ipv6 ? 16U : 4U;
+    if (record.UserData == nullptr || offset > record.UserDataLength ||
+        record.UserDataLength - offset < size) {
+        return std::nullopt;
+    }
+    const auto* bytes = static_cast<const std::byte*>(record.UserData) + offset;
+    char output[INET6_ADDRSTRLEN]{};
+    const int family = ipv6 ? AF_INET6 : AF_INET;
+    if (InetNtopA(family, bytes, output, static_cast<DWORD>(sizeof(output))) == nullptr) {
+        return std::nullopt;
+    }
+    return std::string(output);
+}
+
+std::optional<std::uint16_t> raw_port(const EVENT_RECORD& record, std::size_t offset) {
+    const auto raw = raw_scalar<std::uint16_t>(record, offset);
+    if (!raw) return std::nullopt;
+    return ntohs(*raw);
+}
+
+struct DecodedTcpPayload {
+    std::uint32_t pid{0};
+    std::uint64_t connid{0};
+    std::string source_address;
+    std::string destination_address;
+    std::uint16_t source_port{0};
+    std::uint16_t destination_port{0};
+};
+
+std::optional<std::uint64_t> raw_pointer_value(const EVENT_RECORD& record, std::size_t offset) {
+    const bool provider_32_bit =
+        (record.EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0;
+    if (!provider_32_bit) {
+        if (const auto value64 = raw_scalar<std::uint64_t>(record, offset)) return value64;
+    }
+    if (const auto value32 = raw_scalar<std::uint32_t>(record, offset)) {
+        return static_cast<std::uint64_t>(*value32);
+    }
+    return std::nullopt;
+}
+
+std::optional<DecodedTcpPayload> decode_documented_mof_layout(const EVENT_RECORD& record,
+                                                              bool ipv6,
+                                                              bool connect_or_accept) {
+    // Microsoft documents the Vista+ kernel TCP/IP MOF payloads as:
+    // PID, size, daddr, saddr, dport, sport, ... , connid.  The Pointer
+    // qualifier on connid makes the final field pointer-sized on a 64-bit
+    // provider.  TDH normally decodes these fields; this raw path is a bounded
+    // compatibility fallback for hosts where TDH does not expose one of the
+    // extension properties consistently.
+    constexpr std::size_t pid_offset = 0;
+    const std::size_t destination_address_offset = 8;
+    const std::size_t source_address_offset = ipv6 ? 24U : 12U;
+    const std::size_t destination_port_offset = ipv6 ? 40U : 16U;
+    const std::size_t source_port_offset = ipv6 ? 42U : 18U;
+    const std::size_t connid_offset = ipv6
+        ? (connect_or_accept ? 64U : 48U)
+        : (connect_or_accept ? 40U : 24U);
+
+    const auto pid = raw_scalar<std::uint32_t>(record, pid_offset);
+    const auto daddr = raw_address(record, destination_address_offset, ipv6);
+    const auto saddr = raw_address(record, source_address_offset, ipv6);
+    const auto dport = raw_port(record, destination_port_offset);
+    const auto sport = raw_port(record, source_port_offset);
+    const auto connid = raw_pointer_value(record, connid_offset);
+    if (!pid || !daddr || !saddr || !dport || !sport || !connid) return std::nullopt;
+
+    return DecodedTcpPayload{*pid, *connid, *saddr, *daddr, *sport, *dport};
+}
+
+std::optional<DecodedTcpPayload> decode_tcp_payload(const EVENT_RECORD& record, bool ipv6,
+                                                    bool connect_or_accept) {
+    const auto pid = pid_property(record);
+    const auto connid = connid_property(record);
+    const auto source_address = address_property(record, L"saddr", ipv6);
+    const auto destination_address = address_property(record, L"daddr", ipv6);
+    const auto source_port = port_property(record, L"sport");
+    const auto destination_port = port_property(record, L"dport");
+    if (pid && connid && source_address && destination_address && source_port &&
+        destination_port) {
+        return DecodedTcpPayload{*pid, *connid, *source_address, *destination_address,
+                                 *source_port, *destination_port};
+    }
+    return decode_documented_mof_layout(record, ipv6, connect_or_accept);
 }
 
 std::optional<std::uint64_t> process_start_identity(DWORD pid) {
@@ -137,6 +267,19 @@ std::optional<std::string> process_name(DWORD pid) {
     return result;
 }
 
+struct ActiveKey {
+    std::uint32_t pid{0};
+    std::uint64_t connid{0};
+    bool operator==(const ActiveKey&) const = default;
+};
+
+struct ActiveKeyHash {
+    std::size_t operator()(const ActiveKey& key) const noexcept {
+        const auto mixed = key.connid ^ (static_cast<std::uint64_t>(key.pid) << 32U);
+        return std::hash<std::uint64_t>{}(mixed);
+    }
+};
+
 struct ActiveConnection {
     NetworkAddressFamily family{NetworkAddressFamily::Unknown};
     NetworkEndpoint local;
@@ -144,10 +287,6 @@ struct ActiveConnection {
     std::optional<std::uint64_t> process_start_ticks;
     std::uint64_t generation{0};
 };
-
-std::uint64_t connection_key(std::uint32_t pid, std::uint32_t connid) noexcept {
-    return (static_cast<std::uint64_t>(pid) << 32U) | connid;
-}
 
 GUID session_guid() noexcept {
     const auto pid = static_cast<std::uint32_t>(GetCurrentProcessId());
@@ -207,7 +346,9 @@ public:
 
         EVENT_TRACE_LOGFILEW logfile{};
         logfile.LoggerName = const_cast<LPWSTR>(session_name_.c_str());
-        logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+        logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME |
+                                   PROCESS_TRACE_MODE_EVENT_RECORD |
+                                   PROCESS_TRACE_MODE_RAW_TIMESTAMP;
         logfile.EventRecordCallback = &WindowsEtwLifecycleObserver::event_record_callback;
         logfile.Context = this;
         trace_handle_ = OpenTraceW(&logfile);
@@ -272,6 +413,22 @@ private:
         static_cast<WindowsEtwLifecycleObserver*>(record->UserContext)->consume(*record);
     }
 
+    void diagnose_decode_failure(const EVENT_RECORD& record, const char* reason) {
+        locally_dropped_.fetch_add(1, std::memory_order_relaxed);
+        const auto diagnostic_index = decode_diagnostics_.fetch_add(1, std::memory_order_relaxed);
+        if (diagnostic_index >= kMaxDecodeDiagnostics) return;
+        std::cerr << "NETA ETW decode failure: " << reason
+                  << " opcode=" << static_cast<unsigned>(record.EventHeader.EventDescriptor.Opcode)
+                  << " version=" << static_cast<unsigned>(record.EventHeader.EventDescriptor.Version)
+                  << " flags=0x" << std::hex << record.EventHeader.Flags << std::dec
+                  << " header-pid=" << record.EventHeader.ProcessId
+                  << " user-data-bytes=" << record.UserDataLength << '\n';
+        if (diagnostic_index + 1 == kMaxDecodeDiagnostics) {
+            std::cerr << "NETA ETW decode diagnostics suppressed after "
+                      << kMaxDecodeDiagnostics << " records\n";
+        }
+    }
+
     void stop_session() noexcept {
         {
             std::lock_guard lock(mutex_);
@@ -311,26 +468,28 @@ private:
         const bool disconnect = opcode == kDisconnectIpv4 || opcode == kDisconnectIpv6;
         if (!connect && !accept && !disconnect) return;
 
-        const auto pid = scalar_property<std::uint32_t>(record, L"PID");
-        const auto connid = scalar_property<std::uint32_t>(record, L"connid");
-        if (!pid || !connid) return;
+        const auto decoded = decode_tcp_payload(record, ipv6, connect || accept);
+        if (!decoded) {
+            diagnose_decode_failure(record, "missing PID/connid/tuple in TDH and MOF fallback");
+            return;
+        }
 
         ConnectionLifecycleEvent event;
         event.timestamp_ns = qpc_to_ns(record.EventHeader.TimeStamp.QuadPart, qpc_frequency_);
         event.provenance = LifecycleProvenance::WindowsEtw;
-        event.process.agent_visible.pid = static_cast<std::int64_t>(*pid);
-        event.process.agent_visible.tgid = static_cast<std::int64_t>(*pid);
+        event.process.agent_visible.pid = static_cast<std::int64_t>(decoded->pid);
+        event.process.agent_visible.tgid = static_cast<std::int64_t>(decoded->pid);
         event.process.kernel = event.process.agent_visible;
         event.process.uid = 0;
-        event.process.start_ticks = process_start_identity(*pid);
-        event.process.comm = process_name(*pid);
+        event.process.start_ticks = process_start_identity(decoded->pid);
+        event.process.comm = process_name(decoded->pid);
         event.address_family = ipv6 ? NetworkAddressFamily::IPv6 : NetworkAddressFamily::IPv4;
         event.protocol = TransportProtocol::Tcp;
         event.endpoint_kind = disconnect ? TcpEndpointKind::LifecycleTail
                                          : TcpEndpointKind::Connection;
-        event.platform_connection_id = *connid;
+        event.platform_connection_id = decoded->connid;
 
-        const auto key = connection_key(*pid, *connid);
+        const ActiveKey key{decoded->pid, decoded->connid};
         if (disconnect) {
             event.type = ConnectionLifecycleEventType::Close;
             const auto active = active_connections_.find(key);
@@ -341,34 +500,21 @@ private:
                 event.process.start_ticks = active->second.process_start_ticks;
                 active_connections_.erase(active);
             } else {
-                // A connection can predate the ETW session. Decode the disconnect tuple directly
-                // when the provider exposes it; the tracker treats either orientation only as a
-                // close correlation and never derives direction from it.
-                const auto source_address = address_property(record, L"saddr", ipv6);
-                const auto destination_address = address_property(record, L"daddr", ipv6);
-                const auto source_port = port_property(record, L"sport");
-                const auto destination_port = port_property(record, L"dport");
-                if (source_address && destination_address && source_port && destination_port) {
-                    event.local = NetworkEndpoint{*source_address, *source_port};
-                    event.remote = NetworkEndpoint{*destination_address, *destination_port};
-                }
+                event.local = NetworkEndpoint{decoded->source_address, decoded->source_port};
+                event.remote = NetworkEndpoint{decoded->destination_address,
+                                               decoded->destination_port};
             }
         } else {
-            const auto source_address = address_property(record, L"saddr", ipv6);
-            const auto destination_address = address_property(record, L"daddr", ipv6);
-            const auto source_port = port_property(record, L"sport");
-            const auto destination_port = port_property(record, L"dport");
-            if (!source_address || !destination_address || !source_port || !destination_port) {
-                return;
-            }
             if (connect) {
                 event.type = ConnectionLifecycleEventType::Connect;
-                event.local = NetworkEndpoint{*source_address, *source_port};
-                event.remote = NetworkEndpoint{*destination_address, *destination_port};
+                event.local = NetworkEndpoint{decoded->source_address, decoded->source_port};
+                event.remote = NetworkEndpoint{decoded->destination_address,
+                                               decoded->destination_port};
             } else {
                 event.type = ConnectionLifecycleEventType::Accept;
-                event.local = NetworkEndpoint{*destination_address, *destination_port};
-                event.remote = NetworkEndpoint{*source_address, *source_port};
+                event.local = NetworkEndpoint{decoded->destination_address,
+                                              decoded->destination_port};
+                event.remote = NetworkEndpoint{decoded->source_address, decoded->source_port};
             }
             evict_active_connection_if_needed();
             const auto generation = ++next_generation_;
@@ -378,7 +524,10 @@ private:
             active_order_.emplace_back(key, generation);
         }
 
-        if (!event.local || !event.remote) return;
+        if (!event.local || !event.remote) {
+            diagnose_decode_failure(record, "lifecycle record decoded without complete tuple");
+            return;
+        }
         std::lock_guard lock(mutex_);
         if (queue_.size() >= kMaxQueuedEvents) {
             queue_.pop_front();
@@ -401,9 +550,10 @@ private:
     std::deque<ConnectionLifecycleEvent> queue_;
     bool stopping_{false};
     mutable std::atomic<std::uint64_t> locally_dropped_{0};
+    std::atomic<std::uint64_t> decode_diagnostics_{0};
 
-    std::unordered_map<std::uint64_t, ActiveConnection> active_connections_;
-    std::deque<std::pair<std::uint64_t, std::uint64_t>> active_order_;
+    std::unordered_map<ActiveKey, ActiveConnection, ActiveKeyHash> active_connections_;
+    std::deque<std::pair<ActiveKey, std::uint64_t>> active_order_;
     std::uint64_t next_generation_{0};
 };
 
