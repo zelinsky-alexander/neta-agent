@@ -2,6 +2,9 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -38,7 +41,7 @@ private:
 
 std::uint16_t parse_port(const std::string& value, const char* option) {
     const auto parsed = std::stoul(value);
-    if (parsed == 0 || parsed > std::numeric_limits<std::uint16_t>::max()) {
+    if (parsed == 0 || parsed > (std::numeric_limits<std::uint16_t>::max)()) {
         throw std::runtime_error(std::string(option) + " requires a port in 1..65535");
     }
     return static_cast<std::uint16_t>(parsed);
