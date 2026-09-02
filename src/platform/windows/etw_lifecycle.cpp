@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -140,6 +141,7 @@ struct ActiveConnection {
     NetworkAddressFamily family{NetworkAddressFamily::Unknown};
     NetworkEndpoint local;
     NetworkEndpoint remote;
+    std::uint64_t generation{0};
 };
 
 std::uint64_t connection_key(std::uint32_t pid, std::uint32_t connid) noexcept {
@@ -150,7 +152,7 @@ GUID session_guid() noexcept {
     const auto pid = static_cast<std::uint32_t>(GetCurrentProcessId());
     const auto ticks = GetTickCount64();
     GUID value{};
-    value.Data1 = 0x4e455441U; // "NETA"
+    value.Data1 = 0x4e455441U;
     value.Data2 = static_cast<USHORT>(0x5700U | (pid & 0xffU));
     value.Data3 = static_cast<USHORT>(0x4000U | ((pid >> 8U) & 0x0fffU));
     for (std::size_t i = 0; i < std::size(value.Data4); ++i) {
@@ -166,7 +168,7 @@ std::vector<std::byte> trace_properties_buffer(const std::wstring& name) {
     auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
     properties->Wnode.BufferSize = static_cast<ULONG>(bytes);
     properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-    properties->Wnode.ClientContext = 1; // QueryPerformanceCounter timestamps.
+    properties->Wnode.ClientContext = 1;
     properties->Wnode.Guid = session_guid();
     properties->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP;
     properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
@@ -239,7 +241,7 @@ public:
 
     LifecycleHealth health() const override {
         if (!capability_.drop_counter || session_handle_ == 0) return {};
-        std::uint64_t dropped = locally_dropped_;
+        std::uint64_t dropped = locally_dropped_.load(std::memory_order_relaxed);
         auto query_buffer = trace_properties_buffer(session_name_);
         auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(query_buffer.data());
         const ULONG status = ControlTraceW(session_handle_, session_name_.c_str(), properties,
@@ -284,6 +286,20 @@ private:
         }
     }
 
+    void evict_active_connection_if_needed() {
+        while (active_connections_.size() >= kMaxActiveConnections && !active_order_.empty()) {
+            const auto [old_key, old_generation] = active_order_.front();
+            active_order_.pop_front();
+            const auto old = active_connections_.find(old_key);
+            if (old == active_connections_.end() || old->second.generation != old_generation) {
+                continue;
+            }
+            active_connections_.erase(old);
+            locally_dropped_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+    }
+
     void consume(const EVENT_RECORD& record) {
         if (!same_guid(record.EventHeader.ProviderId, kTcpIpGuid)) return;
         const UCHAR opcode = record.EventHeader.EventDescriptor.Opcode;
@@ -304,8 +320,6 @@ private:
         event.process.agent_visible.pid = static_cast<std::int64_t>(*pid);
         event.process.agent_visible.tgid = static_cast<std::int64_t>(*pid);
         event.process.kernel = event.process.agent_visible;
-        // ProcessIdentity.uid is a legacy numeric field with no Windows SID equivalent. Keep the
-        // lifecycle availability marker explicit; zero here is only the existing storage default.
         event.process.uid = 0;
         event.process.start_ticks = process_start_identity(*pid);
         event.process.comm = process_name(*pid);
@@ -339,27 +353,21 @@ private:
                 event.remote = NetworkEndpoint{*destination_address, *destination_port};
             } else {
                 event.type = ConnectionLifecycleEventType::Accept;
-                // For accept, the remote peer is the source and the local accepted endpoint is
-                // the destination. This follows the TCP/IP provider's source/destination schema.
                 event.local = NetworkEndpoint{*destination_address, *destination_port};
                 event.remote = NetworkEndpoint{*source_address, *source_port};
             }
-            if (active_connections_.size() >= kMaxActiveConnections) {
-                const auto oldest = active_order_.front();
-                active_order_.pop_front();
-                active_connections_.erase(oldest);
-                ++locally_dropped_;
-            }
+            evict_active_connection_if_needed();
+            const auto generation = ++next_generation_;
             active_connections_[key] = ActiveConnection{event.address_family, *event.local,
-                                                        *event.remote};
-            active_order_.push_back(key);
+                                                        *event.remote, generation};
+            active_order_.emplace_back(key, generation);
         }
 
         if (!event.local || !event.remote) return;
         std::lock_guard lock(mutex_);
         if (queue_.size() >= kMaxQueuedEvents) {
             queue_.pop_front();
-            ++locally_dropped_;
+            locally_dropped_.fetch_add(1, std::memory_order_relaxed);
         }
         queue_.push_back(std::move(event));
         condition_.notify_one();
@@ -377,10 +385,11 @@ private:
     std::condition_variable condition_;
     std::deque<ConnectionLifecycleEvent> queue_;
     bool stopping_{false};
-    mutable std::uint64_t locally_dropped_{0};
+    mutable std::atomic<std::uint64_t> locally_dropped_{0};
 
     std::unordered_map<std::uint64_t, ActiveConnection> active_connections_;
-    std::deque<std::uint64_t> active_order_;
+    std::deque<std::pair<std::uint64_t, std::uint64_t>> active_order_;
+    std::uint64_t next_generation_{0};
 };
 
 } // namespace
