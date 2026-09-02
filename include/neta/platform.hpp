@@ -24,6 +24,11 @@ struct PlatformCapabilities {
     bool tcp_cwnd{false};
     bool route_observation{false};
     bool connection_lifecycle_events{false};
+    bool lifecycle_connect_events{false};
+    bool lifecycle_accept_events{false};
+    bool lifecycle_close_events{false};
+    std::string lifecycle_source;
+    // Linux-specific implementation detail retained for existing diagnostics/tests.
     bool ebpf_connect_events{false};
     bool ebpf_accept_events{false};
     bool ebpf_close_events{false};
