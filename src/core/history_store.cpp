@@ -52,6 +52,15 @@ std::uint64_t capture_now_ns() {
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+std::string sqlite_path_utf8(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const auto value = path.u8string();
+    return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+#else
+    return path.string();
+#endif
+}
+
 TcpSnapshot sample_from_row(sqlite3_stmt* stmt) {
     TcpSnapshot s;
     s.observed_ns = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 0));
@@ -74,7 +83,8 @@ TcpSnapshot sample_from_row(sqlite3_stmt* stmt) {
 
 HistoryStore::HistoryStore(std::filesystem::path path) : path_(std::move(path)) {
     if (!path_.parent_path().empty()) std::filesystem::create_directories(path_.parent_path());
-    if (sqlite3_open_v2(path_.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK)
+    const auto database_path = sqlite_path_utf8(path_);
+    if (sqlite3_open_v2(database_path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK)
         throw std::runtime_error("failed to open SQLite DB: " + std::string(sqlite3_errmsg(db_)));
     sqlite3_busy_timeout(db_, 5000);
     exec("PRAGMA foreign_keys=ON;");
