@@ -141,6 +141,7 @@ struct ActiveConnection {
     NetworkAddressFamily family{NetworkAddressFamily::Unknown};
     NetworkEndpoint local;
     NetworkEndpoint remote;
+    std::optional<std::uint64_t> process_start_ticks;
     std::uint64_t generation{0};
 };
 
@@ -337,7 +338,20 @@ private:
                 event.address_family = active->second.family;
                 event.local = active->second.local;
                 event.remote = active->second.remote;
+                event.process.start_ticks = active->second.process_start_ticks;
                 active_connections_.erase(active);
+            } else {
+                // A connection can predate the ETW session. Decode the disconnect tuple directly
+                // when the provider exposes it; the tracker treats either orientation only as a
+                // close correlation and never derives direction from it.
+                const auto source_address = address_property(record, L"saddr", ipv6);
+                const auto destination_address = address_property(record, L"daddr", ipv6);
+                const auto source_port = port_property(record, L"sport");
+                const auto destination_port = port_property(record, L"dport");
+                if (source_address && destination_address && source_port && destination_port) {
+                    event.local = NetworkEndpoint{*source_address, *source_port};
+                    event.remote = NetworkEndpoint{*destination_address, *destination_port};
+                }
             }
         } else {
             const auto source_address = address_property(record, L"saddr", ipv6);
@@ -359,7 +373,8 @@ private:
             evict_active_connection_if_needed();
             const auto generation = ++next_generation_;
             active_connections_[key] = ActiveConnection{event.address_family, *event.local,
-                                                        *event.remote, generation};
+                                                        *event.remote, event.process.start_ticks,
+                                                        generation};
             active_order_.emplace_back(key, generation);
         }
 
