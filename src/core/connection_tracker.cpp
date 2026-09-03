@@ -88,8 +88,6 @@ std::string ConnectionTracker::identity_for(const SocketObservation& socket) con
 std::string ConnectionTracker::correlation_key(
     const std::string& tuple, const std::optional<ProcessIdentity>& process,
     bool require_process_start) const {
-    // Preserve the established Linux tuple/cookie reconciliation contract. Windows owner-PID
-    // snapshots opt into the stronger PID + process-start bridge explicitly.
     if (!require_process_start || !process) return tuple;
     return tuple + "|pid:" + std::to_string(process->pid) +
            "|start:" + std::to_string(process->start_ticks.value_or(0));
@@ -169,7 +167,16 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_lifecycle(
             tuple_for(*event.local, *event.remote, event.network_namespace_inode), process,
             event.platform_connection_id.has_value());
         if (const auto correlated = unique_active_correlation_match(key)) {
-            existing = connections_.find(*correlated);
+            const auto candidate = connections_.find(*correlated);
+            if (candidate != connections_.end()) {
+                const bool snapshot_owned =
+                    candidate->second.origin == ConnectionObservationOrigin::SnapshotPreexisting ||
+                    candidate->second.origin ==
+                        ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss;
+                if (event.type == ConnectionLifecycleEventType::Close || snapshot_owned) {
+                    existing = candidate;
+                }
+            }
         }
         if (existing == connections_.end() && event.type == ConnectionLifecycleEventType::Close) {
             const auto reverse_key = correlation_key(
