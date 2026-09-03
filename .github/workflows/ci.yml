@@ -63,5 +63,9 @@ jobs:
         run: .\build-windows\Debug\neta-agent.exe capabilities
       - name: Windows NAP/1 CLI smoke
         shell: pwsh
-        run: .\build-windows\Debug\neta-agent.exe fleet status --state-dir "$env:RUNNER_TEMP\missing-neta-identity" 2>&1 | Out-String
-        continue-on-error: true
+        run: |
+          $output = & .\build-windows\Debug\neta-agent.exe fleet status --state-dir "$env:RUNNER_TEMP\missing-neta-identity" 2>&1 | Out-String
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 1) { throw "expected fleet status on missing identity to exit 1, got $exitCode" }
+          if ($output -notmatch 'cannot open .*identity\.conf') { throw "expected missing identity.conf error, got: $output" }
+          Write-Host "Expected missing-identity failure observed: exit=$exitCode"
