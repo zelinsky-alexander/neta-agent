@@ -232,8 +232,6 @@ int main() {
         close.type = neta::ConnectionLifecycleEventType::Close;
         close.timestamp_ns = 301;
 
-        // Deliver CONNECT and CLOSE in one lifecycle batch. Immediate enrichment
-        // must run when CONNECT is admitted, before CLOSE retires scheduler state.
         FakeLifecycleObserver lifecycle({connect, close}, {});
         auto syn_sent = socket(404, 41001, 443);
         syn_sent.transport.state = 2;
@@ -300,14 +298,16 @@ int main() {
         });
         assert(result.connection_ids.size() == 1);
         const auto samples = store.samples_for_connection(result.connection_ids.front());
-        assert(samples.size() == 2);
-        assert(samples.front().state == 2);
-        assert(samples.front().rtt_us == 0);
-        assert(samples.back().state == 1);
-        assert(samples.back().rtt_us == 1'250);
+        // With exact lifecycle active, the startup snapshot is staged only as a
+        // reconciliation candidate. Once CONNECT arrives, lifecycle owns the object;
+        // the next snapshot supplies the first transport sample without creating a
+        // competing pre-existing history record.
+        assert(samples.size() == 1);
+        assert(samples.front().state == 1);
+        assert(samples.front().rtt_us == 1'250);
 
         const auto target_samples = store.recent_samples_for_target("example.com", 443, 200);
-        assert(target_samples.size() == 2);
+        assert(target_samples.size() == 1);
         const auto rtt_samples = std::count_if(target_samples.begin(), target_samples.end(),
                                                [](const auto& sample) {
                                                    return sample.rtt_us != 0;
