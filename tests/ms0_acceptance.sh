@@ -11,7 +11,7 @@ if [[ ! -x "$BIN" ]]; then
     exit 2
 fi
 
-for command in openssl tc sed grep awk seq sleep sqlite3; do
+for command in openssl tc sed grep awk seq sleep sqlite3 mkfifo; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "MS0 acceptance: required command missing: $command" >&2
         exit 2
@@ -117,33 +117,50 @@ start_server() {
 run_observation() {
     local label="$1"
     local duration="${2:-6}"
-    local hold="${3:-4}"
 
-    # Establish the validated TLS socket before observation begins. The sparse
-    # transport sampler intentionally keeps the first meaningful row for a flow;
-    # starting observe before connect can therefore preserve the SYN-SENT row
-    # (tcp_state=2, rtt_us=0) even though the same socket later has valid RTT.
-    # Keeping stdin open with a sleeping process avoids application-data noise
-    # and the expected SIGPIPE/broken-pipe race from an active writer.
+    # Establish the validated TLS connection first and keep its stdin open for
+    # the entire observation. A FIFO held open by this shell avoids both EOF
+    # (which made s_client exit before observation) and active-writer SIGPIPE
+    # noise. This guarantees that the first sparse transport sample sees an
+    # already-established socket with handshake-derived RTT evidence.
+    local fifo="$TMP_DIR/$label.stdin"
+    mkfifo "$fifo"
+    exec {client_stdin_fd}<>"$fifo"
+
     openssl s_client -quiet \
         -connect "127.0.0.1:$PORT" \
         -servername localhost \
         -CAfile "$CA_CERT" \
         -verify_return_error \
         -verify_hostname localhost \
-        < <(sleep "$hold") \
+        <"$fifo" \
         >"$TMP_DIR/$label.client.log" 2>&1 &
     local client_pid=$!
 
-    # With the controlled loopback delay the TLS handshake completes well under
-    # this bound. Observation then sees an ESTABLISHED socket whose tcp_info has
-    # already incorporated handshake ACKs and therefore RTT evidence.
-    sleep 1
-    if ! kill -0 "$client_pid" >/dev/null 2>&1; then
+    # Wait for certificate verification to complete while also ensuring the
+    # client remains alive. Do not start the observer on a merely-created TCP
+    # socket: the MS0 baseline needs the established post-handshake tcp_info.
+    local established=0
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$client_pid" >/dev/null 2>&1; then
+            break
+        fi
+        if grep -q "verify return:1" "$TMP_DIR/$label.client.log" 2>/dev/null; then
+            established=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ $established -ne 1 ]]; then
+        exec {client_stdin_fd}>&-
         wait "$client_pid" || true
         cat "$TMP_DIR/$label.client.log" >&2 || true
-        fail "TLS client exited before observation in $label"
+        fail "TLS client did not remain established before observation in $label"
     fi
+
+    # Give tcp_info one scheduler tick after handshake completion before taking
+    # the first sparse sample.
+    sleep 0.2
 
     "$BIN" observe \
         --target "$TARGET" \
@@ -154,15 +171,20 @@ run_observation() {
         >"$TMP_DIR/$label.observe.log" 2>&1 &
     local observer_pid=$!
 
+    if ! wait "$observer_pid"; then
+        exec {client_stdin_fd}>&-
+        wait "$client_pid" || true
+        cat "$TMP_DIR/$label.observe.log" >&2 || true
+        fail "neta-agent observe failed in $label"
+    fi
+
+    # Observation is complete; closing the held FIFO descriptor now delivers
+    # EOF to s_client and lets it terminate normally.
+    exec {client_stdin_fd}>&-
     if ! wait "$client_pid"; then
         cat "$TMP_DIR/$label.client.log" >&2 || true
         cat "$TMP_DIR/$label.observe.log" >&2 || true
         fail "validated TLS client failed in $label"
-    fi
-
-    if ! wait "$observer_pid"; then
-        cat "$TMP_DIR/$label.observe.log" >&2 || true
-        fail "neta-agent observe failed in $label"
     fi
 }
 
