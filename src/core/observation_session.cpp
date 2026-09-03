@@ -232,12 +232,6 @@ ObservationRunResult ObservationSession::run(
                     store_.add_tls_session_evidence(connection_id, *correlation.evidence);
                     ++result.tls_session_evidence_attached;
 
-                    // A CLOSE event can race the application-shim datagram. If the
-                    // connection is still in its bounded completion grace period,
-                    // make it eligible for immediate finalization now that exact TLS
-                    // evidence is durable. If an unusually late TLS event arrives
-                    // after the callback already ran, re-queue that connection once
-                    // so its verdict/reporting can be refreshed with the new evidence.
                     const auto now = std::chrono::steady_clock::now();
                     if (const auto pending = pending_completed_connections.find(connection_id);
                         pending != pending_completed_connections.end()) {
@@ -350,13 +344,14 @@ ObservationRunResult ObservationSession::run(
         std::unordered_set<std::string> candidates_seen;
 
         for (const auto& socket : socket_observer_.snapshot()) {
-            const auto process = process_resolver_.resolve(socket);
+            std::optional<ProcessIdentity> process;
+            if (result.lifecycle_events_active || admission_policy_.has_process_filters()) {
+                process = process_resolver_.resolve(socket);
+            }
             const std::optional<std::string> process_name = process
                 ? std::optional<std::string>{process->comm} : std::nullopt;
 
             if (result.lifecycle_events_active) {
-                // ETW owns lifetime/direction. A snapshot first gets an opportunity to enrich an
-                // ETW-created connection and is never allowed to create a competing object here.
                 if (const auto enrichment = tracker.observe_socket(
                         socket, ConnectionDirection::Unknown, false)) {
                     pending_snapshot_candidates.erase(snapshot_tuple_key(socket, process));
@@ -479,9 +474,6 @@ ObservationRunResult ObservationSession::run(
     drain_name_resolution();
     drain_tls_sessions();
 
-    // ETW is already running before ObservationSession::run(). Take one snapshot after it starts
-    // and stage unmatched sockets as pre-existing. The grace window prevents snapshot-before-ETW
-    // races from creating duplicate history objects.
     if (result.lifecycle_events_active) {
         sample_transport(true);
         scheduler.transport_sampled(std::chrono::steady_clock::now());
