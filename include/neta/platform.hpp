@@ -1,5 +1,6 @@
 #pragma once
 
+#include "neta/platform_compat.hpp"
 #include "neta/host_network_environment.hpp"
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
@@ -23,6 +24,11 @@ struct PlatformCapabilities {
     bool tcp_cwnd{false};
     bool route_observation{false};
     bool connection_lifecycle_events{false};
+    bool lifecycle_connect_events{false};
+    bool lifecycle_accept_events{false};
+    bool lifecycle_close_events{false};
+    std::string lifecycle_source;
+    // Linux-specific implementation detail retained for existing diagnostics/tests.
     bool ebpf_connect_events{false};
     bool ebpf_accept_events{false};
     bool ebpf_close_events{false};
@@ -59,6 +65,12 @@ class ProcessResolver {
 public:
     virtual ~ProcessResolver() = default;
     virtual std::optional<ProcessIdentity> resolve(std::uint64_t socket_inode) = 0;
+
+    // Platforms that receive process ownership directly with the socket observation
+    // can override this without inventing Linux-specific inode identities.
+    virtual std::optional<ProcessIdentity> resolve(const SocketObservation& socket) {
+        return resolve(socket.socket_inode);
+    }
 };
 
 class RouteObserver {

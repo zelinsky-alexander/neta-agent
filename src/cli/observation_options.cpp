@@ -1,7 +1,16 @@
 #include "neta/cli/observation_options.hpp"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
+#endif
 
 #include <limits>
 #include <stdexcept>
@@ -9,9 +18,30 @@
 namespace neta::cli {
 namespace {
 
+#ifdef _WIN32
+class WinsockGuard {
+public:
+    WinsockGuard() {
+        WSADATA data{};
+        const int rc = WSAStartup(MAKEWORD(2, 2), &data);
+        if (rc != 0) throw std::runtime_error("WSAStartup failed: " + std::to_string(rc));
+        active_ = true;
+    }
+    ~WinsockGuard() {
+        if (active_) WSACleanup();
+    }
+
+    WinsockGuard(const WinsockGuard&) = delete;
+    WinsockGuard& operator=(const WinsockGuard&) = delete;
+
+private:
+    bool active_{false};
+};
+#endif
+
 std::uint16_t parse_port(const std::string& value, const char* option) {
     const auto parsed = std::stoul(value);
-    if (parsed == 0 || parsed > std::numeric_limits<std::uint16_t>::max()) {
+    if (parsed == 0 || parsed > (std::numeric_limits<std::uint16_t>::max)()) {
         throw std::runtime_error(std::string(option) + " requires a port in 1..65535");
     }
     return static_cast<std::uint16_t>(parsed);
@@ -29,6 +59,9 @@ ObservationTarget resolve_target_impl(const std::string& value) {
         target.port = parse_port(value.substr(separator + 1), "--target");
     }
 
+#ifdef _WIN32
+    WinsockGuard winsock;
+#endif
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -36,8 +69,13 @@ ObservationTarget resolve_target_impl(const std::string& value) {
     const auto service = std::to_string(target.port);
     const int result = ::getaddrinfo(target.host.c_str(), service.c_str(), &hints, &addresses);
     if (result != 0) {
+#ifdef _WIN32
+        throw std::runtime_error("target resolution failed with Winsock error " +
+                                 std::to_string(result));
+#else
         throw std::runtime_error("target resolution failed: " +
                                  std::string(::gai_strerror(result)));
+#endif
     }
     for (auto* current = addresses; current; current = current->ai_next) {
         char buffer[INET6_ADDRSTRLEN]{};
@@ -47,7 +85,12 @@ ObservationTarget resolve_target_impl(const std::string& value) {
         } else if (current->ai_family == AF_INET6) {
             address = &reinterpret_cast<sockaddr_in6*>(current->ai_addr)->sin6_addr;
         }
+#ifdef _WIN32
+        if (address && InetNtopA(current->ai_family, const_cast<void*>(address), buffer,
+                                 static_cast<DWORD>(sizeof(buffer)))) {
+#else
         if (address && ::inet_ntop(current->ai_family, address, buffer, sizeof(buffer))) {
+#endif
             target.addresses.insert(buffer);
         }
     }

@@ -13,7 +13,7 @@ namespace neta {
 enum class ConnectionLifecycleEventType { Connect, Accept, Close };
 enum class NetworkAddressFamily { Unknown, IPv4, IPv6 };
 enum class TransportProtocol { Unknown, Tcp };
-enum class LifecycleProvenance { EbpfCore, DeterministicTest };
+enum class LifecycleProvenance { EbpfCore, WindowsEtw, DeterministicTest };
 
 struct NetworkEndpoint {
     std::string address;
@@ -31,10 +31,10 @@ struct ProcessNamespaceIdentity {
 };
 
 struct LifecycleProcessContext {
-    // Only this identity is suitable for /proc lookup by the observing agent.
+    // Only this identity is suitable for process lookup by the observing agent.
     LifecycleProcessIds agent_visible;
-    // bpf_get_current_pid_tgid() provenance; it may name a different PID
-    // namespace (notably on WSL) and must not be used for /proc attribution.
+    // Kernel-provider process identity. On Linux this may be in a different PID namespace;
+    // on Windows ETW and agent-visible PIDs are the same host PID namespace.
     LifecycleProcessIds kernel;
     std::optional<ProcessNamespaceIdentity> agent_pid_namespace;
     std::optional<std::uint32_t> uid;
@@ -54,6 +54,9 @@ struct ConnectionLifecycleEvent {
     std::optional<NetworkEndpoint> local;
     std::optional<NetworkEndpoint> remote;
     std::optional<std::uint64_t> socket_cookie;
+    // Platform-native connection identity when the collector exposes one. This is not a
+    // Linux socket cookie and must not be persisted or described as one.
+    std::optional<std::uint64_t> platform_connection_id;
     std::optional<std::uint8_t> tcp_state;
 };
 
@@ -64,6 +67,7 @@ struct LifecycleCapability {
     bool accept_events{false};
     bool close_events{false};
     bool drop_counter{false};
+    std::string source;
     std::string unavailable_reason;
 
     [[nodiscard]] bool available() const noexcept {

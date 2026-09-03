@@ -9,7 +9,7 @@ std::optional<std::int64_t> begin_attributed_connection(
     const std::string& target_host) {
     if (!eligible_connection_seed(socket.endpoint_kind)) return std::nullopt;
 
-    const auto process = resolver.resolve(socket.socket_inode);
+    const auto process = resolver.resolve(socket);
     if (!process) return std::nullopt;
 
     return store.begin_connection(

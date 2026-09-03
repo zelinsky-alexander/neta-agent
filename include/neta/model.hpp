@@ -52,6 +52,7 @@ struct SocketObservation {
     std::uint64_t socket_cookie{0};
     std::uint64_t socket_inode{0};
     std::optional<std::uint64_t> network_namespace_inode;
+    std::optional<std::int64_t> owning_pid;
     std::uint32_t uid{0};
     std::string local_ip;
     std::uint16_t local_port{0};

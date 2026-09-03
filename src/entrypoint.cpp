@@ -1,9 +1,42 @@
 #include "neta/cli/fleet_command.hpp"
+#include "neta/platform.hpp"
 
 #include <iostream>
 #include <string>
 
 int neta_legacy_main(int argc, char** argv);
+
+#ifdef _WIN32
+namespace {
+int windows_capabilities() {
+    const auto env = neta::platform::host_environment();
+    const auto capabilities = neta::platform::capabilities();
+    std::cout << "Platform: " << env.os << ' ' << env.kernel_release << "\n\n"
+              << "Connection discovery       " << (capabilities.connection_discovery ? "YES" : "NO") << '\n'
+              << "Process attribution        " << (capabilities.process_attribution ? "YES" : "NO") << '\n'
+              << "TCP RTT                    " << (capabilities.tcp_rtt ? "YES" : "NO") << '\n'
+              << "TCP RTT variance           " << (capabilities.tcp_rtt_variance ? "YES" : "NO") << '\n'
+              << "TCP retransmissions        " << (capabilities.tcp_retransmissions ? "YES" : "NO") << '\n'
+              << "TCP cwnd                   " << (capabilities.tcp_cwnd ? "YES" : "NO") << '\n'
+              << "Route observation          " << (capabilities.route_observation ? "YES" : "NO") << '\n'
+              << "Lifecycle source           " << (capabilities.lifecycle_source.empty()
+                    ? "UNAVAILABLE" : capabilities.lifecycle_source) << '\n'
+              << "TCP connect events         " << (capabilities.lifecycle_connect_events ? "YES" : "NO") << '\n'
+              << "TCP accept events          " << (capabilities.lifecycle_accept_events ? "YES" : "NO") << '\n'
+              << "TCP close events           " << (capabilities.lifecycle_close_events ? "YES" : "NO") << '\n'
+              << "Exact lifecycle direction  " << (capabilities.exact_lifecycle_direction ? "YES" : "NO") << '\n'
+              << "Lifecycle loss counter     " << (capabilities.lifecycle_drop_counter ? "YES" : "NO") << '\n'
+              << "Lifecycle dropped events   " << (capabilities.lifecycle_dropped_events
+                    ? std::to_string(*capabilities.lifecycle_dropped_events) : "UNAVAILABLE") << '\n'
+              << "Application resolver API   " << (capabilities.application_name_resolution_events ? "YES" : "NO") << '\n'
+              << "Application TLS sessions   " << (capabilities.application_tls_session_events ? "YES" : "NO") << '\n';
+    if (!capabilities.connection_lifecycle_events) {
+        std::cout << "Lifecycle unavailable      " << capabilities.lifecycle_unavailable_reason << '\n';
+    }
+    return 0;
+}
+} // namespace
+#endif
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "fleet") {
@@ -15,6 +48,12 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+
+#ifdef _WIN32
+    if (argc >= 2 && std::string(argv[1]) == "capabilities") {
+        return windows_capabilities();
+    }
+#endif
 
     const int result = neta_legacy_main(argc, argv);
     if (argc < 2) {

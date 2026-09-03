@@ -53,6 +53,8 @@ public:
                           const std::string& lifecycle_state);
     [[nodiscard]] bool update_socket_cookie(std::int64_t connection_id,
                                             std::uint64_t socket_cookie);
+    [[nodiscard]] bool promote_connection_direction(std::int64_t connection_id,
+                                                    ConnectionDirection direction);
     std::int64_t add_tcp_sample(std::int64_t connection_id, const TcpSnapshot& sample);
     void add_lifecycle_event(std::int64_t connection_id,
                              const ConnectionLifecycleEvent& event);

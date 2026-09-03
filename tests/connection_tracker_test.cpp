@@ -229,16 +229,16 @@ void missing_close_is_reconciled_from_snapshots() {
         assert(admission);
         for (int miss = 0; miss < 2; ++miss) {
             tracker.begin_snapshot();
-            assert(tracker.end_snapshot(false).empty());
+            assert(tracker.end_snapshot(false, true).empty());
             assert(tracker.connections().size() == 1);
         }
         tracker.begin_snapshot();
-        const auto inactive = tracker.end_snapshot(false);
+        const auto inactive = tracker.end_snapshot(false, true);
         assert(inactive.size() == 1);
         assert(inactive.front() == admission->connection_id);
         assert(tracker.connections().empty());
         assert(store.connection(admission->connection_id)->lifecycle_state ==
-               "RECONCILED_ABSENT");
+               "RECONCILED_ABSENT_AFTER_LIFECYCLE_LOSS");
     }
     remove_database(path);
 }
