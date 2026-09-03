@@ -8,6 +8,7 @@
 #include "neta/tls_probe.hpp"
 #include "neta/verdict.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -24,6 +25,7 @@ namespace neta::cli {
 namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
+std::atomic_bool external_stop_requested{false};
 
 void handle_stop_signal(int) { stop_requested = 1; }
 
@@ -33,6 +35,7 @@ public:
         : previous_sigint_(std::signal(SIGINT, handle_stop_signal)),
           previous_sigterm_(std::signal(SIGTERM, handle_stop_signal)) {
         stop_requested = 0;
+        external_stop_requested.store(false, std::memory_order_relaxed);
     }
     ~SignalHandlers() {
         std::signal(SIGINT, previous_sigint_);
@@ -135,6 +138,10 @@ void log_reporting_result(const FleetReportingResult& reporting, const char* pre
 }
 
 } // namespace
+
+void request_observation_stop() noexcept {
+    external_stop_requested.store(true, std::memory_order_relaxed);
+}
 
 void run_observation_command(int argc, char** argv, bool service_mode) {
     const auto options = parse_observation_options(argc, argv, service_mode);
@@ -254,8 +261,13 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         }
     };
 
-    const auto result = session.run(options.duration, transport_interval,
-                                    [] { return stop_requested != 0; }, callbacks);
+    const auto result = session.run(
+        options.duration, transport_interval,
+        [] {
+            return stop_requested != 0 ||
+                   external_stop_requested.load(std::memory_order_relaxed);
+        },
+        callbacks);
     if (tls_probe.valid()) {
         try {
             tls = tls_probe.get();
