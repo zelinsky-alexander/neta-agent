@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <iostream>
 #include <thread>
@@ -360,6 +361,13 @@ void non_associated_socket_bio_does_not_emit_tls_evidence() {
 } // namespace
 
 int main() {
+    // TLS shutdown is deliberately concurrent in these loopback tests. If one side
+    // closes first, OpenSSL may attempt a close_notify write on the already-closed
+    // peer. Ignore SIGPIPE so the test observes SSL/BIO return values and assertions
+    // instead of being terminated by the kernel signal before instrumentation can
+    // be validated.
+    assert(std::signal(SIGPIPE, SIG_IGN) != SIG_ERR);
+
     actual_openssl_sessions_emit_exact_events();
     io_driven_handshake_emits_client_once();
     ssl_bio_driven_server_handshake_emits_once();
