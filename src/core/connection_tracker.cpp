@@ -274,10 +274,23 @@ void ConnectionTracker::persist_sample(TrackedConnection& tracked, const TcpSnap
 std::optional<ConnectionAdmission> ConnectionTracker::observe_socket(
     const SocketObservation& socket, ConnectionDirection direction,
     bool allow_new_connection, ConnectionObservationOrigin origin) {
-    const auto process = resolver_.resolve(socket);
     const auto canonical = identity_for(socket);
     auto identity = canonical;
     auto existing = connections_.find(identity);
+
+    // Linux SOCK_DIAG supplies a stable kernel socket cookie. Once that canonical
+    // identity is already tracked, sampling needs no process lookup or tuple
+    // reconciliation. This preserves the cheap 50ms transport-sampling path and
+    // avoids repeatedly walking /proc just to persist RTT/cwnd/retrans evidence.
+    if (existing != connections_.end() && valid_cookie(socket.socket_cookie)) {
+        persist_sample(existing->second, socket.transport);
+        if (existing->second.origin == ConnectionObservationOrigin::LifecycleExact) {
+            existing->second.origin = ConnectionObservationOrigin::LifecyclePlusSnapshot;
+        }
+        return ConnectionAdmission{existing->second.connection_id, false, false, false, direction};
+    }
+
+    const auto process = resolver_.resolve(socket);
     const auto key = correlation_key(tuple_for(socket), process, socket.owning_pid.has_value());
     const auto correlated = unique_active_correlation_match(key);
     if (existing != connections_.end() && correlated && *correlated != identity) {
