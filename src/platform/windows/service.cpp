@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -28,9 +29,9 @@ int service_exit_code = 0;
 
 std::filesystem::path program_data_root() {
     wchar_t buffer[32768]{};
-    const DWORD length = GetEnvironmentVariableW(L"ProgramData", buffer,
-                                                  static_cast<DWORD>(std::size(buffer)));
-    if (length != 0 && length < std::size(buffer)) {
+    constexpr DWORD buffer_count = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
+    const DWORD length = GetEnvironmentVariableW(L"ProgramData", buffer, buffer_count);
+    if (length != 0 && length < buffer_count) {
         return std::filesystem::path(buffer) / L"NETA";
     }
     return std::filesystem::path(L"C:\\ProgramData\\NETA");
