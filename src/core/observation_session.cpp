@@ -345,7 +345,13 @@ ObservationRunResult ObservationSession::run(
 
         for (const auto& socket : socket_observer_.snapshot()) {
             std::optional<ProcessIdentity> process;
-            if (result.lifecycle_events_active || admission_policy_.has_process_filters()) {
+            // Windows snapshots carry owning_pid and require PID/start identity for
+            // safe reconciliation across PID reuse. Linux SOCK_DIAG does not carry
+            // an owner PID here; resolving /proc on every lifecycle-active snapshot
+            // is both expensive and best-effort, and can make the same pending socket
+            // alternate between tuple-only and tuple+process keys. Only resolve Linux
+            // snapshots when a process filter actually requires the process name.
+            if (socket.owning_pid.has_value() || admission_policy_.has_process_filters()) {
                 process = process_resolver_.resolve(socket);
             }
             const std::optional<std::string> process_name = process
