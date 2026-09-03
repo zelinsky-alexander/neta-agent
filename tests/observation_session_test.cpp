@@ -105,9 +105,26 @@ public:
     }
 };
 
-class StaticProcessResolver final : public neta::platform::ProcessResolver {
+class CountingProcessResolver final : public neta::platform::ProcessResolver {
 public:
     std::optional<neta::ProcessIdentity> resolve(std::uint64_t) override {
+        ++inode_calls_;
+        return process();
+    }
+
+    std::optional<neta::ProcessIdentity> resolve(const neta::SocketObservation&) override {
+        ++snapshot_calls_;
+        // Deliberately unreliable to model a best-effort /proc lookup. Linux
+        // reconciliation without process filters must not depend on this path.
+        if ((snapshot_calls_ % 2U) == 0U) return std::nullopt;
+        return process();
+    }
+
+    std::size_t inode_calls() const noexcept { return inode_calls_; }
+    std::size_t snapshot_calls() const noexcept { return snapshot_calls_; }
+
+private:
+    static neta::ProcessIdentity process() {
         neta::ProcessIdentity process;
         process.pid = 777;
         process.uid = 1000;
@@ -115,6 +132,9 @@ public:
         process.comm = "preexisting-client";
         return process;
     }
+
+    std::size_t inode_calls_{0};
+    std::size_t snapshot_calls_{0};
 };
 
 class FakeRouteObserver final : public neta::platform::RouteObserver {
@@ -334,7 +354,8 @@ int main() {
         // A socket that already exists when exact lifecycle collection starts has no
         // CONNECT event in this session. The startup snapshot stages it for the
         // reconciliation grace period, and the pending candidate itself must keep
-        // transport polling alive until that grace elapses.
+        // transport polling alive until that grace elapses. Linux must not make the
+        // candidate key depend on best-effort snapshot /proc resolution.
         FakeLifecycleObserver lifecycle({}, {});
         auto first = socket(606, 43001, 443);
         first.transport.observed_ns = 1'000'000'000ULL;
@@ -343,7 +364,7 @@ int main() {
         after_grace.transport.observed_ns = 1'300'000'000ULL;
         after_grace.transport.rtt_us = 2'250;
         ScriptedSocketObserver sockets({{first}, {after_grace}});
-        StaticProcessResolver processes;
+        CountingProcessResolver processes;
         FakeRouteObserver routes;
         neta::HistoryStore store(path);
         neta::AdmissionPolicyConfig config;
@@ -361,6 +382,11 @@ int main() {
         assert(sockets.snapshot_count() >= 2);
         assert(result.admitted_connections == 1);
         assert(result.connection_ids.size() == 1);
+        // No owner PID and no process filter: candidate staging must never invoke
+        // the SocketObservation process-resolution path. The inode lookup is deferred
+        // until the candidate is actually admitted.
+        assert(processes.snapshot_calls() == 0);
+        assert(processes.inode_calls() == 1);
         const auto connection = store.connection(result.connection_ids.front());
         assert(connection);
         assert(connection->socket_cookie == 606);
