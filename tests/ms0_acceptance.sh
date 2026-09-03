@@ -119,6 +119,32 @@ run_observation() {
     local duration="${2:-6}"
     local hold="${3:-4}"
 
+    # Establish the validated TLS socket before observation begins. The sparse
+    # transport sampler intentionally keeps the first meaningful row for a flow;
+    # starting observe before connect can therefore preserve the SYN-SENT row
+    # (tcp_state=2, rtt_us=0) even though the same socket later has valid RTT.
+    # Keeping stdin open with a sleeping process avoids application-data noise
+    # and the expected SIGPIPE/broken-pipe race from an active writer.
+    openssl s_client -quiet \
+        -connect "127.0.0.1:$PORT" \
+        -servername localhost \
+        -CAfile "$CA_CERT" \
+        -verify_return_error \
+        -verify_hostname localhost \
+        < <(sleep "$hold") \
+        >"$TMP_DIR/$label.client.log" 2>&1 &
+    local client_pid=$!
+
+    # With the controlled loopback delay the TLS handshake completes well under
+    # this bound. Observation then sees an ESTABLISHED socket whose tcp_info has
+    # already incorporated handshake ACKs and therefore RTT evidence.
+    sleep 1
+    if ! kill -0 "$client_pid" >/dev/null 2>&1; then
+        wait "$client_pid" || true
+        cat "$TMP_DIR/$label.client.log" >&2 || true
+        fail "TLS client exited before observation in $label"
+    fi
+
     "$BIN" observe \
         --target "$TARGET" \
         --duration "$duration" \
@@ -128,22 +154,10 @@ run_observation() {
         >"$TMP_DIR/$label.observe.log" 2>&1 &
     local observer_pid=$!
 
-    # Keep a validated TLS socket active while the polling observer samples it.
-    # Handshake-only loopback traffic can leave tcpi_rtt at zero on some hosted
-    # kernels, so send small application records throughout the hold interval to
-    # force DATA/ACK exchanges and deterministic tcp_info RTT evidence.
-    sleep 1
-    local bursts=$((hold * 5))
-    if ! { for _ in $(seq 1 "$bursts"); do printf 'neta-ms0-ping\n'; sleep 0.2; done; } | openssl s_client -quiet \
-        -connect "127.0.0.1:$PORT" \
-        -servername localhost \
-        -CAfile "$CA_CERT" \
-        -verify_return_error \
-        -verify_hostname localhost \
-        >"$TMP_DIR/$label.client.log" 2>&1; then
+    if ! wait "$client_pid"; then
         cat "$TMP_DIR/$label.client.log" >&2 || true
         cat "$TMP_DIR/$label.observe.log" >&2 || true
-        fail "active TLS client failed in $label"
+        fail "validated TLS client failed in $label"
     fi
 
     if ! wait "$observer_pid"; then
@@ -200,8 +214,8 @@ while :; do
         break
     fi
     # Keep the 5-sample baseline requirement and additionally require real RTT
-    # evidence before invoking baseline capture. Repeating the controlled active
-    # flow is preferable to accepting a zero-RTT baseline.
+    # evidence before invoking baseline capture. Repeating the controlled flow
+    # is preferable to accepting a zero-RTT baseline.
     if (( baseline_attempt >= 5 )); then
         dump_transport_samples
         cat "$TMP_DIR/baseline-a-$baseline_attempt.observe.log" >&2 || true
