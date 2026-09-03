@@ -4,6 +4,7 @@
 #include "neta/lifecycle.hpp"
 #include "neta/model.hpp"
 #include "neta/name_resolution.hpp"
+#include "neta/process_exec.hpp"
 #include "neta/tls_session.hpp"
 
 #include <cstdint>
@@ -74,6 +75,7 @@ PlatformCapabilities capabilities();
 
 std::unique_ptr<ConnectionObserver> make_connection_observer();
 std::unique_ptr<LifecycleObserver> make_lifecycle_observer();
+std::unique_ptr<ProcessExecObserver> make_process_exec_observer();
 std::unique_ptr<NameResolutionObserver> make_name_resolution_observer();
 std::unique_ptr<TlsSessionObserver> make_tls_session_observer();
 std::unique_ptr<ProcessResolver> make_process_resolver();
