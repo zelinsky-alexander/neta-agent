@@ -69,3 +69,4 @@ jobs:
           if ($exitCode -ne 1) { throw "expected fleet status on missing identity to exit 1, got $exitCode" }
           if ($output -notmatch 'cannot open .*identity\.conf') { throw "expected missing identity.conf error, got: $output" }
           Write-Host "Expected missing-identity failure observed: exit=$exitCode"
+          exit 0
