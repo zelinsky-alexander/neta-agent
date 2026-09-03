@@ -87,6 +87,7 @@ set(NETA_PLATFORM_SOURCES
     src/platform/linux/yara_x_provider.cpp
     src/platform/linux/ebpf/lifecycle_decoder.cpp
     src/platform/linux/ebpf/name_resolution_decoder.cpp
+    src/platform/linux/ebpf/process_exec_decoder.cpp
     src/platform/linux/tls_session_decoder.cpp
     src/platform/linux/tls_session_observer.cpp
 )
@@ -157,17 +158,46 @@ if(NETA_HAVE_EBPF)
         VERBATIM
     )
 
+    set(NETA_PROCESS_EXEC_BPF_OBJECT "${NETA_GENERATED_DIR}/process_exec.bpf.o")
+    set(NETA_PROCESS_EXEC_BPF_BYTES "${NETA_GENERATED_DIR}/process_exec_bpf_bytes.inc")
+    add_custom_command(
+        OUTPUT "${NETA_PROCESS_EXEC_BPF_OBJECT}"
+        COMMAND "${NETA_CLANG_EXECUTABLE}" -g -O2 -target bpf
+                "-fdebug-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=."
+                -D__TARGET_ARCH_${NETA_BPF_ARCH} ${NETA_BPF_INCLUDE_ARGS}
+                -c "${NETA_BPF_DIR}/process_exec.bpf.c"
+                -o "${NETA_PROCESS_EXEC_BPF_OBJECT}"
+        DEPENDS
+            "${NETA_BPF_DIR}/process_exec.bpf.c"
+            "${NETA_BPF_DIR}/process_exec_wire.h"
+            "${NETA_BPF_DIR}/vmlinux_min.h"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${NETA_PROCESS_EXEC_BPF_BYTES}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${NETA_PROCESS_EXEC_BPF_OBJECT}"
+                "-DOUTPUT=${NETA_PROCESS_EXEC_BPF_BYTES}" "-DSYMBOL=ProcessExec"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS "${NETA_PROCESS_EXEC_BPF_OBJECT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        VERBATIM
+    )
+
     set_source_files_properties(src/platform/linux/ebpf/lifecycle_loader.cpp
         PROPERTIES OBJECT_DEPENDS "${NETA_LIFECYCLE_BPF_BYTES}")
     set_source_files_properties(src/platform/linux/ebpf/name_resolution_loader.cpp
         PROPERTIES OBJECT_DEPENDS "${NETA_NAME_RESOLUTION_BPF_BYTES}")
+    set_source_files_properties(src/platform/linux/ebpf/process_exec_loader.cpp
+        PROPERTIES OBJECT_DEPENDS "${NETA_PROCESS_EXEC_BPF_BYTES}")
     list(APPEND NETA_PLATFORM_SOURCES
          src/platform/linux/ebpf/lifecycle_loader.cpp
-         src/platform/linux/ebpf/name_resolution_loader.cpp)
+         src/platform/linux/ebpf/name_resolution_loader.cpp
+         src/platform/linux/ebpf/process_exec_loader.cpp)
 else()
     list(APPEND NETA_PLATFORM_SOURCES
          src/platform/linux/ebpf/lifecycle_loader_stub.cpp
-         src/platform/linux/ebpf/name_resolution_loader_stub.cpp)
+         src/platform/linux/ebpf/name_resolution_loader_stub.cpp
+         src/platform/linux/ebpf/process_exec_loader_stub.cpp)
 endif()
 
 add_library(neta_core
@@ -180,6 +210,7 @@ add_library(neta_core
     src/core/lifecycle.cpp
     src/core/crypto.cpp
     src/core/antimalware.cpp
+    src/core/exec_antimalware_monitor.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/fleet_client.cpp
@@ -256,6 +287,20 @@ if(NETA_ENABLE_TESTS)
     target_compile_options(neta_antimalware_provider_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME neta_antimalware_provider_test COMMAND neta_antimalware_provider_test)
+
+    add_executable(neta_yara_exec_trigger_target tests/yara_exec_trigger_target.cpp)
+    target_compile_options(neta_yara_exec_trigger_target PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+
+    add_executable(neta_yara_exec_trigger_integration tests/yara_exec_trigger_integration.cpp)
+    target_link_libraries(neta_yara_exec_trigger_integration PRIVATE neta_core)
+    target_compile_options(neta_yara_exec_trigger_integration PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_yara_exec_trigger_integration
+        COMMAND neta_yara_exec_trigger_integration
+            $<TARGET_FILE:neta_yara_exec_trigger_target>
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/yara_exec_trigger.yar)
+    set_tests_properties(neta_yara_exec_trigger_integration PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(neta_ms0_tests tests/ms0_tests.cpp)
     target_link_libraries(neta_ms0_tests PRIVATE neta_core)
