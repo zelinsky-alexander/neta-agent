@@ -278,11 +278,14 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_socket(
     auto identity = canonical;
     auto existing = connections_.find(identity);
 
-    // Linux SOCK_DIAG supplies a stable kernel socket cookie. Once that canonical
-    // identity is already tracked, sampling needs no process lookup or tuple
-    // reconciliation. This preserves the cheap 50ms transport-sampling path and
-    // avoids repeatedly walking /proc just to persist RTT/cwnd/retrans evidence.
-    if (existing != connections_.end() && valid_cookie(socket.socket_cookie)) {
+    // Linux SOCK_DIAG supplies a stable kernel socket cookie. If that canonical
+    // identity is already tracked and the tuple maps back to the same connection,
+    // sampling needs no process lookup. The tuple check preserves collision safety
+    // while keeping the 50ms RTT/cwnd/retrans sampling path cheap.
+    if (existing != connections_.end() && valid_cookie(socket.socket_cookie) &&
+        !socket.owning_pid.has_value()) {
+        const auto tuple_match = unique_active_correlation_match(tuple_for(socket));
+        if (tuple_match && *tuple_match != identity) return std::nullopt;
         persist_sample(existing->second, socket.transport);
         if (existing->second.origin == ConnectionObservationOrigin::LifecycleExact) {
             existing->second.origin = ConnectionObservationOrigin::LifecyclePlusSnapshot;
