@@ -278,23 +278,58 @@ std::optional<ConnectionAdmission> ConnectionTracker::observe_socket(
     auto identity = canonical;
     auto existing = connections_.find(identity);
 
-    // Linux SOCK_DIAG supplies a stable kernel socket cookie. If that canonical
-    // identity is already tracked and the tuple maps back to the same connection,
-    // sampling needs no process lookup. The tuple check preserves collision safety
-    // while keeping the 50ms RTT/cwnd/retrans sampling path cheap.
-    if (existing != connections_.end() && valid_cookie(socket.socket_cookie) &&
-        !socket.owning_pid.has_value()) {
+    // Linux SOCK_DIAG does not supply owning_pid. Keep its polling correlation
+    // behavior identical to the proven main-branch path: correlate by tuple first,
+    // promote to the stable socket cookie when possible, and only resolve /proc for
+    // a genuinely new connection. This preserves repeated tcp_info RTT sampling.
+    if (!socket.owning_pid.has_value()) {
         const auto tuple_match = unique_active_correlation_match(tuple_for(socket));
-        if (tuple_match && *tuple_match != identity) return std::nullopt;
-        persist_sample(existing->second, socket.transport);
-        if (existing->second.origin == ConnectionObservationOrigin::LifecycleExact) {
-            existing->second.origin = ConnectionObservationOrigin::LifecyclePlusSnapshot;
+        if (existing != connections_.end() && tuple_match && *tuple_match != identity) {
+            return std::nullopt;
         }
-        return ConnectionAdmission{existing->second.connection_id, false, false, false, direction};
+        if (existing == connections_.end() && tuple_match) {
+            identity = *tuple_match;
+            if (valid_cookie(socket.socket_cookie) && identity != canonical) {
+                if (!promote_socket_cookie_identity(identity, canonical, socket.socket_cookie)) {
+                    return std::nullopt;
+                }
+                identity = canonical;
+            }
+            existing = connections_.find(identity);
+        }
+        if (existing != connections_.end()) {
+            persist_sample(existing->second, socket.transport);
+            if (existing->second.origin == ConnectionObservationOrigin::LifecycleExact) {
+                existing->second.origin = ConnectionObservationOrigin::LifecyclePlusSnapshot;
+            }
+            return ConnectionAdmission{existing->second.connection_id, false, false, false, direction};
+        }
+        if (!allow_new_connection) return std::nullopt;
+        if (!eligible_connection_seed(socket.endpoint_kind)) return std::nullopt;
+        const auto process = resolver_.resolve(socket.socket_inode);
+        if (!process) return std::nullopt;
+        const auto id = store_.begin_connection(socket, process, target_host_,
+                                                socket.transport.observed_ns, direction);
+        TrackedConnection tracked{id, socket.transport, socket.transport,
+                                  socket.transport.observed_ns, true, true, 0,
+                                  process->pid, process->start_ticks, origin};
+        store_.add_tcp_sample(id, socket.transport);
+        if (origin == ConnectionObservationOrigin::SnapshotPreexisting) {
+            store_.touch_connection(id, socket.transport.observed_ns, "PREEXISTING");
+        } else if (origin == ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss) {
+            store_.touch_connection(id, socket.transport.observed_ns,
+                                    "RECONCILED_AFTER_LIFECYCLE_LOSS");
+        }
+        connections_.emplace(identity, tracked);
+        index_correlation(tuple_for(socket), identity);
+        return ConnectionAdmission{id, true, false, false, direction};
     }
 
+    // Windows snapshot observations carry owner PID. Resolve the process identity
+    // so tuple correlation also includes the process creation identity and remains
+    // safe across PID reuse.
     const auto process = resolver_.resolve(socket);
-    const auto key = correlation_key(tuple_for(socket), process, socket.owning_pid.has_value());
+    const auto key = correlation_key(tuple_for(socket), process, true);
     const auto correlated = unique_active_correlation_match(key);
     if (existing != connections_.end() && correlated && *correlated != identity) {
         return std::nullopt;
