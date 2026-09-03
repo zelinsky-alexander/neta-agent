@@ -187,7 +187,10 @@ while :; do
     if (( samples >= 5 )); then
         break
     fi
-    if (( baseline_attempt >= 4 )); then
+    # Lifecycle-owned sparse persistence can legitimately contribute only one
+    # meaningful transport row per controlled observation. Keep the 5-sample
+    # baseline requirement and allow enough observations to satisfy it.
+    if (( baseline_attempt >= 5 )); then
         fail "baseline setup persisted only $samples samples after $baseline_attempt observations"
     fi
     baseline_attempt=$((baseline_attempt + 1))
