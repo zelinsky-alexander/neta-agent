@@ -18,6 +18,11 @@ set_property(CACHE NETA_EBPF PROPERTY STRINGS AUTO ON OFF)
 if(NOT NETA_EBPF MATCHES "^(AUTO|ON|OFF)$")
     message(FATAL_ERROR "NETA_EBPF must be AUTO, ON, or OFF")
 endif()
+set(NETA_YARA_X "AUTO" CACHE STRING "Build YARA-X antimalware provider: AUTO, ON, or OFF")
+set_property(CACHE NETA_YARA_X PROPERTY STRINGS AUTO ON OFF)
+if(NOT NETA_YARA_X MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "NETA_YARA_X must be AUTO, ON, or OFF")
+endif()
 
 if(NETA_STATIC_DEPS)
     set(OPENSSL_USE_STATIC_LIBS TRUE)
@@ -26,10 +31,25 @@ endif()
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
+find_package(PkgConfig QUIET)
+
+set(NETA_HAVE_YARA_X FALSE)
+if(NOT NETA_YARA_X STREQUAL "OFF")
+    if(PkgConfig_FOUND)
+        pkg_check_modules(YARA_X QUIET IMPORTED_TARGET yara_x_capi)
+    endif()
+    if(YARA_X_FOUND)
+        set(NETA_HAVE_YARA_X TRUE)
+        message(STATUS "YARA-X provider enabled (${YARA_X_VERSION})")
+    elseif(NETA_YARA_X STREQUAL "ON")
+        message(FATAL_ERROR "NETA_YARA_X=ON requires the yara_x_capi pkg-config package")
+    else()
+        message(STATUS "YARA-X C API unavailable; building provider as unsupported stub")
+    endif()
+endif()
 
 set(NETA_HAVE_EBPF FALSE)
 if(NOT NETA_EBPF STREQUAL "OFF")
-    find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(LIBBPF QUIET IMPORTED_TARGET libbpf)
     endif()
@@ -64,6 +84,7 @@ set(NETA_PLATFORM_SOURCES
     src/platform/linux/socket_diag.cpp
     src/platform/linux/process_resolver.cpp
     src/platform/linux/route_observer.cpp
+    src/platform/linux/yara_x_provider.cpp
     src/platform/linux/ebpf/lifecycle_decoder.cpp
     src/platform/linux/ebpf/name_resolution_decoder.cpp
     src/platform/linux/tls_session_decoder.cpp
@@ -158,6 +179,7 @@ add_library(neta_core
     src/core/tcp_state.cpp
     src/core/lifecycle.cpp
     src/core/crypto.cpp
+    src/core/antimalware.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     src/core/fleet_client.cpp
@@ -182,6 +204,12 @@ add_library(neta_core
 
 target_include_directories(neta_core PUBLIC include PRIVATE src/platform/linux src/platform/linux/ebpf)
 target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3 ${CMAKE_DL_LIBS})
+if(NETA_HAVE_YARA_X)
+    target_compile_definitions(neta_core PRIVATE
+        NETA_HAVE_YARA_X=1
+        "NETA_YARA_X_VERSION=\"${YARA_X_VERSION}\"")
+    target_link_libraries(neta_core PRIVATE PkgConfig::YARA_X)
+endif()
 if(NETA_HAVE_EBPF)
     target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
     target_link_libraries(neta_core PRIVATE PkgConfig::LIBBPF)
@@ -222,6 +250,12 @@ if(NETA_ENABLE_TESTS)
     target_include_directories(neta_tests PRIVATE src/platform/linux/ebpf)
     target_compile_options(neta_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME neta_tests COMMAND neta_tests)
+
+    add_executable(neta_antimalware_provider_test tests/antimalware_provider_test.cpp)
+    target_link_libraries(neta_antimalware_provider_test PRIVATE neta_core)
+    target_compile_options(neta_antimalware_provider_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME neta_antimalware_provider_test COMMAND neta_antimalware_provider_test)
 
     add_executable(neta_ms0_tests tests/ms0_tests.cpp)
     target_link_libraries(neta_ms0_tests PRIVATE neta_core)
