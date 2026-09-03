@@ -11,7 +11,7 @@ if [[ ! -x "$BIN" ]]; then
     exit 2
 fi
 
-for command in openssl tc sed grep awk seq sleep; do
+for command in openssl tc sed grep awk seq sleep sqlite3; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "MS0 acceptance: required command missing: $command" >&2
         exit 2
@@ -128,11 +128,13 @@ run_observation() {
         >"$TMP_DIR/$label.observe.log" 2>&1 &
     local observer_pid=$!
 
-    # Keep a real validated TLS client socket open while the polling observer
-    # samples it. Baseline setup may repeat observations until the unchanged
-    # sparse sampler has actually persisted the required 5+ rows.
+    # Keep a validated TLS socket active while the polling observer samples it.
+    # Handshake-only loopback traffic can leave tcpi_rtt at zero on some hosted
+    # kernels, so send small application records throughout the hold interval to
+    # force DATA/ACK exchanges and deterministic tcp_info RTT evidence.
     sleep 1
-    if ! sleep "$hold" | openssl s_client -quiet \
+    local bursts=$((hold * 5))
+    if ! { for _ in $(seq 1 "$bursts"); do printf 'neta-ms0-ping\n'; sleep 0.2; done; } | openssl s_client -quiet \
         -connect "127.0.0.1:$PORT" \
         -servername localhost \
         -CAfile "$CA_CERT" \
@@ -141,7 +143,7 @@ run_observation() {
         >"$TMP_DIR/$label.client.log" 2>&1; then
         cat "$TMP_DIR/$label.client.log" >&2 || true
         cat "$TMP_DIR/$label.observe.log" >&2 || true
-        fail "long-lived TLS client failed in $label"
+        fail "active TLS client failed in $label"
     fi
 
     if ! wait "$observer_pid"; then
@@ -158,6 +160,15 @@ latest_id() {
 sample_count() {
     "$BIN" storage status --db "$DB" \
         | sed -n 's/^Transport samples: \([0-9][0-9]*\)$/\1/p'
+}
+
+rtt_sample_count() {
+    sqlite3 "$DB" "SELECT COUNT(*) FROM transport_samples s JOIN connections c ON c.id=s.connection_id WHERE c.target_host='localhost' AND c.remote_port=$PORT AND s.rtt_us>0;"
+}
+
+dump_transport_samples() {
+    echo "MS0 transport sample diagnostics:" >&2
+    sqlite3 -header -column "$DB" "SELECT c.id AS conn_id,c.lifecycle_state,s.tcp_state,s.rtt_us,s.rttvar_us,s.total_retrans,s.snd_cwnd,s.observed_ns FROM transport_samples s JOIN connections c ON c.id=s.connection_id WHERE c.target_host='localhost' AND c.remote_port=$PORT ORDER BY s.observed_ns;" >&2 || true
 }
 
 assert_replay_matches() {
@@ -183,15 +194,18 @@ baseline_attempt=1
 while :; do
     run_observation "baseline-a-$baseline_attempt"
     samples="$(sample_count)"
-    [[ -n "$samples" ]] || fail "could not read persisted sample count"
-    if (( samples >= 5 )); then
+    rtt_samples="$(rtt_sample_count)"
+    [[ -n "$samples" && -n "$rtt_samples" ]] || fail "could not read persisted sample counts"
+    if (( samples >= 5 && rtt_samples >= 1 )); then
         break
     fi
-    # Lifecycle-owned sparse persistence can legitimately contribute only one
-    # meaningful transport row per controlled observation. Keep the 5-sample
-    # baseline requirement and allow enough observations to satisfy it.
+    # Keep the 5-sample baseline requirement and additionally require real RTT
+    # evidence before invoking baseline capture. Repeating the controlled active
+    # flow is preferable to accepting a zero-RTT baseline.
     if (( baseline_attempt >= 5 )); then
-        fail "baseline setup persisted only $samples samples after $baseline_attempt observations"
+        dump_transport_samples
+        cat "$TMP_DIR/baseline-a-$baseline_attempt.observe.log" >&2 || true
+        fail "baseline setup persisted $samples samples but only $rtt_samples RTT-bearing samples after $baseline_attempt observations"
     fi
     baseline_attempt=$((baseline_attempt + 1))
 done
@@ -242,6 +256,7 @@ echo "MS0 acceptance PASS"
 echo "  cert A SPKI: $spki_a"
 echo "  cert B SPKI: $spki_b"
 echo "  baseline samples: $(sample_count)"
+echo "  RTT-bearing samples: $(rtt_sample_count)"
 echo "  NORMAL / CHANGED: CONN-$changed_id"
 echo "  DEGRADED / CHANGED: CONN-$combined_id"
 echo "  replay: MATCH / MATCH / MATCH for both cases"
