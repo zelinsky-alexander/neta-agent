@@ -105,7 +105,9 @@ ObservationRunResult ObservationSession::run(
         tls_session_observer_->capability().available();
 
     std::set<std::int64_t> connection_ids;
-    std::set<std::int64_t> pending_completed_connections;
+    constexpr auto completion_evidence_grace = std::chrono::milliseconds(350);
+    std::unordered_map<std::int64_t, std::chrono::steady_clock::time_point>
+        pending_completed_connections;
     std::set<std::int64_t> dispatched_completed_connections;
     struct RouteRequest {
         std::string remote_address;
@@ -226,9 +228,23 @@ ObservationRunResult ObservationSession::run(
                 correlation.connection_id && correlation.evidence) {
                 const auto key = tls_session_identity_key(correlation.evidence->observation);
                 if (attached_tls_session_keys.insert(key).second) {
-                    store_.add_tls_session_evidence(*correlation.connection_id,
-                                                    *correlation.evidence);
+                    const auto connection_id = *correlation.connection_id;
+                    store_.add_tls_session_evidence(connection_id, *correlation.evidence);
                     ++result.tls_session_evidence_attached;
+
+                    // A CLOSE event can race the application-shim datagram. If the
+                    // connection is still in its bounded completion grace period,
+                    // make it eligible for immediate finalization now that exact TLS
+                    // evidence is durable. If an unusually late TLS event arrives
+                    // after the callback already ran, re-queue that connection once
+                    // so its verdict/reporting can be refreshed with the new evidence.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (const auto pending = pending_completed_connections.find(connection_id);
+                        pending != pending_completed_connections.end()) {
+                        pending->second = now;
+                    } else if (dispatched_completed_connections.erase(connection_id) != 0) {
+                        pending_completed_connections.emplace(connection_id, now);
+                    }
                 }
                 continue;
             }
@@ -257,17 +273,40 @@ ObservationRunResult ObservationSession::run(
         correlate_tls_sessions();
     };
 
-    const auto dispatch_completed = [&] {
+    const auto dispatch_completed = [&](bool force = false) {
         if (!callbacks.connection_completed) {
             pending_completed_connections.clear();
             return;
         }
-        for (const auto connection_id : pending_completed_connections) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = pending_completed_connections.begin();
+             it != pending_completed_connections.end();) {
+            if (!force && it->second > now) {
+                ++it;
+                continue;
+            }
+            const auto connection_id = it->first;
+            it = pending_completed_connections.erase(it);
             if (dispatched_completed_connections.insert(connection_id).second) {
                 callbacks.connection_completed(connection_id);
             }
         }
-        pending_completed_connections.clear();
+    };
+
+    const auto completion_wait_time = [&](std::chrono::steady_clock::time_point now) {
+        auto wait = std::chrono::milliseconds::max();
+        for (const auto& [connection_id, due] : pending_completed_connections) {
+            static_cast<void>(connection_id);
+            if (due <= now) return std::chrono::milliseconds(0);
+            wait = std::min(wait,
+                            std::chrono::duration_cast<std::chrono::milliseconds>(due - now));
+        }
+        return wait;
+    };
+
+    const auto queue_completed = [&](std::int64_t connection_id) {
+        pending_completed_connections.insert_or_assign(
+            connection_id, std::chrono::steady_clock::now() + completion_evidence_grace);
     };
 
     const auto record_admission = [&](const ConnectionAdmission& admission,
@@ -408,7 +447,7 @@ ObservationRunResult ObservationSession::run(
                  !result.lifecycle_events_active, lifecycle_degraded)) {
             scheduler.connection_closed(connection_id);
             route_requests.erase(connection_id);
-            pending_completed_connections.insert(connection_id);
+            queue_completed(connection_id);
         }
         drain_tls_sessions();
         dispatch_completed();
@@ -452,10 +491,11 @@ ObservationRunResult ObservationSession::run(
     while ((!deadline || std::chrono::steady_clock::now() < *deadline) && !stop_requested()) {
         if (result.lifecycle_events_active) {
             const auto now = std::chrono::steady_clock::now();
-            const auto timeout = deadline
+            auto timeout = deadline
                 ? std::min(scheduler.wait_time(now),
                            std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - now))
                 : scheduler.wait_time(now);
+            timeout = std::min(timeout, completion_wait_time(now));
             const auto lifecycle_events = lifecycle_observer_.poll(timeout);
             drain_name_resolution();
             for (const auto& event : lifecycle_events) {
@@ -469,7 +509,7 @@ ObservationRunResult ObservationSession::run(
                 if (admission && admission->closed) {
                     scheduler.connection_closed(admission->connection_id);
                     route_requests.erase(admission->connection_id);
-                    pending_completed_connections.insert(admission->connection_id);
+                    queue_completed(admission->connection_id);
                 }
                 if (admission && admission->newly_admitted && event.remote) {
                     record_admission(*admission, event.remote->address, decision.direction);
@@ -497,8 +537,9 @@ ObservationRunResult ObservationSession::run(
 
     drain_name_resolution();
     drain_tls_sessions();
-    dispatch_completed();
+    dispatch_completed(true);
     correlate_tls_sessions();
+    dispatch_completed(true);
     tracker.finish_observation(!result.lifecycle_events_active);
     result.connection_ids.assign(connection_ids.begin(), connection_ids.end());
     return result;

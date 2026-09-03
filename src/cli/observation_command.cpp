@@ -131,7 +131,7 @@ void log_reporting_result(const FleetReportingResult& reporting, const char* pre
     std::cout << prefix << ": " << reporting.announced << " announced, "
               << reporting.suppressed_policy << " suppressed by policy, "
               << reporting.suppressed_cooldown << " suppressed by cooldown, "
-              << reporting.failed << " failed\n";
+              << reporting.failed << " failed" << std::endl;
 }
 
 } // namespace
@@ -209,13 +209,20 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
                                         options.ca_file, std::chrono::milliseconds(100));
             });
         }
+        if (service_mode) {
+            const auto& tls_capability = tls_session->capability();
+            if (tls_capability.available()) {
+                std::cout << "NETA service TLS context endpoint: "
+                          << tls_capability.endpoint << std::endl;
+            }
+        }
         if (service_mode && fleet_identity_available) {
             try {
                 static_cast<void>(FleetClient::send_agent_hello(reporting_policy.state_dir));
-                std::cout << "Fleet service: AgentHello accepted\n";
+                std::cout << "Fleet service: AgentHello accepted" << std::endl;
             } catch (const std::exception& error) {
                 std::cerr << "Fleet service AgentHello failed; observation continues: "
-                          << error.what() << '\n';
+                          << error.what() << std::endl;
             }
         }
     };
@@ -225,10 +232,10 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         if (now < next_heartbeat) return;
         try {
             static_cast<void>(FleetClient::send_heartbeat(reporting_policy.state_dir));
-            std::cout << "Fleet service: heartbeat accepted\n";
+            std::cout << "Fleet service: heartbeat accepted" << std::endl;
         } catch (const std::exception& error) {
             std::cerr << "Fleet service heartbeat failed; observation continues: "
-                      << error.what() << '\n';
+                      << error.what() << std::endl;
         }
         next_heartbeat = std::chrono::steady_clock::now() +
                          jittered_heartbeat_delay(heartbeat_interval,
@@ -243,7 +250,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
             log_reporting_result(reporting, "Fleet live reporting");
         } catch (const std::exception& error) {
             std::cerr << "Fleet live finalize/report failed for CONN-" << connection_id
-                      << "; observation continues: " << error.what() << '\n';
+                      << "; observation continues: " << error.what() << std::endl;
         }
     };
 

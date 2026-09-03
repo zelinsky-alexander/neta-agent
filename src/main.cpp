@@ -290,6 +290,7 @@ void cmd_history(int argc, char** argv) {
         auto connection = store.connection(id);
         if (!connection) throw std::runtime_error("connection not found");
         const auto environment = store.host_network_environment_for_connection(id);
+        const auto tls_sessions = store.tls_session_evidence_for_connection(id);
         if (has_arg(argc, argv, "--json")) {
             std::cout << "{\"id\":" << connection->id << ",\"process\":\"" << json_escape(connection->process.comm)
                       << "\",\"local\":\"" << json_escape(connection->local_ip) << ':' << connection->local_port
@@ -300,7 +301,8 @@ void cmd_history(int argc, char** argv) {
                       << "\",\"trust\":\"" << to_string(connection->trust)
                       << "\",\"environment_present\":" << (environment ? "true" : "false")
                       << ",\"environment_fingerprint\":\""
-                      << json_escape(environment ? environment->environment_fingerprint : "") << "\"}\n";
+                      << json_escape(environment ? environment->environment_fingerprint : "")
+                      << "\",\"tls_session_count\":" << tls_sessions.size() << "}\n";
         } else {
             std::cout << "CONN-" << connection->id << "  " << connection->process.comm << '[' << connection->process.pid << "]  "
                       << connection->local_ip << ':' << connection->local_port << " -> " << connection->remote_ip << ':'
@@ -308,6 +310,29 @@ void cmd_history(int argc, char** argv) {
                       << to_string(connection->performance) << " / " << to_string(connection->trust)
                       << "\nCaptured: " << format_capture_time(connection->captured_at_ns, false) << "\n";
             if (environment) print_environment(*environment);
+            std::cout << "\nApplication TLS session evidence: " << tls_sessions.size() << "\n";
+            for (const auto& evidence : tls_sessions) {
+                const auto& tls = evidence.observation;
+                std::cout << "  Role: " << to_string(tls.local_role)
+                          << " relation=" << to_string(evidence.relation)
+                          << " observation=" << to_string(tls.fidelity)
+                          << " correlation=" << to_string(evidence.correlation_fidelity)
+                          << " source=" << tls.source << '\n'
+                          << "    Version: " << tls.tls_version << " cipher=" << tls.cipher
+                          << " ALPN=" << (tls.alpn.empty() ? "<none>" : tls.alpn)
+                          << " SNI=" << (tls.sni.empty() ? "<none>" : tls.sni) << '\n'
+                          << "    Peer cert: " << (tls.peer_certificate_present ? "yes" : "no")
+                          << " verify-required=" << (tls.peer_verification_required ? "yes" : "no")
+                          << " authenticated=" << (tls.peer_authenticated ? "yes" : "no")
+                          << " verify=" << (tls.verify_result ? std::to_string(*tls.verify_result) : "<unavailable>") << '\n'
+                          << "    Expected name: " << tls.expected_peer_name.value_or("<unavailable>")
+                          << " matched name: " << tls.matched_peer_name.value_or("<unavailable>") << '\n'
+                          << "    Leaf SHA-256: " << (tls.leaf_sha256.empty() ? "<unavailable>" : tls.leaf_sha256)
+                          << "\n    SPKI SHA-256: " << (tls.spki_sha256.empty() ? "<unavailable>" : tls.spki_sha256)
+                          << "\n    Subject: " << (tls.subject.empty() ? "<unavailable>" : tls.subject)
+                          << "\n    Issuer: " << (tls.issuer.empty() ? "<unavailable>" : tls.issuer)
+                          << "\n    Evidence SHA-256: " << tls_session_evidence_hash(evidence) << '\n';
+            }
         }
         return;
     }
