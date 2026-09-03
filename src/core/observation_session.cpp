@@ -515,7 +515,10 @@ ObservationRunResult ObservationSession::run(
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (scheduler.transport_due(now, !result.lifecycle_events_active)) {
+        const bool reconciliation_poll_required =
+            result.lifecycle_events_active && !pending_snapshot_candidates.empty();
+        if (scheduler.transport_due(
+                now, !result.lifecycle_events_active || reconciliation_poll_required)) {
             sample_transport(false);
             scheduler.transport_sampled(std::chrono::steady_clock::now());
             observe_scheduled_routes();
