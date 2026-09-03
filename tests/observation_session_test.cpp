@@ -105,6 +105,18 @@ public:
     }
 };
 
+class StaticProcessResolver final : public neta::platform::ProcessResolver {
+public:
+    std::optional<neta::ProcessIdentity> resolve(std::uint64_t) override {
+        neta::ProcessIdentity process;
+        process.pid = 777;
+        process.uid = 1000;
+        process.start_ticks = 7770;
+        process.comm = "preexisting-client";
+        return process;
+    }
+};
+
 class FakeRouteObserver final : public neta::platform::RouteObserver {
 public:
     std::optional<neta::RouteObservation> route_to(const std::string& destination) override {
@@ -316,6 +328,46 @@ int main() {
         const auto metrics = neta::aggregate_metrics(target_samples);
         assert(metrics.observed_rtt_us == 1'250);
         assert(metrics.observed_rttvar_us == 300);
+    }
+    remove_database(path);
+    {
+        // A socket that already exists when exact lifecycle collection starts has no
+        // CONNECT event in this session. The startup snapshot stages it for the
+        // reconciliation grace period, and the pending candidate itself must keep
+        // transport polling alive until that grace elapses.
+        FakeLifecycleObserver lifecycle({}, {});
+        auto first = socket(606, 43001, 443);
+        first.transport.observed_ns = 1'000'000'000ULL;
+        first.transport.rtt_us = 2'000;
+        auto after_grace = first;
+        after_grace.transport.observed_ns = 1'300'000'000ULL;
+        after_grace.transport.rtt_us = 2'250;
+        ScriptedSocketObserver sockets({{first}, {after_grace}});
+        StaticProcessResolver processes;
+        FakeRouteObserver routes;
+        neta::HistoryStore store(path);
+        neta::AdmissionPolicyConfig config;
+        config.mode = neta::ObservationMode::Target;
+        config.target_addresses.insert("127.0.0.2");
+        config.target_port = 443;
+        neta::ObservationSession session(
+            store, sockets, lifecycle, processes, routes,
+            neta::ConnectionAdmissionPolicy(config), "example.com");
+
+        const auto result = session.run(std::chrono::seconds(1), 50ms, [&] {
+            return sockets.snapshot_count() >= 2;
+        });
+        assert(result.lifecycle_events_active);
+        assert(sockets.snapshot_count() >= 2);
+        assert(result.admitted_connections == 1);
+        assert(result.connection_ids.size() == 1);
+        const auto connection = store.connection(result.connection_ids.front());
+        assert(connection);
+        assert(connection->socket_cookie == 606);
+        const auto samples = store.samples_for_connection(connection->id);
+        assert(samples.size() == 1);
+        assert(samples.front().state == 1);
+        assert(samples.front().rtt_us == 2'250);
     }
     remove_database(path);
     std::cout << "Observation session MS2 tests passed\n";
