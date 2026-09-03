@@ -3,6 +3,7 @@
 #include "neta/antimalware.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
