@@ -14,6 +14,7 @@ std::string to_string(ConnectionLifecycleEventType value) {
 std::string to_string(LifecycleProvenance value) {
     switch (value) {
         case LifecycleProvenance::EbpfCore: return "EBPF_CORE";
+        case LifecycleProvenance::WindowsEtw: return "WINDOWS_ETW";
         case LifecycleProvenance::DeterministicTest: return "DETERMINISTIC_TEST";
     }
     return "UNKNOWN";

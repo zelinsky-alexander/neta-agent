@@ -105,6 +105,38 @@ public:
     }
 };
 
+class CountingProcessResolver final : public neta::platform::ProcessResolver {
+public:
+    std::optional<neta::ProcessIdentity> resolve(std::uint64_t) override {
+        ++inode_calls_;
+        return process();
+    }
+
+    std::optional<neta::ProcessIdentity> resolve(const neta::SocketObservation&) override {
+        ++snapshot_calls_;
+        // Deliberately unreliable to model a best-effort /proc lookup. Linux
+        // reconciliation without process filters must not depend on this path.
+        if ((snapshot_calls_ % 2U) == 0U) return std::nullopt;
+        return process();
+    }
+
+    std::size_t inode_calls() const noexcept { return inode_calls_; }
+    std::size_t snapshot_calls() const noexcept { return snapshot_calls_; }
+
+private:
+    static neta::ProcessIdentity process() {
+        neta::ProcessIdentity process;
+        process.pid = 777;
+        process.uid = 1000;
+        process.start_ticks = 7770;
+        process.comm = "preexisting-client";
+        return process;
+    }
+
+    std::size_t inode_calls_{0};
+    std::size_t snapshot_calls_{0};
+};
+
 class FakeRouteObserver final : public neta::platform::RouteObserver {
 public:
     std::optional<neta::RouteObservation> route_to(const std::string& destination) override {
@@ -232,8 +264,6 @@ int main() {
         close.type = neta::ConnectionLifecycleEventType::Close;
         close.timestamp_ns = 301;
 
-        // Deliver CONNECT and CLOSE in one lifecycle batch. Immediate enrichment
-        // must run when CONNECT is admitted, before CLOSE retires scheduler state.
         FakeLifecycleObserver lifecycle({connect, close}, {});
         auto syn_sent = socket(404, 41001, 443);
         syn_sent.transport.state = 2;
@@ -300,14 +330,16 @@ int main() {
         });
         assert(result.connection_ids.size() == 1);
         const auto samples = store.samples_for_connection(result.connection_ids.front());
-        assert(samples.size() == 2);
-        assert(samples.front().state == 2);
-        assert(samples.front().rtt_us == 0);
-        assert(samples.back().state == 1);
-        assert(samples.back().rtt_us == 1'250);
+        // With exact lifecycle active, the startup snapshot is staged only as a
+        // reconciliation candidate. Once CONNECT arrives, lifecycle owns the object;
+        // the next snapshot supplies the first transport sample without creating a
+        // competing pre-existing history record.
+        assert(samples.size() == 1);
+        assert(samples.front().state == 1);
+        assert(samples.front().rtt_us == 1'250);
 
         const auto target_samples = store.recent_samples_for_target("example.com", 443, 200);
-        assert(target_samples.size() == 2);
+        assert(target_samples.size() == 1);
         const auto rtt_samples = std::count_if(target_samples.begin(), target_samples.end(),
                                                [](const auto& sample) {
                                                    return sample.rtt_us != 0;
@@ -316,6 +348,52 @@ int main() {
         const auto metrics = neta::aggregate_metrics(target_samples);
         assert(metrics.observed_rtt_us == 1'250);
         assert(metrics.observed_rttvar_us == 300);
+    }
+    remove_database(path);
+    {
+        // A socket that already exists when exact lifecycle collection starts has no
+        // CONNECT event in this session. The startup snapshot stages it for the
+        // reconciliation grace period, and the pending candidate itself must keep
+        // transport polling alive until that grace elapses. Linux must not make the
+        // candidate key depend on best-effort snapshot /proc resolution.
+        FakeLifecycleObserver lifecycle({}, {});
+        auto first = socket(606, 43001, 443);
+        first.transport.observed_ns = 1'000'000'000ULL;
+        first.transport.rtt_us = 2'000;
+        auto after_grace = first;
+        after_grace.transport.observed_ns = 1'300'000'000ULL;
+        after_grace.transport.rtt_us = 2'250;
+        ScriptedSocketObserver sockets({{first}, {after_grace}});
+        CountingProcessResolver processes;
+        FakeRouteObserver routes;
+        neta::HistoryStore store(path);
+        neta::AdmissionPolicyConfig config;
+        config.mode = neta::ObservationMode::Target;
+        config.target_addresses.insert("127.0.0.2");
+        config.target_port = 443;
+        neta::ObservationSession session(
+            store, sockets, lifecycle, processes, routes,
+            neta::ConnectionAdmissionPolicy(config), "example.com");
+
+        const auto result = session.run(std::chrono::seconds(1), 50ms, [&] {
+            return sockets.snapshot_count() >= 2;
+        });
+        assert(result.lifecycle_events_active);
+        assert(sockets.snapshot_count() >= 2);
+        assert(result.admitted_connections == 1);
+        assert(result.connection_ids.size() == 1);
+        // No owner PID and no process filter: candidate staging must never invoke
+        // the SocketObservation process-resolution path. The inode lookup is deferred
+        // until the candidate is actually admitted.
+        assert(processes.snapshot_calls() == 0);
+        assert(processes.inode_calls() == 1);
+        const auto connection = store.connection(result.connection_ids.front());
+        assert(connection);
+        assert(connection->socket_cookie == 606);
+        const auto samples = store.samples_for_connection(connection->id);
+        assert(samples.size() == 1);
+        assert(samples.front().state == 1);
+        assert(samples.front().rtt_us == 2'250);
     }
     remove_database(path);
     std::cout << "Observation session MS2 tests passed\n";

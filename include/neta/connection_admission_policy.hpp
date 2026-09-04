@@ -33,6 +33,12 @@ public:
     [[nodiscard]] AdmissionDecision evaluate_new_socket(
         const SocketObservation& socket,
         const std::optional<std::string>& process_name = std::nullopt) const;
+    // Used only while an event-driven lifecycle source is authoritative. Snapshot-only
+    // observations never invent direction: target/all may retain them as UNKNOWN after
+    // reconciliation; outbound/inbound modes require exact lifecycle direction.
+    [[nodiscard]] AdmissionDecision evaluate_reconciliation_socket(
+        const SocketObservation& socket,
+        const std::optional<std::string>& process_name = std::nullopt) const;
 
     [[nodiscard]] ObservationMode mode() const noexcept { return config_.mode; }
     [[nodiscard]] bool has_process_filters() const noexcept;

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(neta-agent VERSION 0.1.0 LANGUAGES CXX)
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "POC1 implements only the Linux backend. The core model is platform-neutral by design.")
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT WIN32)
+    message(FATAL_ERROR "neta-agent currently supports Linux and Windows backends")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -24,6 +24,12 @@ if(NOT NETA_YARA_X MATCHES "^(AUTO|ON|OFF)$")
     message(FATAL_ERROR "NETA_YARA_X must be AUTO, ON, or OFF")
 endif()
 
+if(WIN32)
+    set(NETA_EBPF "OFF" CACHE STRING "Windows does not use the Linux eBPF backend" FORCE)
+    set(NETA_YARA_X "OFF" CACHE STRING "YARA-X integration is Linux-only for now" FORCE)
+    set(NETA_BUILD_TLS_CONTEXT_SHIM OFF CACHE BOOL "Linux OpenSSL TLS context shim" FORCE)
+endif()
+
 if(NETA_STATIC_DEPS)
     set(OPENSSL_USE_STATIC_LIBS TRUE)
 endif()
@@ -33,8 +39,16 @@ find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig QUIET)
 
+function(neta_enable_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+endfunction()
+
 set(NETA_HAVE_YARA_X FALSE)
-if(NOT NETA_YARA_X STREQUAL "OFF")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NETA_YARA_X STREQUAL "OFF")
     if(PkgConfig_FOUND)
         pkg_check_modules(YARA_X QUIET IMPORTED_TARGET yara_x_capi)
     endif()
@@ -49,7 +63,7 @@ if(NOT NETA_YARA_X STREQUAL "OFF")
 endif()
 
 set(NETA_HAVE_EBPF FALSE)
-if(NOT NETA_EBPF STREQUAL "OFF")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NETA_EBPF STREQUAL "OFF")
     if(PkgConfig_FOUND)
         pkg_check_modules(LIBBPF QUIET IMPORTED_TARGET libbpf)
     endif()
@@ -78,19 +92,32 @@ if(NOT NETA_EBPF STREQUAL "OFF")
     endif()
 endif()
 
-set(NETA_PLATFORM_SOURCES
-    src/platform/linux/environment.cpp
-    src/platform/linux/host_network_environment.cpp
-    src/platform/linux/socket_diag.cpp
-    src/platform/linux/process_resolver.cpp
-    src/platform/linux/route_observer.cpp
-    src/platform/linux/yara_x_provider.cpp
-    src/platform/linux/ebpf/lifecycle_decoder.cpp
-    src/platform/linux/ebpf/name_resolution_decoder.cpp
-    src/platform/linux/ebpf/process_exec_decoder.cpp
-    src/platform/linux/tls_session_decoder.cpp
-    src/platform/linux/tls_session_observer.cpp
-)
+if(WIN32)
+    set(NETA_PLATFORM_SOURCES
+        src/platform/windows/environment.cpp
+        src/platform/windows/host_network_environment.cpp
+        src/platform/windows/connection_observer.cpp
+        src/platform/windows/etw_lifecycle.cpp
+        src/platform/windows/process_resolver.cpp
+        src/platform/windows/route_observer.cpp
+    )
+    set(NETA_FLEET_CLIENT_SOURCE src/platform/windows/fleet_client.cpp)
+else()
+    set(NETA_PLATFORM_SOURCES
+        src/platform/linux/environment.cpp
+        src/platform/linux/host_network_environment.cpp
+        src/platform/linux/socket_diag.cpp
+        src/platform/linux/process_resolver.cpp
+        src/platform/linux/route_observer.cpp
+        src/platform/linux/yara_x_provider.cpp
+        src/platform/linux/ebpf/lifecycle_decoder.cpp
+        src/platform/linux/ebpf/name_resolution_decoder.cpp
+        src/platform/linux/ebpf/process_exec_decoder.cpp
+        src/platform/linux/tls_session_decoder.cpp
+        src/platform/linux/tls_session_observer.cpp
+    )
+    set(NETA_FLEET_CLIENT_SOURCE src/core/fleet_client.cpp)
+endif()
 
 if(NETA_HAVE_EBPF)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
@@ -193,7 +220,7 @@ if(NETA_HAVE_EBPF)
          src/platform/linux/ebpf/lifecycle_loader.cpp
          src/platform/linux/ebpf/name_resolution_loader.cpp
          src/platform/linux/ebpf/process_exec_loader.cpp)
-else()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND NETA_PLATFORM_SOURCES
          src/platform/linux/ebpf/lifecycle_loader_stub.cpp
          src/platform/linux/ebpf/name_resolution_loader_stub.cpp
@@ -213,8 +240,9 @@ add_library(neta_core
     src/core/exec_antimalware_monitor.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
-    src/core/fleet_client.cpp
+    ${NETA_FLEET_CLIENT_SOURCE}
     src/core/history_store.cpp
+    src/core/history_reconciliation.cpp
     src/core/history_environment.cpp
     src/core/history_name_resolution.cpp
     src/core/history_tls_session.cpp
@@ -233,8 +261,14 @@ add_library(neta_core
     ${NETA_PLATFORM_SOURCES}
 )
 
-target_include_directories(neta_core PUBLIC include PRIVATE src/platform/linux src/platform/linux/ebpf)
+target_include_directories(neta_core PUBLIC include)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_include_directories(neta_core PRIVATE src/platform/linux src/platform/linux/ebpf)
+endif()
 target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3 ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(neta_core PUBLIC iphlpapi ws2_32 advapi32 tdh)
+endif()
 if(NETA_HAVE_YARA_X)
     target_compile_definitions(neta_core PRIVATE
         NETA_HAVE_YARA_X=1
@@ -245,17 +279,17 @@ if(NETA_HAVE_EBPF)
     target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
     target_link_libraries(neta_core PRIVATE PkgConfig::LIBBPF)
 endif()
-target_compile_options(neta_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+neta_enable_warnings(neta_core)
 
 set(NETA_TLS_CONTEXT_SHIM_BUILT FALSE)
-if(NETA_BUILD_TLS_CONTEXT_SHIM AND NOT NETA_STATIC_DEPS AND NOT NETA_FULL_STATIC)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NETA_BUILD_TLS_CONTEXT_SHIM AND
+   NOT NETA_STATIC_DEPS AND NOT NETA_FULL_STATIC)
     add_library(neta_tls_context SHARED src/platform/linux/tls_context_shim.cpp)
     set_target_properties(neta_tls_context PROPERTIES OUTPUT_NAME neta_tls_context)
     target_include_directories(neta_tls_context PRIVATE src/platform/linux)
     target_link_libraries(neta_tls_context PRIVATE OpenSSL::SSL OpenSSL::Crypto
                                                     ${CMAKE_DL_LIBS} Threads::Threads)
-    target_compile_options(neta_tls_context PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    neta_enable_warnings(neta_tls_context)
     set(NETA_TLS_CONTEXT_SHIM_BUILT TRUE)
     target_compile_definitions(neta_core PRIVATE NETA_TLS_CONTEXT_SHIM_BUILT=1)
 else()
@@ -265,143 +299,138 @@ endif()
 set_source_files_properties(src/main.cpp PROPERTIES COMPILE_DEFINITIONS "main=neta_legacy_main")
 add_executable(neta-agent src/main.cpp src/entrypoint.cpp)
 target_link_libraries(neta-agent PRIVATE neta_core)
-target_compile_options(neta-agent PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+neta_enable_warnings(neta-agent)
 
-if(NETA_STATIC_DEPS)
+if(NETA_STATIC_DEPS AND NOT MSVC)
     target_link_options(neta-agent PRIVATE -static-libgcc -static-libstdc++)
 endif()
-if(NETA_FULL_STATIC)
+if(NETA_FULL_STATIC AND NOT MSVC)
     target_link_options(neta-agent PRIVATE -static)
 endif()
 
 if(NETA_ENABLE_TESTS)
     enable_testing()
-    add_executable(neta_tests tests/tests.cpp)
-    target_link_libraries(neta_tests PRIVATE neta_core)
-    target_include_directories(neta_tests PRIVATE src/platform/linux/ebpf)
-    target_compile_options(neta_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_tests COMMAND neta_tests)
 
-    add_executable(neta_antimalware_provider_test tests/antimalware_provider_test.cpp)
-    target_link_libraries(neta_antimalware_provider_test PRIVATE neta_core)
-    target_compile_options(neta_antimalware_provider_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_antimalware_provider_test COMMAND neta_antimalware_provider_test)
+    if(WIN32)
+        add_executable(neta_windows_platform_test tests/windows_platform_test.cpp)
+        target_link_libraries(neta_windows_platform_test PRIVATE neta_core)
+        neta_enable_warnings(neta_windows_platform_test)
+        add_test(NAME neta_windows_platform_test COMMAND neta_windows_platform_test)
+    else()
+        add_executable(neta_tests tests/tests.cpp)
+        target_link_libraries(neta_tests PRIVATE neta_core)
+        target_include_directories(neta_tests PRIVATE src/platform/linux/ebpf)
+        neta_enable_warnings(neta_tests)
+        add_test(NAME neta_tests COMMAND neta_tests)
 
-    add_executable(neta_yara_exec_trigger_target tests/yara_exec_trigger_target.cpp)
-    target_compile_options(neta_yara_exec_trigger_target PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        add_executable(neta_antimalware_provider_test tests/antimalware_provider_test.cpp)
+        target_link_libraries(neta_antimalware_provider_test PRIVATE neta_core)
+        neta_enable_warnings(neta_antimalware_provider_test)
+        add_test(NAME neta_antimalware_provider_test COMMAND neta_antimalware_provider_test)
 
-    add_executable(neta_yara_exec_trigger_integration tests/yara_exec_trigger_integration.cpp)
-    target_link_libraries(neta_yara_exec_trigger_integration PRIVATE neta_core)
-    target_compile_options(neta_yara_exec_trigger_integration PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_yara_exec_trigger_integration
-        COMMAND neta_yara_exec_trigger_integration
-            $<TARGET_FILE:neta_yara_exec_trigger_target>
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/yara_exec_trigger.yar)
-    set_tests_properties(neta_yara_exec_trigger_integration PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(neta_yara_exec_trigger_target tests/yara_exec_trigger_target.cpp)
+        neta_enable_warnings(neta_yara_exec_trigger_target)
 
-    add_executable(neta_ms0_tests tests/ms0_tests.cpp)
-    target_link_libraries(neta_ms0_tests PRIVATE neta_core)
-    target_compile_options(neta_ms0_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_ms0_tests COMMAND neta_ms0_tests)
+        add_executable(neta_yara_exec_trigger_integration tests/yara_exec_trigger_integration.cpp)
+        target_link_libraries(neta_yara_exec_trigger_integration PRIVATE neta_core)
+        neta_enable_warnings(neta_yara_exec_trigger_integration)
+        add_test(NAME neta_yara_exec_trigger_integration
+            COMMAND neta_yara_exec_trigger_integration
+                $<TARGET_FILE:neta_yara_exec_trigger_target>
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/yara_exec_trigger.yar)
+        set_tests_properties(neta_yara_exec_trigger_integration PROPERTIES SKIP_RETURN_CODE 77)
 
-    add_executable(neta_ms1_tests tests/ms1_tests.cpp)
-    target_link_libraries(neta_ms1_tests PRIVATE neta_core)
-    target_include_directories(neta_ms1_tests PRIVATE src/platform/linux/ebpf)
-    target_compile_options(neta_ms1_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_ms1_tests COMMAND neta_ms1_tests)
+        add_executable(neta_ms0_tests tests/ms0_tests.cpp)
+        target_link_libraries(neta_ms0_tests PRIVATE neta_core)
+        neta_enable_warnings(neta_ms0_tests)
+        add_test(NAME neta_ms0_tests COMMAND neta_ms0_tests)
 
-    add_executable(neta_ms1_ebpf_integration tests/ms1_ebpf_integration.cpp)
-    target_link_libraries(neta_ms1_ebpf_integration PRIVATE neta_core)
-    target_compile_options(neta_ms1_ebpf_integration PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_ms1_ebpf_integration COMMAND neta_ms1_ebpf_integration)
-    set_tests_properties(neta_ms1_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(neta_ms1_tests tests/ms1_tests.cpp)
+        target_link_libraries(neta_ms1_tests PRIVATE neta_core)
+        target_include_directories(neta_ms1_tests PRIVATE src/platform/linux/ebpf)
+        neta_enable_warnings(neta_ms1_tests)
+        add_test(NAME neta_ms1_tests COMMAND neta_ms1_tests)
 
-    add_executable(neta_history_cli_test tests/history_cli_test.cpp)
-    target_link_libraries(neta_history_cli_test PRIVATE neta_core)
-    target_compile_options(neta_history_cli_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_history_cli_test COMMAND neta_history_cli_test $<TARGET_FILE:neta-agent>)
+        add_executable(neta_ms1_ebpf_integration tests/ms1_ebpf_integration.cpp)
+        target_link_libraries(neta_ms1_ebpf_integration PRIVATE neta_core)
+        neta_enable_warnings(neta_ms1_ebpf_integration)
+        add_test(NAME neta_ms1_ebpf_integration COMMAND neta_ms1_ebpf_integration)
+        set_tests_properties(neta_ms1_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
 
-    foreach(NETA_MS2_TEST IN ITEMS
-            connection_direction
-            connection_admission_policy
-            connection_tracker
-            evidence_scheduler
-            history_store_ms2
-            lifecycle_health
-            observation_options
-            observation_session
-            resource_churn
-            storage_maintenance)
-        add_executable(neta_${NETA_MS2_TEST}_test tests/${NETA_MS2_TEST}_test.cpp)
-        target_link_libraries(neta_${NETA_MS2_TEST}_test PRIVATE neta_core)
-        target_compile_options(neta_${NETA_MS2_TEST}_test PRIVATE
-            -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-        add_test(NAME neta_${NETA_MS2_TEST}_test COMMAND neta_${NETA_MS2_TEST}_test)
-    endforeach()
+        add_executable(neta_history_cli_test tests/history_cli_test.cpp)
+        target_link_libraries(neta_history_cli_test PRIVATE neta_core)
+        neta_enable_warnings(neta_history_cli_test)
+        add_test(NAME neta_history_cli_test COMMAND neta_history_cli_test $<TARGET_FILE:neta-agent>)
 
-    foreach(NETA_MS3_TEST IN ITEMS
-            name_resolution
-            history_name_resolution
-            observation_name_resolution
-            tls_session
-            history_tls_session
-            observation_tls_session)
-        add_executable(neta_${NETA_MS3_TEST}_test tests/${NETA_MS3_TEST}_test.cpp)
-        target_link_libraries(neta_${NETA_MS3_TEST}_test PRIVATE neta_core)
-        target_compile_options(neta_${NETA_MS3_TEST}_test PRIVATE
-            -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-        add_test(NAME neta_${NETA_MS3_TEST}_test COMMAND neta_${NETA_MS3_TEST}_test)
-    endforeach()
+        foreach(NETA_MS2_TEST IN ITEMS
+                connection_direction
+                connection_admission_policy
+                connection_tracker
+                evidence_scheduler
+                history_store_ms2
+                lifecycle_health
+                observation_options
+                observation_session
+                resource_churn
+                storage_maintenance)
+            add_executable(neta_${NETA_MS2_TEST}_test tests/${NETA_MS2_TEST}_test.cpp)
+            target_link_libraries(neta_${NETA_MS2_TEST}_test PRIVATE neta_core)
+            neta_enable_warnings(neta_${NETA_MS2_TEST}_test)
+            add_test(NAME neta_${NETA_MS2_TEST}_test COMMAND neta_${NETA_MS2_TEST}_test)
+        endforeach()
 
-    add_executable(neta_name_resolution_decoder_test tests/name_resolution_decoder_test.cpp)
-    target_link_libraries(neta_name_resolution_decoder_test PRIVATE neta_core)
-    target_include_directories(neta_name_resolution_decoder_test PRIVATE src/platform/linux/ebpf)
-    target_compile_options(neta_name_resolution_decoder_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_name_resolution_decoder_test COMMAND neta_name_resolution_decoder_test)
+        foreach(NETA_MS3_TEST IN ITEMS
+                name_resolution
+                history_name_resolution
+                observation_name_resolution
+                tls_session
+                history_tls_session
+                observation_tls_session)
+            add_executable(neta_${NETA_MS3_TEST}_test tests/${NETA_MS3_TEST}_test.cpp)
+            target_link_libraries(neta_${NETA_MS3_TEST}_test PRIVATE neta_core)
+            neta_enable_warnings(neta_${NETA_MS3_TEST}_test)
+            add_test(NAME neta_${NETA_MS3_TEST}_test COMMAND neta_${NETA_MS3_TEST}_test)
+        endforeach()
 
-    add_executable(neta_name_resolution_export_replay_test tests/name_resolution_export_replay_test.cpp)
-    target_link_libraries(neta_name_resolution_export_replay_test PRIVATE neta_core)
-    target_compile_options(neta_name_resolution_export_replay_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_name_resolution_export_replay_test
-             COMMAND neta_name_resolution_export_replay_test $<TARGET_FILE:neta-agent>)
+        add_executable(neta_name_resolution_decoder_test tests/name_resolution_decoder_test.cpp)
+        target_link_libraries(neta_name_resolution_decoder_test PRIVATE neta_core)
+        target_include_directories(neta_name_resolution_decoder_test PRIVATE src/platform/linux/ebpf)
+        neta_enable_warnings(neta_name_resolution_decoder_test)
+        add_test(NAME neta_name_resolution_decoder_test COMMAND neta_name_resolution_decoder_test)
 
-    add_executable(neta_name_resolution_ebpf_integration tests/name_resolution_ebpf_integration.cpp)
-    target_link_libraries(neta_name_resolution_ebpf_integration PRIVATE neta_core)
-    target_compile_options(neta_name_resolution_ebpf_integration PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_name_resolution_ebpf_integration COMMAND neta_name_resolution_ebpf_integration)
-    set_tests_properties(neta_name_resolution_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(neta_name_resolution_export_replay_test tests/name_resolution_export_replay_test.cpp)
+        target_link_libraries(neta_name_resolution_export_replay_test PRIVATE neta_core)
+        neta_enable_warnings(neta_name_resolution_export_replay_test)
+        add_test(NAME neta_name_resolution_export_replay_test
+                 COMMAND neta_name_resolution_export_replay_test $<TARGET_FILE:neta-agent>)
 
-    add_executable(neta_tls_session_decoder_test tests/tls_session_decoder_test.cpp)
-    target_link_libraries(neta_tls_session_decoder_test PRIVATE neta_core)
-    target_include_directories(neta_tls_session_decoder_test PRIVATE src/platform/linux)
-    target_compile_options(neta_tls_session_decoder_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_tls_session_decoder_test COMMAND neta_tls_session_decoder_test)
+        add_executable(neta_name_resolution_ebpf_integration tests/name_resolution_ebpf_integration.cpp)
+        target_link_libraries(neta_name_resolution_ebpf_integration PRIVATE neta_core)
+        neta_enable_warnings(neta_name_resolution_ebpf_integration)
+        add_test(NAME neta_name_resolution_ebpf_integration COMMAND neta_name_resolution_ebpf_integration)
+        set_tests_properties(neta_name_resolution_ebpf_integration PROPERTIES SKIP_RETURN_CODE 77)
 
-    add_executable(neta_tls_session_export_replay_test tests/tls_session_export_replay_test.cpp)
-    target_link_libraries(neta_tls_session_export_replay_test PRIVATE neta_core)
-    target_compile_options(neta_tls_session_export_replay_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-    add_test(NAME neta_tls_session_export_replay_test
-             COMMAND neta_tls_session_export_replay_test $<TARGET_FILE:neta-agent>)
+        add_executable(neta_tls_session_decoder_test tests/tls_session_decoder_test.cpp)
+        target_link_libraries(neta_tls_session_decoder_test PRIVATE neta_core)
+        target_include_directories(neta_tls_session_decoder_test PRIVATE src/platform/linux)
+        neta_enable_warnings(neta_tls_session_decoder_test)
+        add_test(NAME neta_tls_session_decoder_test COMMAND neta_tls_session_decoder_test)
 
-    if(NETA_TLS_CONTEXT_SHIM_BUILT)
-        add_executable(neta_tls_session_shim_integration tests/tls_session_shim_integration.cpp)
-        target_link_libraries(neta_tls_session_shim_integration PRIVATE neta_core Threads::Threads)
-        target_compile_options(neta_tls_session_shim_integration PRIVATE
-            -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-        add_test(NAME neta_tls_session_shim_integration
-            COMMAND ${CMAKE_COMMAND} -E env
-                "LD_PRELOAD=$<TARGET_FILE:neta_tls_context>"
-                "NETA_TLS_CONTEXT_SOCKET=@neta-agent-tls-ctest"
-                $<TARGET_FILE:neta_tls_session_shim_integration>)
+        add_executable(neta_tls_session_export_replay_test tests/tls_session_export_replay_test.cpp)
+        target_link_libraries(neta_tls_session_export_replay_test PRIVATE neta_core)
+        neta_enable_warnings(neta_tls_session_export_replay_test)
+        add_test(NAME neta_tls_session_export_replay_test
+                 COMMAND neta_tls_session_export_replay_test $<TARGET_FILE:neta-agent>)
+
+        if(NETA_TLS_CONTEXT_SHIM_BUILT)
+            add_executable(neta_tls_session_shim_integration tests/tls_session_shim_integration.cpp)
+            target_link_libraries(neta_tls_session_shim_integration PRIVATE neta_core Threads::Threads)
+            neta_enable_warnings(neta_tls_session_shim_integration)
+            add_test(NAME neta_tls_session_shim_integration
+                COMMAND ${CMAKE_COMMAND} -E env
+                    "LD_PRELOAD=$<TARGET_FILE:neta_tls_context>"
+                    "NETA_TLS_CONTEXT_SOCKET=@neta-agent-tls-ctest"
+                    $<TARGET_FILE:neta_tls_session_shim_integration>)
+        endif()
     endif()
 endif()
