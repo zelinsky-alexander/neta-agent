@@ -122,27 +122,22 @@ YaraXApi load_api(const std::filesystem::path& library_path) {
                                  (error != nullptr ? std::string(": ") + error : std::string{}));
     }
 
-    try {
-        api.compile = load_symbol<YaraXApi::CompileFn>(api.handle, "yrx_compile");
-        api.last_error = load_symbol<YaraXApi::LastErrorFn>(api.handle, "yrx_last_error");
-        api.rules_destroy = load_symbol<YaraXApi::RulesDestroyFn>(api.handle, "yrx_rules_destroy");
-        api.scanner_create = load_symbol<YaraXApi::ScannerCreateFn>(api.handle, "yrx_scanner_create");
-        api.scanner_destroy = load_symbol<YaraXApi::ScannerDestroyFn>(api.handle, "yrx_scanner_destroy");
-        api.scanner_on_matching_rule = load_symbol<YaraXApi::ScannerOnMatchingRuleFn>(
-            api.handle, "yrx_scanner_on_matching_rule");
-        api.scanner_set_timeout = load_symbol<YaraXApi::ScannerSetTimeoutFn>(
-            api.handle, "yrx_scanner_set_timeout");
-        api.scanner_scan = load_symbol<YaraXApi::ScannerScanFn>(api.handle, "yrx_scanner_scan");
-        api.rule_identifier = load_symbol<YaraXApi::RuleIdentifierFn>(api.handle, "yrx_rule_identifier");
-        api.rule_namespace = load_symbol<YaraXApi::RuleNamespaceFn>(api.handle, "yrx_rule_namespace");
-    } catch (...) {
-        ::dlclose(api.handle);
-        throw;
-    }
+    // Keep the runtime loaded even if ABI validation fails. YARA-X documents special
+    // process-wide finalization requirements before unloading a dynamically loaded
+    // runtime, and NETA deliberately has no hot-unload semantics.
+    api.compile = load_symbol<YaraXApi::CompileFn>(api.handle, "yrx_compile");
+    api.last_error = load_symbol<YaraXApi::LastErrorFn>(api.handle, "yrx_last_error");
+    api.rules_destroy = load_symbol<YaraXApi::RulesDestroyFn>(api.handle, "yrx_rules_destroy");
+    api.scanner_create = load_symbol<YaraXApi::ScannerCreateFn>(api.handle, "yrx_scanner_create");
+    api.scanner_destroy = load_symbol<YaraXApi::ScannerDestroyFn>(api.handle, "yrx_scanner_destroy");
+    api.scanner_on_matching_rule = load_symbol<YaraXApi::ScannerOnMatchingRuleFn>(
+        api.handle, "yrx_scanner_on_matching_rule");
+    api.scanner_set_timeout = load_symbol<YaraXApi::ScannerSetTimeoutFn>(
+        api.handle, "yrx_scanner_set_timeout");
+    api.scanner_scan = load_symbol<YaraXApi::ScannerScanFn>(api.handle, "yrx_scanner_scan");
+    api.rule_identifier = load_symbol<YaraXApi::RuleIdentifierFn>(api.handle, "yrx_rule_identifier");
+    api.rule_namespace = load_symbol<YaraXApi::RuleNamespaceFn>(api.handle, "yrx_rule_namespace");
 
-    // Keep the runtime loaded for the process lifetime. YARA-X documents special
-    // process-wide finalization requirements before safely unloading its shared library,
-    // and NETA does not need hot-unload semantics.
     return api;
 }
 
