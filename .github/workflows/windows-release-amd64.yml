@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $serviceName = 'NETAAgentReleaseSmoke'
+          $serviceName = 'NETAAgent'
           $exe = (Resolve-Path '.\build-windows-release\Release\neta-agent.exe').Path
           $db = Join-Path $env:RUNNER_TEMP 'neta-release-service-smoke.db'
           $stateDir = Join-Path $env:RUNNER_TEMP 'neta-release-service-state'
