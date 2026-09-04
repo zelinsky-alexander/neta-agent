@@ -12,9 +12,19 @@ on:
         required: true
         default: false
         type: boolean
+  # One-shot side-branch trigger used to publish the first validated runtime.
+  # Remove this push trigger after yarax-runtime-v1.20.0 is published.
+  push:
+    branches:
+      - feature/process-artifact-assurance-yarax
+    paths:
+      - .github/workflows/yarax-runtime.yml
 
 permissions:
   contents: write
+
+env:
+  YARAX_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '1.20.0' }}
 
 jobs:
   build:
@@ -32,7 +42,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: VirusTotal/yara-x
-          ref: v${{ inputs.version }}
+          ref: v${{ env.YARAX_VERSION }}
           path: yara-x
 
       - name: Install Rust
@@ -49,27 +59,34 @@ jobs:
           LIB="$(find target/release -maxdepth 1 -type f -name 'libyara_x_capi.so*' | head -n1)"
           if [[ -z "$LIB" ]]; then
             echo "libyara_x_capi.so not found" >&2
+            find target -maxdepth 4 -type f -name '*yara*x*capi*' -print || true
             exit 1
           fi
           mkdir -p ../runtime-package
           cp -L "$LIB" ../runtime-package/libyara_x_capi.so
           cp LICENSE ../runtime-package/LICENSE.YARA-X
-          printf '%s\n' '${{ inputs.version }}' > ../runtime-package/VERSION
+          printf '%s\n' '${{ env.YARAX_VERSION }}' > ../runtime-package/VERSION
           {
             echo "provider=yara-x"
-            echo "version=${{ inputs.version }}"
+            echo "version=${{ env.YARAX_VERSION }}"
             echo "arch=${{ matrix.arch }}"
-            echo "source=https://github.com/VirusTotal/yara-x/releases/tag/v${{ inputs.version }}"
+            echo "source=https://github.com/VirusTotal/yara-x/releases/tag/v${{ env.YARAX_VERSION }}"
           } > ../runtime-package/MANIFEST
+
+      - name: Validate native runtime
+        run: |
+          set -euo pipefail
+          file runtime-package/libyara_x_capi.so
+          test -s runtime-package/libyara_x_capi.so
+          readelf -h runtime-package/libyara_x_capi.so | grep -E 'Class:|Machine:'
 
       - name: Package runtime
         run: |
           set -euo pipefail
-          ASSET="neta-yarax-runtime-v${{ inputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+          ASSET="neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz"
           tar -C runtime-package -czf "$ASSET" \
             libyara_x_capi.so VERSION LICENSE.YARA-X MANIFEST
           sha256sum "$ASSET" > "$ASSET.sha256"
-          file runtime-package/libyara_x_capi.so
           ls -lh "$ASSET" "$ASSET.sha256"
 
       - name: Upload workflow artifact
@@ -77,12 +94,12 @@ jobs:
         with:
           name: yarax-runtime-${{ matrix.arch }}
           path: |
-            neta-yarax-runtime-v${{ inputs.version }}-linux-${{ matrix.arch }}.tar.gz
-            neta-yarax-runtime-v${{ inputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256
+            neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz
+            neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
 
   publish:
-    if: ${{ inputs.publish }}
+    if: ${{ github.event_name == 'push' || inputs.publish }}
     needs: build
     runs-on: ubuntu-24.04
     steps:
@@ -95,7 +112,7 @@ jobs:
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ env.YARAX_VERSION }}
         run: |
           set -euo pipefail
           TAG="yarax-runtime-v${VERSION}"
