@@ -13,6 +13,8 @@ namespace neta {
 struct YaraXProviderConfig {
     std::filesystem::path rules_path;
     std::string ruleset_id{"default"};
+    std::filesystem::path runtime_library_path{
+        "/usr/local/lib/neta/yara-x/current/libyara_x_capi.so"};
     std::size_t max_artifact_bytes{64U * 1024U * 1024U};
     std::uint64_t timeout_seconds{5};
 };
@@ -30,6 +32,8 @@ public:
     [[nodiscard]] std::string name() const override;
     [[nodiscard]] AntimalwareEvidence scan(const ArtifactIdentity& artifact) override;
     [[nodiscard]] bool available() const noexcept;
+    [[nodiscard]] std::string runtime_version() const;
+    [[nodiscard]] std::string unavailable_reason() const;
 
 private:
     class Impl;
