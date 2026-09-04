@@ -6,8 +6,8 @@ set -euo pipefail
 # Run with: sudo ./deploy/linux/install-or-update.sh
 #
 # NETA_UPDATE_BRANCH can select a side branch for validation. It defaults to main.
-# YARA-X is always excluded as a link-time dependency; the Linux provider loads the
-# optional prebuilt runtime from /usr/local/lib/neta/yara-x/current at runtime.
+# YARA-X support is compiled only as a runtime loader; the Linux endpoint never links
+# libyara_x_capi into neta-agent and never needs YARA-X headers/Rust/Cargo to build.
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run this script with sudo" >&2
@@ -87,17 +87,11 @@ run_as_caller git fetch origin "$UPDATE_BRANCH"
 run_as_caller git checkout "$UPDATE_BRANCH"
 run_as_caller git pull --ff-only origin "$UPDATE_BRANCH"
 
-# CMake detects the native CPU architecture. Architecture-specific build directories
-# prevent stale CMake caches from another CPU architecture being reused.
-#
-# NETA_YARA_X=OFF here deliberately disables the old pkg-config/link-time integration.
-# The provider itself is runtime-loaded on Linux and does not need the YARA-X headers,
-# pkg-config file, Rust, Cargo, or the shared library to build neta-agent.
-echo "==> Configuring $NETA_ARCH validation build with eBPF required"
+echo "==> Configuring $NETA_ARCH validation build with eBPF and runtime-loaded YARA-X provider"
 run_as_caller cmake -S "$REPO_DIR" -B "$TEST_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
   -DNETA_EBPF=ON \
-  -DNETA_YARA_X=OFF \
+  -DNETA_YARA_X=ON \
   -DNETA_ENABLE_TESTS=ON
 
 echo "==> Building validation targets"
@@ -110,7 +104,7 @@ echo "==> Configuring $NETA_ARCH production Release build"
 run_as_caller cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNETA_EBPF=ON \
-  -DNETA_YARA_X=OFF \
+  -DNETA_YARA_X=ON \
   -DNETA_ENABLE_TESTS=OFF
 
 echo "==> Building production Release binary"
