@@ -1,73 +1,192 @@
-# YARA-X Linux Integration Foundation
+# YARA-X Linux Integration
 
-Status: side-branch implementation design
+Status: side-branch implementation
 
 Branch: `feature/process-artifact-assurance-yarax`
 
-Last reviewed: 2026-09-03
+Last reviewed: 2026-09-04
 
 ## Goal
 
-Start NETA's Process & Artifact Assurance work with a provider model that is portable in the core but implemented only for Linux in the current repository. YARA-X is the first concrete antimalware provider. The design intentionally supports multiple providers contributing independent evidence to the same artifact/process timeline.
+NETA treats YARA-X as an optional antimalware evidence provider, not as a required networking dependency and not as a final trust verdict. YARA-X findings are intended to correlate with process execution, file provenance, memory transitions, DNS/TLS/network activity, baseline state, and later cooperative/fleet evidence.
 
-This is not an attempt to turn NETA into a conventional antivirus product. Antimalware findings remain evidence that NETA can correlate with execution, file provenance, memory transitions, DNS/TLS/network activity, baseline state, and later cooperative/fleet evidence.
+The endpoint design intentionally keeps `neta-agent` small and avoids Rust/Cargo/YARA-X source builds on deployed systems.
 
-## What is cross-platform in this slice
+## Deployment architecture
 
-The following concepts are platform-neutral and live in the portable NETA API:
+```text
+NETA core binary
+    |
+    +--> networking / eBPF / TLS / DNS / fleet
+    |
+    +--> YaraXProvider
+            |
+            +--> dlopen("/usr/local/lib/neta/yara-x/current/libyara_x_capi.so")
+                    |
+                    +--> available: compile configured rules and scan
+                    +--> absent/incompatible: UNSUPPORTED evidence; NETA keeps running
+```
 
-- `ArtifactIdentity`;
-- normalized antimalware scan states;
-- `AntimalwareMatch` and `AntimalwareEvidence`;
-- `AntimalwareProvider` interface;
-- `AntimalwareProviderSet` fan-out composition;
-- provider/ruleset provenance fields;
-- the rule that provider output is evidence rather than a final trust verdict.
+The YARA-X C API is resolved at runtime with `dlopen`/`dlsym`. `neta-agent` does not require YARA-X headers, a `yara_x_capi.pc` file, Rust, Cargo, or the YARA-X source tree on the endpoint.
 
-YARA-X itself provides C/C++ support for Linux, macOS, and Windows. Therefore the provider abstraction and most of the YARA-X userspace scanning logic can be reused when NETA gains non-Linux backends.
+The runtime is deliberately kept loaded until process exit. YARA-X documents special global finalization requirements before unloading a dynamically loaded library, while NETA has no need for hot-unload semantics.
 
-## What is Linux-only now
+## Runtime layout
 
-The repository currently rejects non-Linux CMake builds, and the concrete YARA-X provider is currently under `src/platform/linux/`.
+```text
+/usr/local/lib/neta/yara-x/
+    1.20.0/
+        libyara_x_capi.so
+        VERSION
+        LICENSE.YARA-X
+        MANIFEST
+    current -> 1.20.0
+```
 
-Linux-only or Linux-specific work includes:
+The provider reads `current/VERSION` for evidence provenance. The library path can be overridden for development/testing with:
 
-- discovering and linking `yara_x_capi` through `pkg-config`;
-- the future `sched_process_exec` eBPF trigger;
-- file-lifecycle eBPF/LSM triggers;
-- mmap/mprotect/LSM memory-anomaly triggers;
-- `/proc` or `process_vm_readv` based memory collection;
-- Linux device/inode/mount-namespace artifact identity;
-- any future BPF LSM enforcement path.
+```bash
+NETA_YARAX_LIBRARY=/path/to/libyara_x_capi.so
+```
 
-The first implementation does not pretend these mechanisms are portable.
+## Independent update lifecycles
 
-## Current branch implementation
+NETA binary, YARA-X engine, and YARA rules are intentionally separate:
 
-The side branch adds:
+```text
+neta-agent binary       relatively infrequent
+YARA-X runtime          when upstream engine/security updates are approved
+YARA ruleset            independently, potentially much more frequently
+```
 
-1. `AntimalwareProvider` — one normalized provider boundary.
-2. `AntimalwareProviderSet` — runs all enabled providers and preserves every result independently.
-3. `YaraXProvider` — optional Linux provider using the official YARA-X C API.
-4. `NETA_YARA_X=AUTO|ON|OFF` CMake selection.
-5. Graceful `UNSUPPORTED` evidence when YARA-X is not available in the build.
-6. Bounded artifact reads and a YARA-X scan timeout.
-7. Rule-set SHA-256 provenance.
-8. Focused provider-composition tests that do not require YARA-X to be installed.
+Evidence keeps provider version, ruleset ID, and ruleset SHA-256 so historical findings remain replayable and attributable.
 
-The YARA-X backend is intentionally optional. `AUTO` discovers `yara_x_capi`; `ON` makes its absence a configuration error; `OFF` always builds the unsupported stub.
+## Prebuilt runtime production
 
-## Why providers are composed rather than merged into one verdict
+`.github/workflows/yarax-runtime.yml` builds the YARA-X C API in GitHub Actions on native Linux x86_64 and ARM64 runners. Rust and `cargo-c` exist only in that controlled build job.
 
-Different engines answer different questions. NETA should retain their evidence separately:
+The workflow packages:
+
+```text
+neta-yarax-runtime-v<VERSION>-linux-x86_64.tar.gz
+neta-yarax-runtime-v<VERSION>-linux-arm64.tar.gz
+```
+
+with matching `.sha256` files. When `publish=true`, the workflow publishes or updates the repository release tag:
+
+```text
+yarax-runtime-v<VERSION>
+```
+
+Each endpoint package contains only:
+
+```text
+libyara_x_capi.so
+VERSION
+LICENSE.YARA-X
+MANIFEST
+```
+
+No Rust toolchain or YARA-X source is deployed.
+
+GitHub currently provides native `ubuntu-24.04` x86_64 and `ubuntu-24.04-arm` ARM64 hosted runners, so both runtime artifacts are built natively rather than cross-compiled.
+
+## Endpoint runtime install/update
+
+Use:
+
+```bash
+sudo ./deploy/linux/install-yarax-runtime.sh 1.20.0
+```
+
+The installer:
+
+1. selects x86_64 or ARM64 from the running kernel;
+2. downloads the matching NETA runtime release asset and checksum;
+3. verifies SHA-256 before extraction;
+4. verifies the shared object's native architecture;
+5. installs into a versioned directory;
+6. atomically changes `current` to the new version;
+7. restarts `neta-agent.service` if it is active.
+
+The endpoint never compiles YARA-X.
+
+Rollback is an atomic symlink change followed by an agent restart, for example:
+
+```bash
+sudo ln -sfn 1.20.0 /usr/local/lib/neta/yara-x/current.new
+sudo mv -Tf /usr/local/lib/neta/yara-x/current.new /usr/local/lib/neta/yara-x/current
+sudo systemctl restart neta-agent
+```
+
+## NETA build behavior
+
+The Linux provider implementation is compiled into NETA but loads the YARA-X engine only at runtime.
+
+The supported Linux deployment installer explicitly configures:
+
+```text
+-DNETA_YARA_X=OFF
+```
+
+This disables the earlier pkg-config/link-time integration path and guarantees that an installed endpoint binary does not acquire a hard ELF dependency on YARA-X. The installer also checks `ldd` and fails if a YARA dependency appears.
+
+`NETA_YARA_X` remains in CMake temporarily for compatibility with earlier development builds; endpoint/release builds must keep it `OFF`. A later cleanup can remove that legacy build-time discovery path entirely after this side branch is validated.
+
+## Missing or broken runtime semantics
+
+A missing runtime must not prevent NETA from starting.
+
+Examples:
+
+```text
+runtime absent       -> provider unavailable / UNSUPPORTED
+missing ABI symbol   -> provider unavailable / UNSUPPORTED
+rules unreadable     -> SCAN_ERROR
+rules fail compile   -> SCAN_ERROR
+scan timeout         -> INCONCLUSIVE
+scan engine error    -> SCAN_ERROR
+no rule matches      -> NO_MATCH
+rule matches         -> MATCH
+```
+
+`NO_MATCH` never means that an artifact is safe.
+
+## Current process-exec flow
+
+```text
+sched_process_exec
+      |
+      v
+ProcessExecEvent
+      |
+      v
+ExecAntimalwareMonitor
+      |
+      +--> executable path / size / SHA-256
+      |
+      +--> YaraXProvider
+              |
+              +--> runtime C API
+              +--> configured rules
+              +--> normalized AntimalwareEvidence
+```
+
+The deterministic integration harness executes `neta_yara_exec_trigger_target`, observes it through `sched_process_exec`, hashes the artifact, scans it with the runtime-loaded YARA-X engine, and requires the rule `neta_exec_trigger_marker` to match.
+
+If the runtime is not installed, the normal CI test skips with return code 77. The AWS ARM64 validation host should run this test with a published runtime installed and must PASS rather than SKIP before merge to `main`.
+
+## Provider model
+
+The portable interface remains provider-oriented:
 
 ```text
 Artifact / process
       |
       +--> YARA-X             pattern/rule evidence
-      +--> Platform AV        vendor/native malware verdict
-      +--> Reputation         hash/reputation evidence
-      +--> Runtime detector   behavior/anomaly evidence
+      +--> Platform AV        future vendor/native verdict
+      +--> Reputation         future hash/reputation evidence
+      +--> Runtime detector   future behavior/anomaly evidence
       |
       v
 normalized evidence set
@@ -76,220 +195,24 @@ normalized evidence set
 NETA deterministic correlation rules
 ```
 
-Do not use majority voting. A `NO_MATCH` from one provider must not cancel a high-confidence `MATCH` from another provider, and absence of a match is never proof that an artifact is safe.
+Do not use majority voting. A `NO_MATCH` from one provider must not cancel a high-confidence `MATCH` from another provider.
 
-Useful deterministic combinations include:
+## Dependency policy
 
-```text
-YARA-X high-confidence malware-family match
-+ second independent signature/reputation match
-    -> very strong artifact evidence
+YARA-X is BSD-3-Clause and is the first concrete antimalware provider. Its engine is built outside the deployed endpoint and shipped as an optional runtime package.
 
-YARA-X suspicious-loader match
-+ executable first seen
-+ new DNS/TLS destination shortly after exec
-    -> strong correlated host/network finding
-
-YARA-X no match
-+ platform AV malware verdict
-    -> retain both results; do not downgrade the platform AV finding
-
-YARA-X match
-+ anonymous RW->RX memory transition
-+ new outbound connection
-    -> strong process-injection/fileless-style correlation
-```
-
-Provider confidence and semantic category should eventually be explicit rather than inferred only from provider name.
-
-## Other providers/frameworks to combine with YARA-X
-
-### Platform-native antimalware provider
-
-This should be the preferred second provider on operating systems that expose a supported antimalware/reputation API.
-
-Future examples:
-
-- Windows: a Microsoft-supported Defender/AMSI/security API integration where the API semantics actually fit artifact scanning.
-- macOS: supported Apple security/EndpointSecurity mechanisms where appropriate.
-- Linux: there is no single universal native AV API equivalent, so Linux remains provider/plugin oriented.
-
-This provider category is portable at the semantic interface but necessarily platform-specific in implementation.
-
-### ClamAV as an optional external provider
-
-ClamAV can add conventional malware-signature coverage that complements YARA-X. However, `libclamav` is GPL-2.0 and must not be embedded or linked into `neta-agent` under the current dependency policy.
-
-If ClamAV support is added, prefer a separately installed `clamd` service and a small protocol adapter. This still requires explicit license/distribution review, but it avoids making `libclamav` part of the NETA binary.
-
-Potential combination:
-
-```text
-YARA-X -> custom/curated structural and threat rules
-clamd  -> conventional known-malware signatures
-NETA   -> process/file/memory/network correlation
-```
-
-### Hash/reputation provider
-
-A provider can query a configured local or remote reputation source using artifact SHA-256. This is useful because it is independent of local pattern matching.
-
-Requirements:
-
-- disabled by default if it sends hashes or metadata off-host;
-- explicit privacy/operator policy;
-- bounded caching;
-- source and response provenance;
-- no file upload without explicit separate opt-in;
-- deterministic treatment of unavailable/rate-limited services.
-
-### Runtime behavior provider
-
-Falco is Apache-2.0 and useful as a source of behavioral-security concepts, but embedding the whole Falco stack is not recommended because NETA already owns an eBPF observation pipeline.
-
-Prefer one of:
-
-1. consume selected external Falco findings through an adapter; or
-2. implement the small set of runtime signals NETA actually needs with its existing eBPF architecture.
-
-These signals should be represented as runtime evidence, not disguised as YARA/antimalware matches.
-
-## Provider categories
-
-The normalized model should evolve toward explicit evidence categories:
-
-```text
-SIGNATURE_MATCH
-STRUCTURAL_RULE_MATCH
-REPUTATION_KNOWN_MALICIOUS
-PLATFORM_AV_DETECTION
-RUNTIME_BEHAVIOR_ANOMALY
-MEMORY_RULE_MATCH
-PROVIDER_ERROR
-```
-
-This gives the deterministic rule engine meaningful semantics while still retaining the original provider name, version, rule/database identity, and raw match metadata.
-
-## Linux build sequence
-
-### Slice 1 — provider foundation (this branch)
-
-- portable provider API;
-- multi-provider fan-out;
-- optional YARA-X C API backend;
-- normalized result states;
-- bounded file scan;
-- rule-set hash provenance;
-- focused tests;
-- no automatic connection verdict changes.
-
-### Slice 2 — executable identity and manual validation
-
-- stable artifact identity: path + device/inode + size + SHA-256;
-- result cache keyed by `(artifact_sha256, provider, provider_version, ruleset_hash)`;
-- a small CLI/debug path to scan one artifact and print normalized evidence;
-- test rule set for deterministic integration tests.
-
-### Slice 3 — eBPF exec trigger
-
-- `sched_process_exec` observation;
-- stable `PROC-*` process identity rather than PID-only state;
-- asynchronous userspace scan request;
-- `PROC-* -> artifact -> YARA-X evidence` linkage;
-- correlation with existing `CONN-*` observations.
-
-### Slice 4 — file provenance
-
-- filtered write/close lifecycle tracking;
-- race-safe artifact reopening/identity verification;
-- writer process -> artifact -> later exec relation;
-- scan newly materialized executable payloads.
-
-### Slice 5 — memory triggers
-
-- selected mmap/mprotect/LSM telemetry;
-- RW->RX/RWX/anonymous executable memory signals;
-- bounded userspace memory reads;
-- YARA-X block scanning;
-- no synchronous userspace scan on the LSM critical path.
-
-### Slice 6 — additional providers and deterministic fusion rules
-
-- second provider adapter;
-- explicit evidence categories/confidence;
-- rules combining independent provider evidence with exec/file/memory/network evidence;
-- persistence/export/replay.
-
-## Enforcement boundary
-
-Detection comes first. BPF LSM can deny operations, but a fresh YARA-X userspace scan must not be inserted synchronously into an exec LSM decision path.
-
-Possible later enforcement:
-
-```text
-artifact previously scanned/classified
-      -> classification cached in policy map
-      -> later exec LSM hook checks known classification
-      -> allow or deny
-```
-
-This is separate, opt-in work after detection semantics are stable.
-
-## Dependency review
-
-### YARA-X
-
-- Project: VirusTotal YARA-X
-- Purpose: pattern/rule scanning for file and selected memory content
-- License: BSD-3-Clause
-- Maintenance: active; YARA-X is the forward-development direction of the YARA ecosystem
-- Major concern: rules and hostile inputs must be resource-bounded; transitive dependencies and exact release artifacts require normal release review
-- Why existing stack is insufficient: libbpf observes events but does not provide malware content matching; OpenSSL/SQLite are unrelated to malware rule scanning
-
-Official integration API used: YARA-X C/C++ API (`yara_x_capi`).
-
-### ClamAV
-
-- Purpose: known-malware/signature coverage
-- License: GPL-2.0
-- Maintenance: active
-- Major concern: incompatible with the current policy for embedding/linking GPL code
-- Recommendation: do not link `libclamav`; consider only a separately installed daemon adapter after explicit license review
-
-### Falco
-
-- Purpose: runtime behavioral detections
-- License: Apache-2.0
-- Maintenance: active
-- Major concern: architectural overlap and weight, not license incompatibility
-- Recommendation: consume selected findings or reuse concepts rather than embedding the full stack initially
-
-## Cross-platform future mapping
-
-| Capability | Linux now | Windows later | macOS later |
-|---|---|---|---|
-| Provider API | Yes | Reusable | Reusable |
-| YARA-X userspace file scanning | Yes | Technically reusable | Technically reusable |
-| Exec trigger | eBPF `sched_process_exec` | Windows-native process telemetry required | EndpointSecurity/native telemetry required |
-| File write provenance | eBPF/LSM/VFS | Windows-native file/minifilter telemetry required | EndpointSecurity/native telemetry required |
-| Memory anomaly trigger | eBPF/LSM | Windows-native telemetry/driver path required | Platform-specific mechanisms required |
-| YARA-X selected-memory scan | Linux process memory collection | Different memory-access implementation | Different memory-access implementation |
-| LSM-style enforcement | BPF LSM | Different Windows enforcement architecture | Different Apple enforcement architecture |
-
-The portable provider/evidence model should be reused. The event collectors and enforcement mechanisms should not be artificially abstracted as if the kernels expose equivalent primitives.
+ClamAV remains a possible external `clamd` provider later; NETA must not link `libclamav` without explicit GPL/distribution review.
 
 ## Current non-goals
 
-This branch does not yet:
+This branch still does not:
 
-- automatically scan every exec;
 - persist antimalware evidence in SQLite;
 - modify Trust verdicts;
 - scan process memory;
 - monitor file writes;
-- embed ClamAV/Falco;
-- download community YARA rules automatically;
-- implement blocking/prevention;
-- implement Windows or macOS collectors.
+- automatically download YARA community rules;
+- block/prevent execution;
+- implement Windows YARA-X process triggers.
 
-These omissions are deliberate so the first integration remains reviewable and does not destabilize the existing socket-assurance path.
+The current merge gate is Linux runtime loading + deterministic exec-trigger validation on real x86_64/ARM64 systems without endpoint Rust/Cargo.
