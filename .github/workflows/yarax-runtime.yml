@@ -56,12 +56,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo cbuild -p yara-x-capi --release
-          LIB="$(find target/release -maxdepth 1 -type f -name 'libyara_x_capi.so*' | head -n1)"
+          LIB="$(find target -type f -path '*/release/libyara_x_capi.so' | head -n1)"
           if [[ -z "$LIB" ]]; then
             echo "libyara_x_capi.so not found" >&2
-            find target -maxdepth 4 -type f -name '*yara*x*capi*' -print || true
+            find target -maxdepth 5 -type f -name '*yara*x*capi*' -print || true
             exit 1
           fi
+          echo "Using YARA-X C API runtime: $LIB"
           mkdir -p ../runtime-package
           cp -L "$LIB" ../runtime-package/libyara_x_capi.so
           cp LICENSE ../runtime-package/LICENSE.YARA-X
