@@ -123,15 +123,20 @@ sudo systemctl restart neta-agent
 
 The Linux provider implementation is compiled into NETA but loads the YARA-X engine only at runtime.
 
-The supported Linux deployment installer explicitly configures:
+`NETA_YARA_X=AUTO|ON|OFF` controls only whether the Linux runtime-loader provider is compiled/enabled:
 
 ```text
--DNETA_YARA_X=OFF
+AUTO / ON   compile the runtime loader; no YARA-X headers or libraries are required
+OFF         disable the YARA-X provider
 ```
 
-This disables the earlier pkg-config/link-time integration path and guarantees that an installed endpoint binary does not acquire a hard ELF dependency on YARA-X. The installer also checks `ldd` and fails if a YARA dependency appears.
+There is no `pkg-config yara_x_capi` detection and no link-time YARA-X dependency. The supported Linux deployment installer explicitly uses:
 
-`NETA_YARA_X` remains in CMake temporarily for compatibility with earlier development builds; endpoint/release builds must keep it `OFF`. A later cleanup can remove that legacy build-time discovery path entirely after this side branch is validated.
+```text
+-DNETA_YARA_X=ON
+```
+
+so the runtime loader is available while the installed endpoint binary remains independent from `libyara_x_capi.so`. The installer checks `ldd` and fails if any hard YARA dependency appears.
 
 ## Missing or broken runtime semantics
 
