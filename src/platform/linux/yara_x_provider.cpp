@@ -140,9 +140,9 @@ YaraXApi load_api(const std::filesystem::path& library_path) {
         throw;
     }
 
-    // Intentionally keep the runtime loaded for the process lifetime. YARA-X documents
-    // special process-wide finalization requirements before safely unloading its shared
-    // library, and NETA does not need hot-unload semantics.
+    // Keep the runtime loaded for the process lifetime. YARA-X documents special
+    // process-wide finalization requirements before safely unloading its shared library,
+    // and NETA does not need hot-unload semantics.
     return api;
 }
 
@@ -159,7 +159,6 @@ std::string last_error_or(const YaraXApi& api, std::string fallback) {
 class YaraXProvider::Impl {
 public:
     explicit Impl(YaraXProviderConfig config) : config_(std::move(config)) {
-#if defined(NETA_YARA_X_RUNTIME_ENABLED)
         if (const char* override_path = std::getenv("NETA_YARAX_LIBRARY");
             override_path != nullptr && *override_path != '\0') {
             config_.runtime_library_path = override_path;
@@ -189,10 +188,6 @@ public:
             unavailable_reason_ = error.what();
             return;
         }
-#else
-        unavailable_state_ = AntimalwareScanState::Unsupported;
-        unavailable_reason_ = "YARA-X runtime provider disabled at build time";
-#endif
     }
 
     ~Impl() {
