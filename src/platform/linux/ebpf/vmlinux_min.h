@@ -77,4 +77,10 @@ struct task_struct {
     struct nsproxy *nsproxy;
 } __attribute__((preserve_access_index));
 
+// Only the data-location field is needed by the sched_process_exec collector.
+// CO-RE relocates this field against the kernel's BTF definition.
+struct trace_event_raw_sched_process_exec {
+    __u32 __data_loc_filename;
+} __attribute__((preserve_access_index));
+
 #endif

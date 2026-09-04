@@ -4,6 +4,10 @@ set -euo pipefail
 # Install or update neta-agent from this repository on Debian/Ubuntu Linux.
 # Supports native x86_64/amd64 and arm64/aarch64 builds.
 # Run with: sudo ./deploy/linux/install-or-update.sh
+#
+# NETA_UPDATE_BRANCH can select a side branch for validation. It defaults to main.
+# YARA-X support is compiled only as a runtime loader; the Linux endpoint never links
+# libyara_x_capi into neta-agent and never needs YARA-X headers/Rust/Cargo to build.
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run this script with sudo" >&2
@@ -14,6 +18,7 @@ CALLER="${SUDO_USER:-root}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 JOBS="${NETA_BUILD_JOBS:-$(nproc)}"
+UPDATE_BRANCH="${NETA_UPDATE_BRANCH:-main}"
 
 run_as_caller() {
   if [[ "$CALLER" == "root" ]]; then
@@ -22,6 +27,11 @@ run_as_caller() {
     sudo -u "$CALLER" -H "$@"
   fi
 }
+
+if [[ ! "$UPDATE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$UPDATE_BRANCH" == -* ]]; then
+  echo "ERROR: invalid NETA_UPDATE_BRANCH: $UPDATE_BRANCH" >&2
+  exit 1
+fi
 
 KERNEL_ARCH="$(uname -m)"
 DEB_ARCH="$(dpkg --print-architecture 2>/dev/null || true)"
@@ -54,6 +64,7 @@ echo "    kernel: $(uname -sr)"
 echo "    machine: $KERNEL_ARCH"
 echo "    package architecture: ${DEB_ARCH:-unknown}"
 echo "    NETA native build architecture: $NETA_ARCH"
+echo "    update branch: $UPDATE_BRANCH"
 if [[ -r /sys/kernel/btf/vmlinux ]]; then
   echo "    kernel BTF: available"
 else
@@ -66,28 +77,21 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git build-essential cmake clang pkg-config \
   libbpf-dev libsqlite3-dev libssl-dev
 
-echo "==> Updating repository main branch"
+echo "==> Updating repository branch $UPDATE_BRANCH"
 cd "$REPO_DIR"
 if ! run_as_caller git diff --quiet || ! run_as_caller git diff --cached --quiet; then
   echo "ERROR: repository has local changes; commit/stash them before updating" >&2
   exit 1
 fi
-run_as_caller git fetch origin main
-run_as_caller git checkout main
-run_as_caller git pull --ff-only origin main
+run_as_caller git fetch origin "$UPDATE_BRANCH"
+run_as_caller git checkout "$UPDATE_BRANCH"
+run_as_caller git pull --ff-only origin "$UPDATE_BRANCH"
 
-# CMake detects the native CPU architecture. The project maps x86_64 to the
-# BPF x86 target and aarch64/arm64 to the BPF arm64 target. Architecture-specific
-# build directories prevent stale CMake caches from another platform being reused.
-#
-# The current test suite uses assertions as test checks. CMake Release defines
-# NDEBUG, which disables those checks and makes some legacy tests invalid.
-# Validate the source in Debug (same mode used by CI), then build a separate
-# production Release binary with tests disabled.
-echo "==> Configuring $NETA_ARCH validation build with eBPF required"
+echo "==> Configuring $NETA_ARCH validation build with eBPF and runtime-loaded YARA-X provider"
 run_as_caller cmake -S "$REPO_DIR" -B "$TEST_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
   -DNETA_EBPF=ON \
+  -DNETA_YARA_X=ON \
   -DNETA_ENABLE_TESTS=ON
 
 echo "==> Building validation targets"
@@ -100,6 +104,7 @@ echo "==> Configuring $NETA_ARCH production Release build"
 run_as_caller cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNETA_EBPF=ON \
+  -DNETA_YARA_X=ON \
   -DNETA_ENABLE_TESTS=OFF
 
 echo "==> Building production Release binary"
@@ -116,6 +121,12 @@ case "$NETA_ARCH" in
     grep -Eq 'aarch64|ARM aarch64' <<<"$BINARY_ARCH" || { echo "ERROR: built binary is not arm64/aarch64" >&2; exit 1; }
     ;;
 esac
+
+if ldd "$RELEASE_BUILD_DIR/neta-agent" 2>/dev/null | grep -qi 'yara'; then
+  echo "ERROR: neta-agent unexpectedly has a link-time YARA dependency" >&2
+  ldd "$RELEASE_BUILD_DIR/neta-agent" >&2 || true
+  exit 1
+fi
 
 echo "==> Installing binary and TLS context shim"
 install -m 0755 "$RELEASE_BUILD_DIR/neta-agent" /usr/local/bin/neta-agent
@@ -174,6 +185,9 @@ echo
 echo "Service status:"
 systemctl status neta-agent.service --no-pager || true
 
+echo
+echo "Optional YARA-X runtime:"
+echo "  sudo $REPO_DIR/deploy/linux/install-yarax-runtime.sh <version>"
 echo
 echo "If this machine is not enrolled yet, run:"
 echo "  sudo $REPO_DIR/deploy/linux/enroll.sh <coordinator-https-url> <fleet-ca.crt> <display-name> [fleet-id]"

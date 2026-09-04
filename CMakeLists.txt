@@ -18,9 +18,15 @@ set_property(CACHE NETA_EBPF PROPERTY STRINGS AUTO ON OFF)
 if(NOT NETA_EBPF MATCHES "^(AUTO|ON|OFF)$")
     message(FATAL_ERROR "NETA_EBPF must be AUTO, ON, or OFF")
 endif()
+set(NETA_YARA_X "AUTO" CACHE STRING "Build runtime-loaded YARA-X antimalware provider: AUTO, ON, or OFF")
+set_property(CACHE NETA_YARA_X PROPERTY STRINGS AUTO ON OFF)
+if(NOT NETA_YARA_X MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "NETA_YARA_X must be AUTO, ON, or OFF")
+endif()
 
 if(WIN32)
     set(NETA_EBPF "OFF" CACHE STRING "Windows does not use the Linux eBPF backend" FORCE)
+    set(NETA_YARA_X "OFF" CACHE STRING "YARA-X integration is Linux-only for now" FORCE)
     set(NETA_BUILD_TLS_CONTEXT_SHIM OFF CACHE BOOL "Linux OpenSSL TLS context shim" FORCE)
 endif()
 
@@ -31,6 +37,7 @@ endif()
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
+find_package(PkgConfig QUIET)
 
 function(neta_enable_warnings target)
     if(MSVC)
@@ -40,9 +47,12 @@ function(neta_enable_warnings target)
     endif()
 endfunction()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NETA_YARA_X STREQUAL "OFF")
+    message(STATUS "YARA-X provider enabled via runtime loading (no build-time YARA-X dependency)")
+endif()
+
 set(NETA_HAVE_EBPF FALSE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NETA_EBPF STREQUAL "OFF")
-    find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(LIBBPF QUIET IMPORTED_TARGET libbpf)
     endif()
@@ -89,8 +99,10 @@ else()
         src/platform/linux/socket_diag.cpp
         src/platform/linux/process_resolver.cpp
         src/platform/linux/route_observer.cpp
+        src/platform/linux/yara_x_provider.cpp
         src/platform/linux/ebpf/lifecycle_decoder.cpp
         src/platform/linux/ebpf/name_resolution_decoder.cpp
+        src/platform/linux/ebpf/process_exec_decoder.cpp
         src/platform/linux/tls_session_decoder.cpp
         src/platform/linux/tls_session_observer.cpp
     )
@@ -163,17 +175,46 @@ if(NETA_HAVE_EBPF)
         VERBATIM
     )
 
+    set(NETA_PROCESS_EXEC_BPF_OBJECT "${NETA_GENERATED_DIR}/process_exec.bpf.o")
+    set(NETA_PROCESS_EXEC_BPF_BYTES "${NETA_GENERATED_DIR}/process_exec_bpf_bytes.inc")
+    add_custom_command(
+        OUTPUT "${NETA_PROCESS_EXEC_BPF_OBJECT}"
+        COMMAND "${NETA_CLANG_EXECUTABLE}" -g -O2 -target bpf
+                "-fdebug-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=."
+                -D__TARGET_ARCH_${NETA_BPF_ARCH} ${NETA_BPF_INCLUDE_ARGS}
+                -c "${NETA_BPF_DIR}/process_exec.bpf.c"
+                -o "${NETA_PROCESS_EXEC_BPF_OBJECT}"
+        DEPENDS
+            "${NETA_BPF_DIR}/process_exec.bpf.c"
+            "${NETA_BPF_DIR}/process_exec_wire.h"
+            "${NETA_BPF_DIR}/vmlinux_min.h"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${NETA_PROCESS_EXEC_BPF_BYTES}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${NETA_PROCESS_EXEC_BPF_OBJECT}"
+                "-DOUTPUT=${NETA_PROCESS_EXEC_BPF_BYTES}" "-DSYMBOL=ProcessExec"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS "${NETA_PROCESS_EXEC_BPF_OBJECT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+        VERBATIM
+    )
+
     set_source_files_properties(src/platform/linux/ebpf/lifecycle_loader.cpp
         PROPERTIES OBJECT_DEPENDS "${NETA_LIFECYCLE_BPF_BYTES}")
     set_source_files_properties(src/platform/linux/ebpf/name_resolution_loader.cpp
         PROPERTIES OBJECT_DEPENDS "${NETA_NAME_RESOLUTION_BPF_BYTES}")
+    set_source_files_properties(src/platform/linux/ebpf/process_exec_loader.cpp
+        PROPERTIES OBJECT_DEPENDS "${NETA_PROCESS_EXEC_BPF_BYTES}")
     list(APPEND NETA_PLATFORM_SOURCES
          src/platform/linux/ebpf/lifecycle_loader.cpp
-         src/platform/linux/ebpf/name_resolution_loader.cpp)
+         src/platform/linux/ebpf/name_resolution_loader.cpp
+         src/platform/linux/ebpf/process_exec_loader.cpp)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND NETA_PLATFORM_SOURCES
          src/platform/linux/ebpf/lifecycle_loader_stub.cpp
-         src/platform/linux/ebpf/name_resolution_loader_stub.cpp)
+         src/platform/linux/ebpf/name_resolution_loader_stub.cpp
+         src/platform/linux/ebpf/process_exec_loader_stub.cpp)
 endif()
 
 add_library(neta_core
@@ -185,6 +226,8 @@ add_library(neta_core
     src/core/tcp_state.cpp
     src/core/lifecycle.cpp
     src/core/crypto.cpp
+    src/core/antimalware.cpp
+    src/core/exec_antimalware_monitor.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     ${NETA_FLEET_CLIENT_SOURCE}
@@ -215,6 +258,9 @@ endif()
 target_link_libraries(neta_core PUBLIC OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3 ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(neta_core PUBLIC iphlpapi ws2_32 advapi32 tdh)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NETA_YARA_X STREQUAL "OFF")
+    target_compile_definitions(neta_core PRIVATE NETA_YARA_X_RUNTIME_ENABLED=1)
 endif()
 if(NETA_HAVE_EBPF)
     target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
@@ -263,6 +309,23 @@ if(NETA_ENABLE_TESTS)
         target_include_directories(neta_tests PRIVATE src/platform/linux/ebpf)
         neta_enable_warnings(neta_tests)
         add_test(NAME neta_tests COMMAND neta_tests)
+
+        add_executable(neta_antimalware_provider_test tests/antimalware_provider_test.cpp)
+        target_link_libraries(neta_antimalware_provider_test PRIVATE neta_core)
+        neta_enable_warnings(neta_antimalware_provider_test)
+        add_test(NAME neta_antimalware_provider_test COMMAND neta_antimalware_provider_test)
+
+        add_executable(neta_yara_exec_trigger_target tests/yara_exec_trigger_target.cpp)
+        neta_enable_warnings(neta_yara_exec_trigger_target)
+
+        add_executable(neta_yara_exec_trigger_integration tests/yara_exec_trigger_integration.cpp)
+        target_link_libraries(neta_yara_exec_trigger_integration PRIVATE neta_core)
+        neta_enable_warnings(neta_yara_exec_trigger_integration)
+        add_test(NAME neta_yara_exec_trigger_integration
+            COMMAND neta_yara_exec_trigger_integration
+                $<TARGET_FILE:neta_yara_exec_trigger_target>
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/yara_exec_trigger.yar)
+        set_tests_properties(neta_yara_exec_trigger_integration PROPERTIES SKIP_RETURN_CODE 77)
 
         add_executable(neta_ms0_tests tests/ms0_tests.cpp)
         target_link_libraries(neta_ms0_tests PRIVATE neta_core)

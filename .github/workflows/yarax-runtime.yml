@@ -1,0 +1,120 @@
+name: build-yarax-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: YARA-X version without leading v (for example 1.20.0)
+        required: true
+        default: '1.20.0'
+      publish:
+        description: Publish/update yarax-runtime-v<version> release assets
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  YARAX_VERSION: ${{ inputs.version }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout YARA-X source
+        uses: actions/checkout@v4
+        with:
+          repository: VirusTotal/yara-x
+          ref: v${{ env.YARAX_VERSION }}
+          path: yara-x
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-c
+        run: cargo install cargo-c --locked
+
+      - name: Build C API runtime
+        working-directory: yara-x
+        run: |
+          set -euo pipefail
+          cargo cbuild -p yara-x-capi --release
+          LIB="$(find target -type f -path '*/release/libyara_x_capi.so' | head -n1)"
+          if [[ -z "$LIB" ]]; then
+            echo "libyara_x_capi.so not found" >&2
+            find target -maxdepth 5 -type f -name '*yara*x*capi*' -print || true
+            exit 1
+          fi
+          echo "Using YARA-X C API runtime: $LIB"
+          mkdir -p ../runtime-package
+          cp -L "$LIB" ../runtime-package/libyara_x_capi.so
+          cp LICENSE ../runtime-package/LICENSE.YARA-X
+          printf '%s\n' '${{ env.YARAX_VERSION }}' > ../runtime-package/VERSION
+          {
+            echo "provider=yara-x"
+            echo "version=${{ env.YARAX_VERSION }}"
+            echo "arch=${{ matrix.arch }}"
+            echo "source=https://github.com/VirusTotal/yara-x/releases/tag/v${{ env.YARAX_VERSION }}"
+          } > ../runtime-package/MANIFEST
+
+      - name: Validate native runtime
+        run: |
+          set -euo pipefail
+          file runtime-package/libyara_x_capi.so
+          test -s runtime-package/libyara_x_capi.so
+          readelf -h runtime-package/libyara_x_capi.so | grep -E 'Class:|Machine:'
+
+      - name: Package runtime
+        run: |
+          set -euo pipefail
+          ASSET="neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz"
+          tar -C runtime-package -czf "$ASSET" \
+            libyara_x_capi.so VERSION LICENSE.YARA-X MANIFEST
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          ls -lh "$ASSET" "$ASSET.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yarax-runtime-${{ matrix.arch }}
+          path: |
+            neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz
+            neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: yarax-runtime-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ env.YARAX_VERSION }}
+        run: |
+          set -euo pipefail
+          TAG="yarax-runtime-v${VERSION}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "NETA YARA-X runtime v${VERSION}" \
+              --notes "Prebuilt YARA-X C API runtime for NETA Linux endpoints. Built in GitHub Actions from VirusTotal/yara-x v${VERSION}; endpoint installation requires no Rust or Cargo."
+          fi
