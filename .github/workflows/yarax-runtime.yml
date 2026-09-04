@@ -12,19 +12,12 @@ on:
         required: true
         default: false
         type: boolean
-  # One-shot side-branch trigger used to publish the first validated runtime.
-  # Remove this push trigger after yarax-runtime-v1.20.0 is published.
-  push:
-    branches:
-      - feature/process-artifact-assurance-yarax
-    paths:
-      - .github/workflows/yarax-runtime.yml
 
 permissions:
   contents: write
 
 env:
-  YARAX_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '1.20.0' }}
+  YARAX_VERSION: ${{ inputs.version }}
 
 jobs:
   build:
@@ -100,7 +93,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    if: ${{ inputs.publish }}
     needs: build
     runs-on: ubuntu-24.04
     steps:
