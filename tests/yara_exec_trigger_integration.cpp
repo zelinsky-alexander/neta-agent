@@ -41,9 +41,10 @@ int main(int argc, char** argv) {
     yara_config.ruleset_id = "neta-exec-trigger-test";
     auto yara = std::make_unique<neta::YaraXProvider>(std::move(yara_config));
     if (!yara->available()) {
-        std::cout << "SKIP: YARA-X C API is unavailable in this build\n";
+        std::cout << "SKIP: YARA-X runtime unavailable: " << yara->unavailable_reason() << '\n';
         return kSkip;
     }
+    std::cout << "YARA-X runtime version=" << yara->runtime_version() << '\n';
 
     auto observer = neta::platform::make_process_exec_observer();
     if (!observer->capability().available()) {
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
 
             for (const auto& evidence : result.evidence) {
                 std::cout << "provider=" << evidence.provider_name
+                          << " version=" << evidence.provider_version
                           << " state=" << neta::to_string(evidence.state)
                           << " matches=" << evidence.matches.size() << '\n';
                 for (const auto& match : evidence.matches) {
