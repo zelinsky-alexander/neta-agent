@@ -1,6 +1,10 @@
 #include "neta/cli/fleet_command.hpp"
 #include "neta/platform.hpp"
 
+#ifdef _WIN32
+#include "neta/windows_service.hpp"
+#endif
+
 #include <iostream>
 #include <string>
 
@@ -50,6 +54,14 @@ int main(int argc, char** argv) {
     }
 
 #ifdef _WIN32
+    if (argc >= 2 && std::string(argv[1]) == "service") {
+        try {
+            return neta::platform::run_windows_service(argc, argv);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return 1;
+        }
+    }
     if (argc >= 2 && std::string(argv[1]) == "capabilities") {
         return windows_capabilities();
     }
@@ -64,6 +76,12 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet hello [--state-dir DIR]\n"
             << "  neta-agent fleet heartbeat [--state-dir DIR]\n"
             << "  neta-agent fleet announce --finding-id ID --host HOST --port PORT [--change CHANGE] [--performance VERDICT] [--trust VERDICT] [--evidence-root HASH] [--state-dir DIR]\n";
+#ifdef _WIN32
+        std::cout
+            << "\nWindows service:\n"
+            << "  neta-agent service [--all|--outbound|--inbound] [filters] [--db FILE] [--state-dir DIR] [--max-db-mb 200]\n"
+            << "  The service command must be launched by the Windows Service Control Manager.\n";
+#endif
     }
     return result;
 }

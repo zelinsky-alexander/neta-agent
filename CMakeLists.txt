@@ -79,6 +79,7 @@ if(WIN32)
         src/platform/windows/etw_lifecycle.cpp
         src/platform/windows/process_resolver.cpp
         src/platform/windows/route_observer.cpp
+        src/platform/windows/service.cpp
     )
     set(NETA_FLEET_CLIENT_SOURCE src/platform/windows/fleet_client.cpp)
 else()
