@@ -159,6 +159,11 @@ std::string last_error_or(const YaraXApi& api, std::string fallback) {
 class YaraXProvider::Impl {
 public:
     explicit Impl(YaraXProviderConfig config) : config_(std::move(config)) {
+#if !defined(NETA_YARA_X_RUNTIME_ENABLED)
+        unavailable_state_ = AntimalwareScanState::Unsupported;
+        unavailable_reason_ = "YARA-X runtime provider disabled at build time";
+        return;
+#else
         if (const char* override_path = std::getenv("NETA_YARAX_LIBRARY");
             override_path != nullptr && *override_path != '\0') {
             config_.runtime_library_path = override_path;
@@ -188,6 +193,7 @@ public:
             unavailable_reason_ = error.what();
             return;
         }
+#endif
     }
 
     ~Impl() {
