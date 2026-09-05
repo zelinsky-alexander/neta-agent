@@ -2,6 +2,8 @@
 
 #include "neta/upgrade.hpp"
 
+#include <openssl/rand.h>
+
 #include <chrono>
 #include <filesystem>
 #include <optional>
