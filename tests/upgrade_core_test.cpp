@@ -1,5 +1,6 @@
 #include "neta/crypto.hpp"
 #include "neta/upgrade.hpp"
+#include "neta/upgrade_runtime.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -34,8 +35,8 @@ neta::UpgradeInstruction instruction_for(const neta::BuildIdentity& local) {
     instruction.git_commit = "1a2b3c4d5e6f7081928374655647382910abcdef";
     instruction.os = local.os;
     instruction.arch = local.arch;
-    instruction.artifact_name = "neta-agent-test.zip";
-    instruction.download_url = "https://github.com/zelinsky-alexander/neta-agent/releases/download/v-test/neta-agent-test.zip";
+    instruction.artifact_name = local.os == "windows" ? "neta-agent-test.zip" : "neta-agent-test.tar.gz";
+    instruction.download_url = "https://github.com/zelinsky-alexander/neta-agent/releases/download/v-test/" + instruction.artifact_name;
     instruction.sha256 = std::string(64, 'a');
     return instruction;
 }
@@ -143,6 +144,50 @@ void test_local_sha_verification() {
     assert(oversized);
 }
 
+void test_activation_state_round_trip() {
+    TempDir dir;
+    neta::UpgradeActivationStore store(dir.path);
+    neta::UpgradeActivationRecord record;
+    record.upgrade_id = "11111111-2222-4333-8444-555555555555";
+    record.state = neta::UpgradeActivationState::Installing;
+    record.install_root = dir.path / "install";
+    record.previous_target = "versions/old";
+    record.active_target = "versions/new";
+    record.failure_code = "";
+    record.failure_message = "";
+    store.save(record);
+
+    const auto loaded = store.load();
+    assert(loaded.has_value());
+    assert(loaded->upgrade_id == record.upgrade_id);
+    assert(loaded->state == neta::UpgradeActivationState::Installing);
+    assert(loaded->previous_target == record.previous_target);
+    assert(loaded->active_target == record.active_target);
+    assert(neta::to_string(neta::UpgradeActivationState::LocalHealthy) == "LOCAL_HEALTHY");
+    assert(neta::to_string(neta::UpgradeActivationState::RolledBack) == "ROLLED_BACK");
+}
+
+void test_health_is_fail_closed() {
+    TempDir dir;
+    const auto local = neta::current_build_identity(dir.path);
+    const auto expected = instruction_for(local);
+    const auto result = neta::check_upgrade_health(dir.path, expected);
+    assert(!result.healthy);
+    assert(!result.failure_code.empty());
+}
+
+void test_progress_status_is_bounded() {
+    TempDir dir;
+    bool rejected = false;
+    try {
+        neta::UpgradeProgressReporter::send(dir.path,
+            "11111111-2222-4333-8444-555555555555", "CONFIRMED");
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
 } // namespace
 
 int main() {
@@ -150,6 +195,9 @@ int main() {
     test_instruction_parse_and_policy();
     test_durable_state_and_idempotency();
     test_local_sha_verification();
+    test_activation_state_round_trip();
+    test_health_is_fail_closed();
+    test_progress_status_is_bounded();
     std::cout << "upgrade core tests passed\n";
     return 0;
 }
