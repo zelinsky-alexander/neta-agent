@@ -108,7 +108,7 @@ echo "==> Running tests"
 run_as_caller ctest --test-dir "$TEST_BUILD_DIR" --output-on-failure
 
 echo "==> Configuring $NETA_ARCH production Release build"
-NETA_BUILD_ID="$BOOTSTRAP_BUILD" run_as_caller cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
+run_as_caller env NETA_BUILD_ID="$BOOTSTRAP_BUILD" cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNETA_EBPF=ON \
   -DNETA_YARA_X=ON \
