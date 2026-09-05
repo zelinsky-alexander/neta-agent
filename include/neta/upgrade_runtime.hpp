@@ -5,6 +5,7 @@
 #include <openssl/rand.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <string>
