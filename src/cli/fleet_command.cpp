@@ -3,6 +3,7 @@
 #include "neta/fleet_client.hpp"
 #include "neta/history_store.hpp"
 #include "neta/tls_session.hpp"
+#include "neta/upgrade.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -34,6 +35,20 @@ void print_identity(const FleetIdentity& identity) {
               << "Coordinator:             " << identity.coordinator << '\n'
               << "Certificate fingerprint: " << identity.certificate_sha256 << '\n'
               << "Identity directory:      " << identity.state_dir << '\n';
+}
+
+void print_upgrade_state(const UpgradeState& state) {
+    std::cout << "Upgrade ID:      " << state.instruction.upgrade_id << '\n'
+              << "State:           " << to_string(state.state) << '\n'
+              << "Target:          " << state.instruction.version << " / "
+              << state.instruction.build_id << '\n'
+              << "Commit:          " << state.instruction.git_commit << '\n'
+              << "Platform:        " << state.instruction.os << '/' << state.instruction.arch << '\n'
+              << "Artifact:        " << state.instruction.artifact_name << '\n'
+              << "SHA-256:         " << state.instruction.sha256 << '\n'
+              << "Download path:   "
+              << (state.download_path.empty() ? "-" : state.download_path.string()) << '\n'
+              << "Last error:      " << (state.last_error.empty() ? "-" : state.last_error) << '\n';
 }
 
 std::string decode_chunked_body(const std::string& body) {
@@ -165,7 +180,8 @@ FindingAnnouncementInput finding_from_connection(const std::filesystem::path& db
 
 void run_fleet_command(int argc, char** argv) {
     if (argc < 3)
-        throw std::runtime_error("fleet requires enroll, status, hello, heartbeat, announce, or announce-connection");
+        throw std::runtime_error(
+            "fleet requires enroll, status, hello, heartbeat, upgrade-status, upgrade-download, announce, or announce-connection");
     const std::string action = argv[2];
 
     if (action == "enroll") {
@@ -194,6 +210,26 @@ void run_fleet_command(int argc, char** argv) {
 
     if (action == "heartbeat") {
         print_response(FleetClient::send_heartbeat(state_dir(argc, argv)));
+        return;
+    }
+
+    if (action == "upgrade-status") {
+        UpgradeStateStore upgrades(state_dir(argc, argv));
+        const auto pending = upgrades.load();
+        if (!pending) {
+            std::cout << "No staged upgrade instruction.\n";
+            return;
+        }
+        print_upgrade_state(*pending);
+        return;
+    }
+
+    if (action == "upgrade-download") {
+        const auto state = download_pending_upgrade(state_dir(argc, argv));
+        print_upgrade_state(state);
+        if (state.state == UpgradeLocalState::Verified) {
+            std::cout << "Artifact verified. Activation is intentionally disabled until A5/A6.\n";
+        }
         return;
     }
 
