@@ -1,5 +1,6 @@
 #include "neta/fleet_client.hpp"
 #include "neta/crypto.hpp"
+#include "neta/upgrade.hpp"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -458,6 +459,23 @@ std::string send_payload(const std::filesystem::path& state_dir, const std::stri
     return response.body;
 }
 
+std::string hello_payload(const std::filesystem::path& state_dir) {
+    const auto build = current_build_identity(state_dir);
+    return "{\"agent_version\":\"" + json_escape(build.version) +
+           "\",\"platform\":\"" + json_escape(build.os) +
+           "\",\"build\":" + build_identity_json(build) + "}";
+}
+
+std::string heartbeat_payload(const std::filesystem::path& state_dir) {
+    const auto build = current_build_identity(state_dir);
+    return "{\"status\":\"UP\",\"build\":" + build_identity_json(build) + "}";
+}
+
+std::string accept_upgrade_response(const std::filesystem::path& state_dir, std::string response) {
+    static_cast<void>(accept_upgrade_from_coordinator_response(state_dir, response));
+    return response;
+}
+
 } // namespace
 
 FleetIdentity FleetClient::enroll(const FleetEnrollmentOptions& options) {
@@ -525,12 +543,11 @@ FleetIdentity FleetClient::load_identity(const std::filesystem::path& state_dir)
 }
 
 std::string FleetClient::send_agent_hello(const std::filesystem::path& state_dir) {
-    return send_payload(state_dir, "AgentHello",
-                        "{\"agent_version\":\"0.1.0\",\"platform\":\"windows\"}");
+    return accept_upgrade_response(state_dir, send_payload(state_dir, "AgentHello", hello_payload(state_dir)));
 }
 
 std::string FleetClient::send_heartbeat(const std::filesystem::path& state_dir) {
-    return send_payload(state_dir, "Heartbeat", "{\"status\":\"UP\"}");
+    return accept_upgrade_response(state_dir, send_payload(state_dir, "Heartbeat", heartbeat_payload(state_dir)));
 }
 
 std::string FleetClient::send_finding(const std::filesystem::path& state_dir,
