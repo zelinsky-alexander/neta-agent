@@ -3,9 +3,12 @@
 #include "neta/fleet_client.hpp"
 #include "neta/history_store.hpp"
 #include "neta/tls_session.hpp"
+#include "neta/upgrade.hpp"
+#include "neta/upgrade_runtime.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -25,7 +28,15 @@ std::string arg_value(int argc, char** argv, const std::string& key,
 }
 
 std::filesystem::path state_dir(int argc, char** argv) {
+#ifdef _WIN32
+    const char* program_data = std::getenv("ProgramData");
+    const std::filesystem::path fallback = program_data == nullptr
+        ? std::filesystem::path("C:/ProgramData/NETA/identity")
+        : std::filesystem::path(program_data) / "NETA" / "identity";
+    return arg_value(argc, argv, "--state-dir", fallback.string());
+#else
     return arg_value(argc, argv, "--state-dir", "/var/lib/neta/identity");
+#endif
 }
 
 void print_identity(const FleetIdentity& identity) {
@@ -34,6 +45,29 @@ void print_identity(const FleetIdentity& identity) {
               << "Coordinator:             " << identity.coordinator << '\n'
               << "Certificate fingerprint: " << identity.certificate_sha256 << '\n'
               << "Identity directory:      " << identity.state_dir << '\n';
+}
+
+void print_upgrade_state(const UpgradeState& state) {
+    std::cout << "Upgrade ID:      " << state.instruction.upgrade_id << '\n'
+              << "State:           " << to_string(state.state) << '\n'
+              << "Target:          " << state.instruction.version << " / "
+              << state.instruction.build_id << '\n'
+              << "Commit:          " << state.instruction.git_commit << '\n'
+              << "Platform:        " << state.instruction.os << '/' << state.instruction.arch << '\n'
+              << "Artifact:        " << state.instruction.artifact_name << '\n'
+              << "SHA-256:         " << state.instruction.sha256 << '\n'
+              << "Download path:   "
+              << (state.download_path.empty() ? "-" : state.download_path.string()) << '\n'
+              << "Last error:      " << (state.last_error.empty() ? "-" : state.last_error) << '\n';
+}
+
+void print_activation_state(const UpgradeActivationRecord& activation) {
+    std::cout << "Activation:      " << to_string(activation.state) << '\n'
+              << "Install root:    " << activation.install_root << '\n'
+              << "Previous target: " << (activation.previous_target.empty() ? "-" : activation.previous_target) << '\n'
+              << "Active target:   " << (activation.active_target.empty() ? "-" : activation.active_target) << '\n'
+              << "Failure code:    " << (activation.failure_code.empty() ? "-" : activation.failure_code) << '\n'
+              << "Failure message: " << (activation.failure_message.empty() ? "-" : activation.failure_message) << '\n';
 }
 
 std::string decode_chunked_body(const std::string& body) {
@@ -165,7 +199,8 @@ FindingAnnouncementInput finding_from_connection(const std::filesystem::path& db
 
 void run_fleet_command(int argc, char** argv) {
     if (argc < 3)
-        throw std::runtime_error("fleet requires enroll, status, hello, heartbeat, announce, or announce-connection");
+        throw std::runtime_error(
+            "fleet requires enroll, status, hello, heartbeat, upgrade-status, upgrade-download, upgrade-run, upgrade-report, announce, or announce-connection");
     const std::string action = argv[2];
 
     if (action == "enroll") {
@@ -194,6 +229,67 @@ void run_fleet_command(int argc, char** argv) {
 
     if (action == "heartbeat") {
         print_response(FleetClient::send_heartbeat(state_dir(argc, argv)));
+        return;
+    }
+
+    if (action == "upgrade-status") {
+        const auto dir = state_dir(argc, argv);
+        UpgradeStateStore upgrades(dir);
+        const auto pending = upgrades.load();
+        if (!pending) {
+            std::cout << "No staged upgrade instruction.\n";
+            return;
+        }
+        print_upgrade_state(*pending);
+        UpgradeActivationStore activation(dir);
+        if (const auto active = activation.load()) print_activation_state(*active);
+        return;
+    }
+
+    if (action == "upgrade-download") {
+        const auto dir = state_dir(argc, argv);
+        UpgradeStateStore store(dir);
+        const auto pending = store.load();
+        if (!pending) throw std::runtime_error("no pending upgrade instruction");
+        UpgradeProgressReporter::send(dir, pending->instruction.upgrade_id, "DOWNLOADING");
+        const auto state = download_pending_upgrade(dir);
+        print_upgrade_state(state);
+        if (state.state == UpgradeLocalState::Verified) {
+            std::cout << "Artifact verified and ready for A5 activation.\n";
+        }
+        return;
+    }
+
+    if (action == "upgrade-run") {
+        const auto dir = state_dir(argc, argv);
+        UpgradeWorkerOptions options;
+        options.state_dir = dir;
+#ifdef _WIN32
+        options.install_root = arg_value(argc, argv, "--install-root", "C:/Program Files/NETA");
+        options.service_name = arg_value(argc, argv, "--service", "NETAAgent");
+#else
+        options.install_root = arg_value(argc, argv, "--install-root", "/opt/neta-agent");
+        options.service_name = arg_value(argc, argv, "--service", "neta-agent.service");
+#endif
+        const auto timeout = std::stoll(arg_value(argc, argv, "--health-timeout", "45"));
+        if (timeout < 5 || timeout > 300)
+            throw std::runtime_error("--health-timeout must be between 5 and 300 seconds");
+        options.health_timeout = std::chrono::seconds(timeout);
+        run_upgrade_worker(options);
+        std::cout << "Upgrade worker completed.\n";
+        return;
+    }
+
+    if (action == "upgrade-report") {
+        const auto dir = state_dir(argc, argv);
+        const auto upgrade_id = arg_value(argc, argv, "--upgrade-id");
+        const auto status = arg_value(argc, argv, "--status");
+        if (upgrade_id.empty() || status.empty())
+            throw std::runtime_error("upgrade-report requires --upgrade-id and --status");
+        UpgradeProgressReporter::send(dir, upgrade_id, status,
+            arg_value(argc, argv, "--failure-code"),
+            arg_value(argc, argv, "--failure-message"));
+        std::cout << "UpgradeProgress accepted by coordinator.\n";
         return;
     }
 

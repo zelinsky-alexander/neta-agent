@@ -94,6 +94,7 @@ jobs:
           $releaseDir = Join-Path $PWD 'build-windows-release\Release'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item (Join-Path $releaseDir 'neta-agent.exe') $stage -Force
+          Copy-Item (Join-Path $releaseDir 'neta-agent-updater.exe') $stage -Force
           Get-ChildItem -Path $releaseDir -Filter '*.dll' -File -ErrorAction SilentlyContinue | Copy-Item -Destination $stage -Force
           if (Test-Path '.\LICENSE') { Copy-Item '.\LICENSE' $stage -Force }
           if (Test-Path '.\THIRD_PARTY_NOTICES.md') { Copy-Item '.\THIRD_PARTY_NOTICES.md' $stage -Force }
@@ -105,9 +106,9 @@ jobs:
           Architecture: AMD64 / x64
           Target: Windows 10 22H2+ and Windows 11 x64
 
-          Install the files into C:\Program Files\NETA and keep persistent
-          state under C:\ProgramData\NETA. Enroll each Windows machine as a
-          distinct fleet identity before starting the NETAAgent service.
+          The package contains neta-agent.exe and the narrowly scoped
+          neta-agent-updater.exe used for coordinator-managed versioned upgrades.
+          Persistent identity and upgrade state remain under C:\ProgramData\NETA.
           "@ | Set-Content -Path (Join-Path $stage 'BUILD_INFO.txt') -Encoding utf8
           $runtimeFiles = Get-ChildItem -Path $stage -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name
           $runtimeFiles | ForEach-Object { $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); "$hash  $($_.Name)" } | Set-Content -Path (Join-Path $stage 'SHA256SUMS.txt') -Encoding ascii

@@ -1,0 +1,256 @@
+name: Build Supported Agent Flavors
+
+on:
+  push:
+    branches:
+      - main
+      - feature/agent-upgrade-a1-a4
+    paths:
+      - '.github/workflows/build-supported-agents.yml'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'LICENSE'
+      - 'THIRD_PARTY_NOTICES.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NETA_BUILD_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  linux-amd64:
+    name: Linux AMD64 Release Artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ clang libbpf-dev libssl-dev libsqlite3-dev sqlite3 iproute2 curl openssl
+      - name: Configure Release AMD64
+        run: cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DNETA_ENABLE_TESTS=OFF
+      - name: Build Release AMD64
+        run: cmake --build build-release --parallel
+      - name: Capabilities smoke
+        run: ./build-release/neta-agent capabilities
+      - name: Package Linux AMD64
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:12}"
+          package_name="neta-agent-linux-amd64-${short_sha}"
+          stage="dist/${package_name}"
+          mkdir -p "$stage"
+          cp build-release/neta-agent "$stage/"
+          cp build-release/neta-agent-updater "$stage/"
+          if [[ -f build-release/libneta_tls_context.so ]]; then cp build-release/libneta_tls_context.so "$stage/"; fi
+          [[ -f LICENSE ]] && cp LICENSE "$stage/"
+          [[ -f THIRD_PARTY_NOTICES.md ]] && cp THIRD_PARTY_NOTICES.md "$stage/"
+          cat > "$stage/BUILD_INFO.txt" <<EOF
+          NETA Agent Linux AMD64 Release
+          Commit: ${GITHUB_SHA}
+          Build ID: ${NETA_BUILD_ID}
+          Workflow run: ${GITHUB_RUN_ID}
+          OS: linux
+          Architecture: amd64
+          EOF
+          archive="dist/${package_name}.tar.gz"
+          tar -C "$stage" -czf "$archive" .
+          sha256sum "$archive" > "${archive}.sha256"
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "checksum=${archive}.sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload Linux AMD64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-arm64:
+    name: Linux ARM64 Release Artifact
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Verify native ARM64 runner
+        run: test "$(uname -m)" = "aarch64"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ clang libbpf-dev libssl-dev libsqlite3-dev sqlite3 iproute2 curl openssl
+      - name: Configure Release ARM64
+        run: cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DNETA_ENABLE_TESTS=OFF
+      - name: Build Release ARM64
+        run: cmake --build build-release --parallel
+      - name: Capabilities smoke
+        run: ./build-release/neta-agent capabilities
+      - name: Package Linux ARM64
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:12}"
+          package_name="neta-agent-linux-arm64-${short_sha}"
+          stage="dist/${package_name}"
+          mkdir -p "$stage"
+          cp build-release/neta-agent "$stage/"
+          cp build-release/neta-agent-updater "$stage/"
+          if [[ -f build-release/libneta_tls_context.so ]]; then cp build-release/libneta_tls_context.so "$stage/"; fi
+          [[ -f LICENSE ]] && cp LICENSE "$stage/"
+          [[ -f THIRD_PARTY_NOTICES.md ]] && cp THIRD_PARTY_NOTICES.md "$stage/"
+          cat > "$stage/BUILD_INFO.txt" <<EOF
+          NETA Agent Linux ARM64 Release
+          Commit: ${GITHUB_SHA}
+          Build ID: ${NETA_BUILD_ID}
+          Workflow run: ${GITHUB_RUN_ID}
+          OS: linux
+          Architecture: arm64
+          EOF
+          archive="dist/${package_name}.tar.gz"
+          tar -C "$stage" -czf "$archive" .
+          sha256sum "$archive" > "${archive}.sha256"
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "checksum=${archive}.sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload Linux ARM64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-amd64:
+    name: Windows AMD64 Release Artifact
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Windows dependencies
+        shell: pwsh
+        run: vcpkg install openssl:x64-windows sqlite3:x64-windows
+      - name: Configure Release x64
+        shell: pwsh
+        run: |
+          cmake -S . -B build-release -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_APPLOCAL_DEPS=ON `
+            -DNETA_EBPF=OFF `
+            -DNETA_ENABLE_TESTS=OFF
+      - name: Build Release x64
+        shell: pwsh
+        run: cmake --build build-release --config Release --parallel
+      - name: Capabilities smoke
+        shell: pwsh
+        run: .\build-release\Release\neta-agent.exe capabilities
+      - name: Package Windows AMD64
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $packageName = "neta-agent-windows-amd64-$shortSha"
+          $stage = Join-Path $PWD "dist\$packageName"
+          $releaseDir = Join-Path $PWD 'build-release\Release'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item (Join-Path $releaseDir 'neta-agent.exe') $stage -Force
+          Copy-Item (Join-Path $releaseDir 'neta-agent-updater.exe') $stage -Force
+          Get-ChildItem -Path $releaseDir -Filter '*.dll' -File -ErrorAction SilentlyContinue | Copy-Item -Destination $stage -Force
+          if (Test-Path '.\LICENSE') { Copy-Item '.\LICENSE' $stage -Force }
+          if (Test-Path '.\THIRD_PARTY_NOTICES.md') { Copy-Item '.\THIRD_PARTY_NOTICES.md' $stage -Force }
+          @"
+          NETA Agent Windows AMD64 Release
+          Commit: $env:GITHUB_SHA
+          Build ID: $env:NETA_BUILD_ID
+          Workflow run: $env:GITHUB_RUN_ID
+          OS: windows
+          Architecture: amd64
+          "@ | Set-Content -Path (Join-Path $stage 'BUILD_INFO.txt') -Encoding utf8
+          $zip = Join-Path $PWD "dist\$packageName.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$zipHash  $packageName.zip" | Set-Content -Path "$zip.sha256" -Encoding ascii
+          "package_name=$packageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "archive=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "checksum=$zip.sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Upload Windows AMD64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+  manifest:
+    name: Build Release Manifest
+    runs-on: ubuntu-24.04
+    needs:
+      - linux-amd64
+      - linux-arm64
+      - windows-amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Download packaged flavors
+        uses: actions/download-artifact@v7
+        with:
+          path: dist-artifacts
+          pattern: neta-agent-*
+          merge-multiple: true
+      - name: Create release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          cmake = pathlib.Path('CMakeLists.txt').read_text()
+          match = re.search(r'project\(neta-agent\s+VERSION\s+([^\s\)]+)', cmake)
+          if not match:
+              raise SystemExit('cannot determine project version from CMakeLists.txt')
+          version = match.group(1)
+          sha = os.environ['GITHUB_SHA'].lower()
+          build_id = os.environ['NETA_BUILD_ID']
+          root = pathlib.Path('dist-artifacts')
+          mappings = [
+              ('linux', 'amd64', f'neta-agent-linux-amd64-{sha[:12]}.tar.gz'),
+              ('linux', 'arm64', f'neta-agent-linux-arm64-{sha[:12]}.tar.gz'),
+              ('windows', 'amd64', f'neta-agent-windows-amd64-{sha[:12]}.zip'),
+          ]
+          artifacts = []
+          for os_name, arch, name in mappings:
+              path = root / name
+              if not path.is_file():
+                  raise SystemExit(f'missing packaged artifact: {name}')
+              artifacts.append({'os': os_name, 'arch': arch, 'name': name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+          manifest = {
+              'version': version,
+              'build_id': build_id,
+              'git_commit': sha,
+              'published_at': None,
+              'artifacts': artifacts,
+          }
+          pathlib.Path('release-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(pathlib.Path('release-manifest.json').read_text())
+          PY
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: neta-agent-release-manifest-${{ github.sha }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 30

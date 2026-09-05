@@ -5,9 +5,9 @@ set -euo pipefail
 # Supports native x86_64/amd64 and arm64/aarch64 builds.
 # Run with: sudo ./deploy/linux/install-or-update.sh
 #
-# NETA_UPDATE_BRANCH can select a side branch for validation. It defaults to main.
-# YARA-X support is compiled only as a runtime loader; the Linux endpoint never links
-# libyara_x_capi into neta-agent and never needs YARA-X headers/Rust/Cargo to build.
+# This remains the manual/developer bootstrap path. Runtime coordinator-managed
+# upgrades use immutable release artifacts and neta-agent-updater; they never run
+# Git, CMake, apt, or this script remotely.
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run this script with sudo" >&2
@@ -19,6 +19,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 JOBS="${NETA_BUILD_JOBS:-$(nproc)}"
 UPDATE_BRANCH="${NETA_UPDATE_BRANCH:-main}"
+INSTALL_ROOT="${NETA_INSTALL_ROOT:-/opt/neta-agent}"
+STATE_DIR="${NETA_FLEET_STATE_DIR:-/var/lib/neta/identity}"
 
 run_as_caller() {
   if [[ "$CALLER" == "root" ]]; then
@@ -87,6 +89,11 @@ run_as_caller git fetch origin "$UPDATE_BRANCH"
 run_as_caller git checkout "$UPDATE_BRANCH"
 run_as_caller git pull --ff-only origin "$UPDATE_BRANCH"
 
+COMMIT="$(run_as_caller git rev-parse HEAD)"
+SHORT_COMMIT="${COMMIT:0:12}"
+BOOTSTRAP_BUILD="bootstrap-$SHORT_COMMIT"
+VERSION_DIR="$INSTALL_ROOT/versions/$BOOTSTRAP_BUILD"
+
 echo "==> Configuring $NETA_ARCH validation build with eBPF and runtime-loaded YARA-X provider"
 run_as_caller cmake -S "$REPO_DIR" -B "$TEST_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -101,13 +108,13 @@ echo "==> Running tests"
 run_as_caller ctest --test-dir "$TEST_BUILD_DIR" --output-on-failure
 
 echo "==> Configuring $NETA_ARCH production Release build"
-run_as_caller cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
+NETA_BUILD_ID="$BOOTSTRAP_BUILD" run_as_caller cmake -S "$REPO_DIR" -B "$RELEASE_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DNETA_EBPF=ON \
   -DNETA_YARA_X=ON \
   -DNETA_ENABLE_TESTS=OFF
 
-echo "==> Building production Release binary"
+echo "==> Building production Release binary and updater"
 run_as_caller cmake --build "$RELEASE_BUILD_DIR" -j "$JOBS"
 
 echo "==> Verifying installed artifact architecture before install"
@@ -128,19 +135,25 @@ if ldd "$RELEASE_BUILD_DIR/neta-agent" 2>/dev/null | grep -qi 'yara'; then
   exit 1
 fi
 
-echo "==> Installing binary and TLS context shim"
-install -m 0755 "$RELEASE_BUILD_DIR/neta-agent" /usr/local/bin/neta-agent
-mkdir -p /usr/local/lib/neta
+echo "==> Installing versioned agent and dedicated updater"
+mkdir -p "$VERSION_DIR" "$INSTALL_ROOT/versions" /usr/local/libexec /usr/local/lib/neta
+install -m 0755 "$RELEASE_BUILD_DIR/neta-agent" "$VERSION_DIR/neta-agent"
+install -m 0755 "$RELEASE_BUILD_DIR/neta-agent-updater" /usr/local/libexec/neta-agent-updater
 if [[ -f "$RELEASE_BUILD_DIR/libneta_tls_context.so" ]]; then
+  install -m 0755 "$RELEASE_BUILD_DIR/libneta_tls_context.so" "$VERSION_DIR/libneta_tls_context.so"
   install -m 0755 "$RELEASE_BUILD_DIR/libneta_tls_context.so" /usr/local/lib/neta/libneta_tls_context.so
 fi
 
-mkdir -p /var/lib/neta/identity /etc/neta
-chmod 0700 /var/lib/neta/identity
+ln -sfn "versions/$BOOTSTRAP_BUILD" "$INSTALL_ROOT/current.new"
+mv -Tf "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+ln -sfn "$INSTALL_ROOT/current/neta-agent" /usr/local/bin/neta-agent
+
+mkdir -p "$STATE_DIR" /etc/neta
+chmod 0700 "$STATE_DIR"
 
 if [[ ! -f /etc/neta/neta-agent.env ]]; then
-  cat >/etc/neta/neta-agent.env <<'EOF'
-NETA_FLEET_STATE_DIR=/var/lib/neta/identity
+  cat >/etc/neta/neta-agent.env <<EOF
+NETA_FLEET_STATE_DIR=$STATE_DIR
 NETA_FLEET_REPORTING_MODE=SIGNIFICANT_ONLY
 NETA_FLEET_MIN_CONFIDENCE=0.80
 NETA_FLEET_REPORTING_COOLDOWN_SECONDS=1800
@@ -153,7 +166,7 @@ else
   echo "==> Preserving existing /etc/neta/neta-agent.env"
 fi
 
-cat >/etc/systemd/system/neta-agent.service <<'EOF'
+cat >/etc/systemd/system/neta-agent.service <<EOF
 [Unit]
 Description=NETA Endpoint Connection Assurance Agent
 After=network-online.target
@@ -162,7 +175,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/neta/neta-agent.env
-ExecStart=/usr/local/bin/neta-agent run --all --db /var/lib/neta/neta.db --max-db-mb 200
+ExecStart=$INSTALL_ROOT/current/neta-agent run --all --db /var/lib/neta/neta.db --max-db-mb 200
 Restart=on-failure
 RestartSec=5
 LimitMEMLOCK=infinity
@@ -178,8 +191,14 @@ systemctl daemon-reload
 systemctl enable neta-agent.service
 systemctl restart neta-agent.service
 
-echo "==> Installed $NETA_ARCH build"
-/usr/local/bin/neta-agent capabilities
+echo "==> Installed $NETA_ARCH build into $VERSION_DIR"
+"$INSTALL_ROOT/current/neta-agent" capabilities
+
+echo
+echo "Upgrade helper:"
+echo "  /usr/local/libexec/neta-agent-updater"
+echo "Active version:"
+readlink -f "$INSTALL_ROOT/current" || true
 
 echo
 echo "Service status:"

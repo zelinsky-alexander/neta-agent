@@ -9,6 +9,43 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(NETA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${NETA_GENERATED_DIR}")
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE NETA_BUILD_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE NETA_GIT_RESULT
+)
+if(NOT NETA_GIT_RESULT EQUAL 0 OR NOT NETA_BUILD_GIT_COMMIT MATCHES "^[0-9a-fA-F]{40}$")
+    set(NETA_BUILD_GIT_COMMIT "")
+endif()
+string(TIMESTAMP NETA_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+if(DEFINED ENV{NETA_BUILD_ID} AND NOT "$ENV{NETA_BUILD_ID}" STREQUAL "")
+    set(NETA_BUILD_ID "$ENV{NETA_BUILD_ID}")
+elseif(NETA_BUILD_GIT_COMMIT)
+    string(SUBSTRING "${NETA_BUILD_GIT_COMMIT}" 0 12 NETA_BUILD_GIT_SHORT)
+    set(NETA_BUILD_ID "${PROJECT_VERSION}+${NETA_BUILD_GIT_SHORT}")
+else()
+    set(NETA_BUILD_ID "${PROJECT_VERSION}+unknown")
+endif()
+if(WIN32)
+    set(NETA_BUILD_OS "windows")
+    add_compile_definitions(NOMINMAX)
+else()
+    set(NETA_BUILD_OS "linux")
+endif()
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x64)$")
+    set(NETA_BUILD_ARCH "amd64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(NETA_BUILD_ARCH "arm64")
+else()
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" NETA_BUILD_ARCH)
+endif()
+configure_file(cmake/build_info.hpp.in "${NETA_GENERATED_DIR}/neta_build_info.hpp" @ONLY)
+
 option(NETA_ENABLE_TESTS "Build tests" ON)
 option(NETA_STATIC_DEPS "Prefer static OpenSSL/SQLite and static C++ runtime when available" OFF)
 option(NETA_FULL_STATIC "Request a fully static executable (intended for musl release builds)" OFF)
@@ -119,8 +156,6 @@ if(NETA_HAVE_EBPF)
     endif()
 
     set(NETA_BPF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/ebpf")
-    set(NETA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-    file(MAKE_DIRECTORY "${NETA_GENERATED_DIR}")
     set(NETA_BPF_INCLUDE_ARGS "-I${NETA_BPF_DIR}" -I/usr/include)
     if(CMAKE_LIBRARY_ARCHITECTURE)
         list(APPEND NETA_BPF_INCLUDE_ARGS "-I/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}")
@@ -226,6 +261,8 @@ add_library(neta_core
     src/core/tcp_state.cpp
     src/core/lifecycle.cpp
     src/core/crypto.cpp
+    src/core/upgrade.cpp
+    src/core/upgrade_runtime.cpp
     src/core/antimalware.cpp
     src/core/exec_antimalware_monitor.cpp
     src/core/verdict.cpp
@@ -251,7 +288,7 @@ add_library(neta_core
     ${NETA_PLATFORM_SOURCES}
 )
 
-target_include_directories(neta_core PUBLIC include)
+target_include_directories(neta_core PUBLIC include PRIVATE "${NETA_GENERATED_DIR}")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(neta_core PRIVATE src/platform/linux src/platform/linux/ebpf)
 endif()
@@ -263,7 +300,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NETA_YARA_X STREQUAL "OFF")
     target_compile_definitions(neta_core PRIVATE NETA_YARA_X_RUNTIME_ENABLED=1)
 endif()
 if(NETA_HAVE_EBPF)
-    target_include_directories(neta_core PRIVATE "${NETA_GENERATED_DIR}")
     target_link_libraries(neta_core PRIVATE PkgConfig::LIBBPF)
 endif()
 neta_enable_warnings(neta_core)
@@ -288,15 +324,26 @@ add_executable(neta-agent src/main.cpp src/entrypoint.cpp)
 target_link_libraries(neta-agent PRIVATE neta_core)
 neta_enable_warnings(neta-agent)
 
+add_executable(neta-agent-updater src/updater_main.cpp)
+target_link_libraries(neta-agent-updater PRIVATE neta_core)
+neta_enable_warnings(neta-agent-updater)
+
 if(NETA_STATIC_DEPS AND NOT MSVC)
     target_link_options(neta-agent PRIVATE -static-libgcc -static-libstdc++)
+    target_link_options(neta-agent-updater PRIVATE -static-libgcc -static-libstdc++)
 endif()
 if(NETA_FULL_STATIC AND NOT MSVC)
     target_link_options(neta-agent PRIVATE -static)
+    target_link_options(neta-agent-updater PRIVATE -static)
 endif()
 
 if(NETA_ENABLE_TESTS)
     enable_testing()
+
+    add_executable(neta_upgrade_core_test tests/upgrade_core_test.cpp)
+    target_link_libraries(neta_upgrade_core_test PRIVATE neta_core)
+    neta_enable_warnings(neta_upgrade_core_test)
+    add_test(NAME neta_upgrade_core_test COMMAND neta_upgrade_core_test)
 
     if(WIN32)
         add_executable(neta_windows_platform_test tests/windows_platform_test.cpp)
