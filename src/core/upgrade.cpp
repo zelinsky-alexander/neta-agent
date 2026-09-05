@@ -658,7 +658,6 @@ std::optional<UpgradeState> UpgradeStateStore::load() const {
 }
 
 UpgradeState UpgradeStateStore::accept(const UpgradeInstruction& instruction, const BuildIdentity& local_build) {
-    validate_upgrade_instruction(instruction, local_build);
     if (auto existing = load()) {
         if (existing->instruction.upgrade_id == instruction.upgrade_id) {
             if (!same_instruction(existing->instruction, instruction))
@@ -668,6 +667,7 @@ UpgradeState UpgradeStateStore::accept(const UpgradeInstruction& instruction, co
         if (existing->state != UpgradeLocalState::Failed)
             throw std::runtime_error("another local upgrade is already active");
     }
+    validate_upgrade_instruction(instruction, local_build);
     UpgradeState state;
     state.instruction = instruction;
     save(state);
