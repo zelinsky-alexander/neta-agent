@@ -123,6 +123,38 @@ void test_durable_state_and_idempotency() {
     assert(loaded->instruction.sha256 == instruction.sha256);
 }
 
+void test_post_activation_replay_is_idempotent() {
+    TempDir dir;
+    const auto old_build = neta::current_build_identity(dir.path);
+    const auto instruction = instruction_for(old_build);
+    neta::UpgradeStateStore store(dir.path);
+    (void)store.accept(instruction, old_build);
+
+    auto restarted_target = old_build;
+    restarted_target.version = instruction.version;
+    restarted_target.build_id = instruction.build_id;
+    restarted_target.git_commit = instruction.git_commit;
+    restarted_target.artifact_sha256 = instruction.sha256;
+
+    const auto replay = store.accept(instruction, restarted_target);
+    assert(replay.instruction.upgrade_id == instruction.upgrade_id);
+    assert(replay.state == neta::UpgradeLocalState::Received);
+
+    auto changed_same_id = instruction;
+    changed_same_id.sha256 = std::string(64, 'c');
+    bool rejected = false;
+    try { (void)store.accept(changed_same_id, restarted_target); }
+    catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+
+    auto new_request_for_running_build = instruction;
+    new_request_for_running_build.upgrade_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    rejected = false;
+    try { (void)store.accept(new_request_for_running_build, restarted_target); }
+    catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+}
+
 void test_local_sha_verification() {
     TempDir dir;
     const auto artifact = dir.path / "artifact.bin";
@@ -194,6 +226,7 @@ int main() {
     test_build_identity();
     test_instruction_parse_and_policy();
     test_durable_state_and_idempotency();
+    test_post_activation_replay_is_idempotent();
     test_local_sha_verification();
     test_activation_state_round_trip();
     test_health_is_fail_closed();
