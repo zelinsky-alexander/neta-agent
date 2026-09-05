@@ -32,7 +32,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout YARA-X source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: VirusTotal/yara-x
           ref: v${{ env.YARAX_VERSION }}
@@ -84,7 +84,7 @@ jobs:
           ls -lh "$ASSET" "$ASSET.sha256"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yarax-runtime-${{ matrix.arch }}
           path: |
@@ -97,7 +97,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: yarax-runtime-*
           path: dist
