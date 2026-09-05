@@ -6,6 +6,7 @@
 #include "neta/platform.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
+#include "neta/upgrade_runtime.hpp"
 #include "neta/verdict.hpp"
 
 #include <atomic>
@@ -86,6 +87,17 @@ std::chrono::milliseconds jittered_heartbeat_delay(std::chrono::seconds base,
     static thread_local std::mt19937_64 rng(std::random_device{}());
     std::uniform_int_distribution<long long> distribution(-spread_ms, spread_ms);
     return std::chrono::milliseconds(std::max<long long>(1, base_ms + distribution(rng)));
+}
+
+void maybe_launch_upgrade(const std::filesystem::path& state_dir) {
+    try {
+        if (launch_upgrade_worker_if_needed(state_dir)) {
+            std::cout << "Fleet service: detached upgrade worker launched" << std::endl;
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "Fleet service upgrade launch failed; observation continues: "
+                  << error.what() << std::endl;
+    }
 }
 
 void finalize_target_connections(const std::vector<std::int64_t>& connection_ids,
@@ -227,6 +239,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
             try {
                 static_cast<void>(FleetClient::send_agent_hello(reporting_policy.state_dir));
                 std::cout << "Fleet service: AgentHello accepted" << std::endl;
+                maybe_launch_upgrade(reporting_policy.state_dir);
             } catch (const std::exception& error) {
                 std::cerr << "Fleet service AgentHello failed; observation continues: "
                           << error.what() << std::endl;
@@ -240,6 +253,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         try {
             static_cast<void>(FleetClient::send_heartbeat(reporting_policy.state_dir));
             std::cout << "Fleet service: heartbeat accepted" << std::endl;
+            maybe_launch_upgrade(reporting_policy.state_dir);
         } catch (const std::exception& error) {
             std::cerr << "Fleet service heartbeat failed; observation continues: "
                       << error.what() << std::endl;
