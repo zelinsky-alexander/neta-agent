@@ -261,6 +261,7 @@ add_library(neta_core
     src/core/lifecycle.cpp
     src/core/crypto.cpp
     src/core/upgrade.cpp
+    src/core/upgrade_runtime.cpp
     src/core/antimalware.cpp
     src/core/exec_antimalware_monitor.cpp
     src/core/verdict.cpp
@@ -322,11 +323,17 @@ add_executable(neta-agent src/main.cpp src/entrypoint.cpp)
 target_link_libraries(neta-agent PRIVATE neta_core)
 neta_enable_warnings(neta-agent)
 
+add_executable(neta-agent-updater src/updater_main.cpp)
+target_link_libraries(neta-agent-updater PRIVATE neta_core)
+neta_enable_warnings(neta-agent-updater)
+
 if(NETA_STATIC_DEPS AND NOT MSVC)
     target_link_options(neta-agent PRIVATE -static-libgcc -static-libstdc++)
+    target_link_options(neta-agent-updater PRIVATE -static-libgcc -static-libstdc++)
 endif()
 if(NETA_FULL_STATIC AND NOT MSVC)
     target_link_options(neta-agent PRIVATE -static)
+    target_link_options(neta-agent-updater PRIVATE -static)
 endif()
 
 if(NETA_ENABLE_TESTS)
