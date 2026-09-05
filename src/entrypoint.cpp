@@ -1,17 +1,47 @@
 #include "neta/cli/fleet_command.hpp"
 #include "neta/platform.hpp"
+#include "neta/upgrade.hpp"
+#include "neta/upgrade_runtime.hpp"
 
 #ifdef _WIN32
 #include "neta/windows_service.hpp"
 #endif
 
+#include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 int neta_legacy_main(int argc, char** argv);
 
-#ifdef _WIN32
 namespace {
+
+std::string arg_value(int argc, char** argv, const std::string& key,
+                      const std::string& fallback = {}) {
+    for (int i = 0; i + 1 < argc; ++i) {
+        if (argv[i] == key) return argv[i + 1];
+    }
+    return fallback;
+}
+
+int upgrade_health(int argc, char** argv) {
+    const auto state_dir = std::filesystem::path(arg_value(argc, argv, "--state-dir"));
+    if (state_dir.empty()) throw std::runtime_error("health --upgrade requires --state-dir");
+    neta::UpgradeStateStore store(state_dir);
+    const auto state = store.load();
+    if (!state) throw std::runtime_error("no durable upgrade target is available for health validation");
+    const auto result = neta::check_upgrade_health(state_dir, state->instruction);
+    if (!result.healthy) {
+        std::cerr << result.failure_code << ": " << result.message << '\n';
+        return 1;
+    }
+    const auto build = neta::current_build_identity(state_dir);
+    std::cout << "HEALTHY " << build.version << ' ' << build.build_id << ' '
+              << build.os << '/' << build.arch << '\n';
+    return 0;
+}
+
+#ifdef _WIN32
 int windows_capabilities() {
     const auto env = neta::platform::host_environment();
     const auto capabilities = neta::platform::capabilities();
@@ -39,14 +69,24 @@ int windows_capabilities() {
     }
     return 0;
 }
-} // namespace
 #endif
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "fleet") {
         try {
             neta::cli::run_fleet_command(argc, argv);
             return 0;
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return 1;
+        }
+    }
+
+    if (argc >= 3 && std::string(argv[1]) == "health" && std::string(argv[2]) == "--upgrade") {
+        try {
+            return upgrade_health(argc, argv);
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << '\n';
             return 1;
@@ -75,6 +115,9 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet status [--state-dir DIR]\n"
             << "  neta-agent fleet hello [--state-dir DIR]\n"
             << "  neta-agent fleet heartbeat [--state-dir DIR]\n"
+            << "  neta-agent fleet upgrade-status [--state-dir DIR]\n"
+            << "  neta-agent fleet upgrade-download [--state-dir DIR]\n"
+            << "  neta-agent health --upgrade --state-dir DIR\n"
             << "  neta-agent fleet announce --finding-id ID --host HOST --port PORT [--change CHANGE] [--performance VERDICT] [--trust VERDICT] [--evidence-root HASH] [--state-dir DIR]\n";
 #ifdef _WIN32
         std::cout
