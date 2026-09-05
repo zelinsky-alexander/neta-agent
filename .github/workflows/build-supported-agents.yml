@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/agent-upgrade-a1-a4
     paths:
       - '.github/workflows/build-supported-agents.yml'
       - 'CMakeLists.txt'
