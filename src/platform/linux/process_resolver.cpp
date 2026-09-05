@@ -14,6 +14,8 @@ namespace neta::platform {
 namespace fs = std::filesystem;
 namespace {
 
+constexpr std::size_t kLinuxCommVisibleBytes = 15;
+
 std::optional<std::uint64_t> process_start_ticks(std::int64_t pid) {
     std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
     std::string line;
@@ -33,6 +35,19 @@ std::string first_line(const std::string& path) {
     std::string value;
     std::getline(in, value);
     return value;
+}
+
+std::string process_display_name(const std::string& comm, const std::string& executable_path) {
+    if (comm.size() < kLinuxCommVisibleBytes || executable_path.empty()) return comm;
+
+    const auto executable_name = fs::path(executable_path).filename().string();
+    if (executable_name.empty()) return comm;
+
+    // /proc/<pid>/comm is backed by Linux TASK_COMM_LEN (16 bytes including
+    // the terminator), so a 15-byte value may be silently truncated.  In that
+    // case use the executable basename for the user-facing process name while
+    // retaining executable_path as the full attribution evidence.
+    return executable_name;
 }
 
 class LinuxProcessResolver final : public ProcessResolver {
@@ -60,6 +75,7 @@ public:
                 result.comm = first_line((entry.path() / "comm").string());
                 auto exe = fs::read_symlink(entry.path() / "exe", ec);
                 if (!ec) result.executable_path = exe.string(); else ec.clear();
+                result.comm = process_display_name(result.comm, result.executable_path);
                 return result;
             }
         }
