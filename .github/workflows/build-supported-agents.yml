@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   NETA_BUILD_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
@@ -254,3 +254,73 @@ jobs:
           path: release-manifest.json
           if-no-files-found: error
           retention-days: 30
+
+  publish-development-release:
+    name: Publish Immutable Development Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    needs:
+      - linux-amd64
+      - linux-arm64
+      - windows-amd64
+      - manifest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download packaged flavors and manifest
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          pattern: neta-agent-*
+          merge-multiple: true
+      - name: Publish immutable prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="dev-${GITHUB_SHA}"
+          short_sha="${GITHUB_SHA:0:12}"
+          assets=(
+            "release-assets/neta-agent-linux-amd64-${short_sha}.tar.gz"
+            "release-assets/neta-agent-linux-arm64-${short_sha}.tar.gz"
+            "release-assets/neta-agent-windows-amd64-${short_sha}.zip"
+            "release-assets/release-manifest.json"
+          )
+
+          for asset in "${assets[@]}"; do
+            [[ -f "$asset" ]] || { echo "missing release asset: $asset" >&2; exit 1; }
+          done
+
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "NETA Agent development ${short_sha}" \
+              --notes "Immutable development build for commit ${GITHUB_SHA}." \
+              --prerelease \
+              "${assets[@]}"
+            exit 0
+          fi
+
+          existing_target="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha')"
+          if [[ "$existing_target" != "$GITHUB_SHA" ]]; then
+            echo "existing tag $tag points to $existing_target, expected $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          mkdir -p existing-assets
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing-assets
+              expected="$(sha256sum "$asset" | awk '{print $1}')"
+              actual="$(sha256sum "existing-assets/$name" | awk '{print $1}')"
+              if [[ "$actual" != "$expected" ]]; then
+                echo "immutable release asset mismatch for $name: existing=$actual expected=$expected" >&2
+                exit 1
+              fi
+              rm -f "existing-assets/$name"
+            else
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$asset"
+            fi
+          done
