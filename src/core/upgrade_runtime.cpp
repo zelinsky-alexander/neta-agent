@@ -19,6 +19,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
@@ -176,6 +177,43 @@ void write_installed_build(const std::filesystem::path& state_dir,
         << "build_id=" << instruction.build_id << '\n'
         << "git_commit=" << instruction.git_commit << '\n';
     atomic_write(state_dir / "installed-build.conf", out.str());
+}
+
+std::string installed_build_value(const std::filesystem::path& state_dir,
+                                  const std::string& key) {
+    std::ifstream input(state_dir / "installed-build.conf");
+    if (!input) return {};
+    const std::string prefix = key + "=";
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.starts_with(prefix)) return line.substr(prefix.size());
+    }
+    return {};
+}
+
+bool files_equal(const std::filesystem::path& first, const std::filesystem::path& second) {
+    std::error_code ec;
+    const auto first_size = std::filesystem::file_size(first, ec);
+    if (ec) return false;
+    ec.clear();
+    const auto second_size = std::filesystem::file_size(second, ec);
+    if (ec || first_size != second_size) return false;
+
+    std::ifstream a(first, std::ios::binary);
+    std::ifstream b(second, std::ios::binary);
+    if (!a || !b) return false;
+    std::array<char, 64 * 1024> left{};
+    std::array<char, 64 * 1024> right{};
+    for (;;) {
+        a.read(left.data(), static_cast<std::streamsize>(left.size()));
+        b.read(right.data(), static_cast<std::streamsize>(right.size()));
+        const auto ac = a.gcount();
+        const auto bc = b.gcount();
+        if (ac != bc) return false;
+        if (ac == 0) return a.eof() && b.eof();
+        if (!std::equal(left.begin(), left.begin() + ac, right.begin())) return false;
+    }
 }
 
 #ifdef _WIN32
@@ -608,12 +646,42 @@ UpgradeHealthResult check_upgrade_health(const std::filesystem::path& state_dir,
                                          const UpgradeInstruction& expected) {
     try {
         require_identity_files(state_dir);
-        const auto build = current_build_identity(state_dir);
-        if (build.version != expected.version || build.build_id != expected.build_id ||
-            build.git_commit != expected.git_commit || build.os != expected.os || build.arch != expected.arch)
-            return {false, "BUILD_IDENTITY_MISMATCH", "running executable does not match expected upgrade target"};
-        if (build.artifact_sha256 != expected.sha256)
+        const UpgradeActivationStore activation_store(state_dir);
+        const auto activation = activation_store.load();
+        if (!activation || activation->upgrade_id != expected.upgrade_id)
+            return {false, "ACTIVATION_STATE_MISMATCH", "upgrade activation record does not match expected upgrade"};
+        if (activation->state != UpgradeActivationState::Installing &&
+            activation->state != UpgradeActivationState::LocalHealthy)
+            return {false, "ACTIVATION_STATE_MISMATCH", "upgrade activation is not in a healthy-checkable state"};
+
+        if (installed_build_value(state_dir, "upgrade_id") != expected.upgrade_id ||
+            installed_build_value(state_dir, "version") != expected.version ||
+            installed_build_value(state_dir, "build_id") != expected.build_id ||
+            installed_build_value(state_dir, "git_commit") != expected.git_commit)
+            return {false, "BUILD_IDENTITY_MISMATCH", "installed build metadata does not match expected upgrade target"};
+        if (installed_build_value(state_dir, "artifact_sha256") != expected.sha256)
             return {false, "ARTIFACT_IDENTITY_MISMATCH", "installed artifact SHA does not match expected upgrade target"};
+
+        const auto active_target = std::filesystem::path(activation->active_target);
+        if (active_target.empty() || !std::filesystem::is_directory(active_target))
+            return {false, "ACTIVE_TARGET_MISMATCH", "upgrade active target directory is missing"};
+        if (active_target.filename() != expected.build_id)
+            return {false, "ACTIVE_TARGET_MISMATCH", "upgrade active target build does not match expected build_id"};
+
+        const auto current = activation->install_root / "current";
+#ifdef _WIN32
+        if (!std::filesystem::is_directory(current))
+            return {false, "ACTIVE_TARGET_MISMATCH", "Windows current installation directory is missing"};
+        const auto expected_agent = find_packaged_agent(active_target);
+        const auto current_agent = find_packaged_agent(current);
+        if (!files_equal(expected_agent, current_agent))
+            return {false, "ACTIVE_TARGET_MISMATCH", "running installation does not match activated target executable"};
+#else
+        std::error_code ec;
+        if (!std::filesystem::equivalent(current, active_target, ec) || ec)
+            return {false, "ACTIVE_TARGET_MISMATCH", "current symlink does not resolve to activated target"};
+        static_cast<void>(find_packaged_agent(active_target));
+#endif
         return {true, {}, "upgrade health checks passed"};
     } catch (const std::exception& error) {
         return {false, "HEALTH_CHECK_FAILED", bounded(error.what(), kFailureMessageMax)};
@@ -731,9 +799,7 @@ bool launch_upgrade_worker_if_needed(const std::filesystem::path& state_dir) {
     if (!state || state->state == UpgradeLocalState::Failed) return false;
     UpgradeActivationStore activation_store(state_dir);
     if (const auto activation = activation_store.load()) {
-        if (activation->upgrade_id == state->instruction.upgrade_id &&
-            (activation->state == UpgradeActivationState::Installing ||
-             activation->state == UpgradeActivationState::LocalHealthy)) return false;
+        if (activation->upgrade_id == state->instruction.upgrade_id) return false;
     }
 #ifdef _WIN32
     const wchar_t* program_data = _wgetenv(L"ProgramData");
