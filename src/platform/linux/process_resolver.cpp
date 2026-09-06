@@ -37,17 +37,34 @@ std::string first_line(const std::string& path) {
     return value;
 }
 
-std::string process_display_name(const std::string& comm, const std::string& executable_path) {
-    if (comm.size() < kLinuxCommVisibleBytes || executable_path.empty()) return comm;
+std::string first_cmdline_argument(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return {};
+    std::string value;
+    std::getline(in, value, '\0');
+    return value;
+}
 
-    const auto executable_name = fs::path(executable_path).filename().string();
-    if (executable_name.empty()) return comm;
+std::string basename_or_empty(const std::string& path) {
+    if (path.empty()) return {};
+    return fs::path(path).filename().string();
+}
+
+std::string process_display_name(const std::string& comm,
+                                 const std::string& executable_path,
+                                 const std::string& argv0) {
+    if (comm.size() < kLinuxCommVisibleBytes) return comm;
 
     // /proc/<pid>/comm is backed by Linux TASK_COMM_LEN (16 bytes including
-    // the terminator), so a 15-byte value may be silently truncated.  In that
-    // case use the executable basename for the user-facing process name while
-    // retaining executable_path as the full attribution evidence.
-    return executable_name;
+    // the terminator), so a 15-byte value may be silently truncated. Prefer
+    // the kernel's executable symlink when available. Short-lived processes
+    // can disappear between socket attribution and readlink(/proc/<pid>/exe),
+    // so fall back to argv[0] from /proc/<pid>/cmdline before retaining comm.
+    if (const auto executable_name = basename_or_empty(executable_path); !executable_name.empty())
+        return executable_name;
+    if (const auto argv0_name = basename_or_empty(argv0); !argv0_name.empty())
+        return argv0_name;
+    return comm;
 }
 
 class LinuxProcessResolver final : public ProcessResolver {
@@ -75,7 +92,10 @@ public:
                 result.comm = first_line((entry.path() / "comm").string());
                 auto exe = fs::read_symlink(entry.path() / "exe", ec);
                 if (!ec) result.executable_path = exe.string(); else ec.clear();
-                result.comm = process_display_name(result.comm, result.executable_path);
+                const std::string argv0 = result.comm.size() >= kLinuxCommVisibleBytes && result.executable_path.empty()
+                    ? first_cmdline_argument(entry.path() / "cmdline")
+                    : std::string{};
+                result.comm = process_display_name(result.comm, result.executable_path, argv0);
                 return result;
             }
         }
