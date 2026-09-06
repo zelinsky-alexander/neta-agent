@@ -2,7 +2,9 @@
 
 #include "neta/upgrade.hpp"
 
+#include <openssl/err.h>
 #include <openssl/rand.h>
+#include <openssl/x509_vfy.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -11,6 +13,22 @@
 #include <string>
 
 namespace neta {
+
+// Upgrade progress currently uses its own OpenSSL transport. Adapt the
+// unqualified verification setter used by that implementation so coordinator
+// IP literals are verified against iPAddress SANs, while DNS names retain the
+// normal hostname-verification path. The int overload is intentionally a
+// better match for the existing call's literal 0 length argument than
+// OpenSSL's size_t overload.
+inline int X509_VERIFY_PARAM_set1_host(X509_VERIFY_PARAM* param,
+                                       const char* name,
+                                       int namelen) {
+    if (param == nullptr || name == nullptr) return 0;
+    if (::X509_VERIFY_PARAM_set1_ip_asc(param, name) == 1) return 1;
+    ERR_clear_error();
+    return ::X509_VERIFY_PARAM_set1_host(
+        param, name, static_cast<std::size_t>(namelen));
+}
 
 enum class UpgradeActivationState {
     Installing,
