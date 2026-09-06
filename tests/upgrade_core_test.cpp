@@ -155,6 +155,76 @@ void test_post_activation_replay_is_idempotent() {
     assert(rejected);
 }
 
+void test_stale_verified_upgrade_can_be_superseded_when_target_is_running() {
+    TempDir dir;
+    const auto original = neta::current_build_identity(dir.path);
+    const auto old_instruction = instruction_for(original);
+    neta::UpgradeStateStore store(dir.path);
+    auto old_state = store.accept(old_instruction, original);
+    old_state.state = neta::UpgradeLocalState::Verified;
+    store.save(old_state);
+
+    auto running = original;
+    running.version = old_instruction.version;
+    running.build_id = old_instruction.build_id;
+    running.git_commit = old_instruction.git_commit;
+    running.artifact_sha256 = old_instruction.sha256;
+
+    auto next = instruction_for(running);
+    next.upgrade_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    next.version = running.version + ".next";
+    next.build_id = "upgrade-test-build-2";
+    next.git_commit = "2a2b3c4d5e6f7081928374655647382910abcdef";
+    next.sha256 = std::string(64, 'b');
+
+    const auto accepted = store.accept(next, running);
+    assert(accepted.instruction.upgrade_id == next.upgrade_id);
+    assert(accepted.state == neta::UpgradeLocalState::Received);
+}
+
+void test_terminal_activation_allows_new_upgrade() {
+    for (const auto terminal : {neta::UpgradeActivationState::Failed,
+                                neta::UpgradeActivationState::RolledBack}) {
+        TempDir dir;
+        const auto local = neta::current_build_identity(dir.path);
+        const auto old_instruction = instruction_for(local);
+        neta::UpgradeStateStore store(dir.path);
+        auto old_state = store.accept(old_instruction, local);
+        old_state.state = neta::UpgradeLocalState::Verified;
+        store.save(old_state);
+
+        neta::UpgradeActivationStore activation_store(dir.path);
+        neta::UpgradeActivationRecord activation;
+        activation.upgrade_id = old_instruction.upgrade_id;
+        activation.state = terminal;
+        activation.install_root = dir.path / "install";
+        activation_store.save(activation);
+
+        auto next = old_instruction;
+        next.upgrade_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        const auto accepted = store.accept(next, local);
+        assert(accepted.instruction.upgrade_id == next.upgrade_id);
+        assert(accepted.state == neta::UpgradeLocalState::Received);
+    }
+}
+
+void test_active_different_upgrade_still_rejected() {
+    TempDir dir;
+    const auto local = neta::current_build_identity(dir.path);
+    const auto old_instruction = instruction_for(local);
+    neta::UpgradeStateStore store(dir.path);
+    auto old_state = store.accept(old_instruction, local);
+    old_state.state = neta::UpgradeLocalState::Verified;
+    store.save(old_state);
+
+    auto next = old_instruction;
+    next.upgrade_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    bool rejected = false;
+    try { (void)store.accept(next, local); }
+    catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+}
+
 void test_local_sha_verification() {
     TempDir dir;
     const auto artifact = dir.path / "artifact.bin";
@@ -248,6 +318,9 @@ int main() {
     test_instruction_parse_and_policy();
     test_durable_state_and_idempotency();
     test_post_activation_replay_is_idempotent();
+    test_stale_verified_upgrade_can_be_superseded_when_target_is_running();
+    test_terminal_activation_allows_new_upgrade();
+    test_active_different_upgrade_still_rejected();
     test_local_sha_verification();
     test_activation_state_round_trip();
     test_health_is_fail_closed();
