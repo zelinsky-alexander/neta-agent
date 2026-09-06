@@ -135,10 +135,10 @@ if ldd "$RELEASE_BUILD_DIR/neta-agent" 2>/dev/null | grep -qi 'yara'; then
   exit 1
 fi
 
-echo "==> Installing versioned agent and dedicated updater"
+echo "==> Installing versioned agent and updater"
 mkdir -p "$VERSION_DIR" "$INSTALL_ROOT/versions" /usr/local/libexec /usr/local/lib/neta
 install -m 0755 "$RELEASE_BUILD_DIR/neta-agent" "$VERSION_DIR/neta-agent"
-install -m 0755 "$RELEASE_BUILD_DIR/neta-agent-updater" /usr/local/libexec/neta-agent-updater
+install -m 0755 "$RELEASE_BUILD_DIR/neta-agent-updater" "$VERSION_DIR/neta-agent-updater"
 if [[ -f "$RELEASE_BUILD_DIR/libneta_tls_context.so" ]]; then
   install -m 0755 "$RELEASE_BUILD_DIR/libneta_tls_context.so" "$VERSION_DIR/libneta_tls_context.so"
   install -m 0755 "$RELEASE_BUILD_DIR/libneta_tls_context.so" /usr/local/lib/neta/libneta_tls_context.so
@@ -147,6 +147,10 @@ fi
 ln -sfn "versions/$BOOTSTRAP_BUILD" "$INSTALL_ROOT/current.new"
 mv -Tf "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
 ln -sfn "$INSTALL_ROOT/current/neta-agent" /usr/local/bin/neta-agent
+# Keep the updater coupled to the active immutable version. A running updater
+# continues executing its opened inode while an activation switches `current`;
+# every subsequent launch resolves to the updater shipped with the active agent.
+ln -sfn "$INSTALL_ROOT/current/neta-agent-updater" /usr/local/libexec/neta-agent-updater
 
 mkdir -p "$STATE_DIR" /etc/neta
 chmod 0700 "$STATE_DIR"
@@ -196,7 +200,7 @@ echo "==> Installed $NETA_ARCH build into $VERSION_DIR"
 
 echo
 echo "Upgrade helper:"
-echo "  /usr/local/libexec/neta-agent-updater"
+echo "  /usr/local/libexec/neta-agent-updater -> $INSTALL_ROOT/current/neta-agent-updater"
 echo "Active version:"
 readlink -f "$INSTALL_ROOT/current" || true
 
