@@ -208,6 +208,27 @@ void test_health_is_fail_closed() {
     assert(!result.failure_code.empty());
 }
 
+void test_terminal_activation_does_not_relaunch() {
+    for (const auto terminal : {neta::UpgradeActivationState::Failed,
+                                neta::UpgradeActivationState::RolledBack}) {
+        TempDir dir;
+        const auto local = neta::current_build_identity(dir.path);
+        const auto instruction = instruction_for(local);
+        neta::UpgradeStateStore state_store(dir.path);
+        (void)state_store.accept(instruction, local);
+
+        neta::UpgradeActivationStore activation_store(dir.path);
+        neta::UpgradeActivationRecord activation;
+        activation.upgrade_id = instruction.upgrade_id;
+        activation.state = terminal;
+        activation.install_root = dir.path / "install";
+        activation.active_target = (activation.install_root / "versions" / instruction.build_id).string();
+        activation_store.save(activation);
+
+        assert(!neta::launch_upgrade_worker_if_needed(dir.path));
+    }
+}
+
 void test_progress_status_is_bounded() {
     TempDir dir;
     bool rejected = false;
@@ -230,6 +251,7 @@ int main() {
     test_local_sha_verification();
     test_activation_state_round_trip();
     test_health_is_fail_closed();
+    test_terminal_activation_does_not_relaunch();
     test_progress_status_is_bounded();
     std::cout << "upgrade core tests passed\n";
     return 0;
