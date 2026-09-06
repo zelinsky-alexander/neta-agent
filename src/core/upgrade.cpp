@@ -537,6 +537,33 @@ bool same_instruction(const UpgradeInstruction& a, const UpgradeInstruction& b) 
            a.download_url == b.download_url && normalize_sha256(a.sha256) == normalize_sha256(b.sha256);
 }
 
+bool instruction_matches_build(const UpgradeInstruction& instruction, const BuildIdentity& build) {
+    if (instruction.version != build.version || instruction.build_id != build.build_id ||
+        lower(instruction.git_commit) != lower(build.git_commit) ||
+        lower(instruction.os) != lower(build.os) || lower(instruction.arch) != lower(build.arch)) {
+        return false;
+    }
+    return build.artifact_sha256.empty() ||
+           normalize_sha256(instruction.sha256) == normalize_sha256(build.artifact_sha256);
+}
+
+bool activation_is_terminal_for(const std::filesystem::path& state_dir,
+                                const std::string& upgrade_id) {
+    const auto path = state_dir / "upgrade" / "activation.json";
+    if (!std::filesystem::is_regular_file(path)) return false;
+    try {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) return false;
+        const std::string text((std::istreambuf_iterator<char>(input)), {});
+        const auto activation_id = object_member_string(text, "upgrade_id");
+        const auto activation_state = object_member_string(text, "state");
+        return activation_id && *activation_id == upgrade_id && activation_state &&
+               (*activation_state == "FAILED" || *activation_state == "ROLLED_BACK");
+    } catch (...) {
+        return false;
+    }
+}
+
 std::string installed_artifact_sha(const std::filesystem::path& state_dir) {
     if (state_dir.empty()) return {};
     const auto path = state_dir / "installed-build.conf";
@@ -664,8 +691,12 @@ UpgradeState UpgradeStateStore::accept(const UpgradeInstruction& instruction, co
                 throw std::runtime_error("coordinator repeated upgrade_id with changed immutable target fields");
             return *existing;
         }
-        if (existing->state != UpgradeLocalState::Failed)
+        const bool old_target_is_running = instruction_matches_build(existing->instruction, local_build);
+        const bool old_activation_is_terminal = activation_is_terminal_for(state_dir_, existing->instruction.upgrade_id);
+        if (existing->state != UpgradeLocalState::Failed &&
+            !old_target_is_running && !old_activation_is_terminal) {
             throw std::runtime_error("another local upgrade is already active");
+        }
     }
     validate_upgrade_instruction(instruction, local_build);
     UpgradeState state;
