@@ -171,13 +171,13 @@ void collect_ipv6(std::vector<SocketObservation>& out) {
 
         if (socket.endpoint_kind == TcpEndpointKind::Connection) {
             MIB_TCP6ROW basic{};
-            std::memcpy(basic.ucLocalAddr, row.ucLocalAddr, sizeof(basic.ucLocalAddr));
+            basic.State = static_cast<MIB_TCP_STATE>(row.dwState);
+            std::memcpy(&basic.LocalAddr, row.ucLocalAddr, sizeof(basic.LocalAddr));
             basic.dwLocalScopeId = row.dwLocalScopeId;
             basic.dwLocalPort = row.dwLocalPort;
-            std::memcpy(basic.ucRemoteAddr, row.ucRemoteAddr, sizeof(basic.ucRemoteAddr));
+            std::memcpy(&basic.RemoteAddr, row.ucRemoteAddr, sizeof(basic.RemoteAddr));
             basic.dwRemoteScopeId = row.dwRemoteScopeId;
             basic.dwRemotePort = row.dwRemotePort;
-            basic.dwState = row.dwState;
             collect_estats(basic, socket.transport);
         }
         out.push_back(std::move(socket));
