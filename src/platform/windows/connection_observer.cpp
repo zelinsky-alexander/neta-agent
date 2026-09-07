@@ -4,6 +4,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <tcpestats.h>
 
 #include <chrono>
 #include <cstddef>
@@ -47,6 +48,58 @@ TcpEndpointKind endpoint_kind(DWORD state) {
     return TcpEndpointKind::Connection;
 }
 
+void collect_estats(MIB_TCPROW row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_DATA_ROD_v0 data{};
+    auto rc = GetPerTcpConnectionEStats(
+        &row, TcpConnectionEstatsData,
+        nullptr, 0, 0, nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
+    if (rc != NO_ERROR) {
+        TCP_ESTATS_DATA_RW_v0 rw{};
+        rw.EnableCollection = TcpBoolOptEnabled;
+        rc = SetPerTcpConnectionEStats(
+            &row, TcpConnectionEstatsData,
+            reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw), 0);
+        if (rc != NO_ERROR) return;
+        data = {};
+        rc = GetPerTcpConnectionEStats(
+            &row, TcpConnectionEstatsData,
+            nullptr, 0, 0, nullptr, 0, 0,
+            reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
+        if (rc != NO_ERROR) return;
+    }
+    snapshot.bytes_sent = static_cast<std::uint64_t>(data.DataBytesOut);
+    snapshot.bytes_received = static_cast<std::uint64_t>(data.DataBytesIn);
+    snapshot.transfer_source = "windows:tcp-estats:data";
+    snapshot.transfer_fidelity = EvidenceFidelity::StronglyCorrelated;
+}
+
+void collect_estats(MIB_TCP6ROW row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_DATA_ROD_v0 data{};
+    auto rc = GetPerTcp6ConnectionEStats(
+        &row, TcpConnectionEstatsData,
+        nullptr, 0, 0, nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
+    if (rc != NO_ERROR) {
+        TCP_ESTATS_DATA_RW_v0 rw{};
+        rw.EnableCollection = TcpBoolOptEnabled;
+        rc = SetPerTcp6ConnectionEStats(
+            &row, TcpConnectionEstatsData,
+            reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw), 0);
+        if (rc != NO_ERROR) return;
+        data = {};
+        rc = GetPerTcp6ConnectionEStats(
+            &row, TcpConnectionEstatsData,
+            nullptr, 0, 0, nullptr, 0, 0,
+            reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
+        if (rc != NO_ERROR) return;
+    }
+    snapshot.bytes_sent = static_cast<std::uint64_t>(data.DataBytesOut);
+    snapshot.bytes_received = static_cast<std::uint64_t>(data.DataBytesIn);
+    snapshot.transfer_source = "windows:tcp-estats:data";
+    snapshot.transfer_fidelity = EvidenceFidelity::StronglyCorrelated;
+}
+
 void collect_ipv4(std::vector<SocketObservation>& out) {
     ULONG size = 0;
     DWORD rc = GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET,
@@ -74,6 +127,16 @@ void collect_ipv4(std::vector<SocketObservation>& out) {
         socket.endpoint_kind = endpoint_kind(row.dwState);
         socket.transport.observed_ns = observed;
         socket.transport.state = static_cast<std::uint8_t>(row.dwState & 0xffU);
+
+        if (socket.endpoint_kind == TcpEndpointKind::Connection) {
+            MIB_TCPROW basic{};
+            basic.dwState = row.dwState;
+            basic.dwLocalAddr = row.dwLocalAddr;
+            basic.dwLocalPort = row.dwLocalPort;
+            basic.dwRemoteAddr = row.dwRemoteAddr;
+            basic.dwRemotePort = row.dwRemotePort;
+            collect_estats(basic, socket.transport);
+        }
         out.push_back(std::move(socket));
     }
 }
@@ -105,6 +168,18 @@ void collect_ipv6(std::vector<SocketObservation>& out) {
         socket.endpoint_kind = endpoint_kind(row.dwState);
         socket.transport.observed_ns = observed;
         socket.transport.state = static_cast<std::uint8_t>(row.dwState & 0xffU);
+
+        if (socket.endpoint_kind == TcpEndpointKind::Connection) {
+            MIB_TCP6ROW basic{};
+            std::memcpy(basic.ucLocalAddr, row.ucLocalAddr, sizeof(basic.ucLocalAddr));
+            basic.dwLocalScopeId = row.dwLocalScopeId;
+            basic.dwLocalPort = row.dwLocalPort;
+            std::memcpy(basic.ucRemoteAddr, row.ucRemoteAddr, sizeof(basic.ucRemoteAddr));
+            basic.dwRemoteScopeId = row.dwRemoteScopeId;
+            basic.dwRemotePort = row.dwRemotePort;
+            basic.dwState = row.dwState;
+            collect_estats(basic, socket.transport);
+        }
         out.push_back(std::move(socket));
     }
 }
