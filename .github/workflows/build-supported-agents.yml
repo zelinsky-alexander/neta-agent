@@ -196,8 +196,138 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  linux-manifest:
+    name: Build Linux Release Manifest
+    runs-on: ubuntu-24.04
+    needs:
+      - linux-amd64
+      - linux-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Download packaged Linux flavors
+        uses: actions/download-artifact@v7
+        with:
+          path: dist-artifacts
+          pattern: neta-agent-linux-*
+          merge-multiple: true
+      - name: Create Linux release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          cmake = pathlib.Path('CMakeLists.txt').read_text()
+          match = re.search(r'project\(neta-agent\s+VERSION\s+([^\s\)]+)', cmake)
+          if not match:
+              raise SystemExit('cannot determine project version from CMakeLists.txt')
+          version = match.group(1)
+          sha = os.environ['GITHUB_SHA'].lower()
+          build_id = os.environ['NETA_BUILD_ID']
+          root = pathlib.Path('dist-artifacts')
+          mappings = [
+              ('linux', 'amd64', f'neta-agent-linux-amd64-{sha[:12]}.tar.gz'),
+              ('linux', 'arm64', f'neta-agent-linux-arm64-{sha[:12]}.tar.gz'),
+          ]
+          artifacts = []
+          for os_name, arch, name in mappings:
+              path = root / name
+              if not path.is_file():
+                  raise SystemExit(f'missing packaged artifact: {name}')
+              artifacts.append({'os': os_name, 'arch': arch, 'name': name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+          manifest = {
+              'version': version,
+              'build_id': build_id,
+              'git_commit': sha,
+              'published_at': None,
+              'artifacts': artifacts,
+          }
+          pathlib.Path('release-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(pathlib.Path('release-manifest.json').read_text())
+          PY
+      - name: Upload Linux release manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: neta-agent-release-manifest-linux-${{ github.sha }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-development-linux:
+    name: Publish Immutable Linux Development Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    needs:
+      - linux-amd64
+      - linux-arm64
+      - linux-manifest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download packaged Linux flavors
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          pattern: neta-agent-linux-*
+          merge-multiple: true
+      - name: Download Linux manifest
+        uses: actions/download-artifact@v7
+        with:
+          name: neta-agent-release-manifest-linux-${{ github.sha }}
+          path: release-assets
+      - name: Publish Linux-ready immutable prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="dev-${GITHUB_SHA}"
+          short_sha="${GITHUB_SHA:0:12}"
+          assets=(
+            "release-assets/neta-agent-linux-amd64-${short_sha}.tar.gz"
+            "release-assets/neta-agent-linux-arm64-${short_sha}.tar.gz"
+            "release-assets/release-manifest.json"
+          )
+
+          for asset in "${assets[@]}"; do
+            [[ -f "$asset" ]] || { echo "missing release asset: $asset" >&2; exit 1; }
+          done
+
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "NETA Agent development ${short_sha}" \
+              --notes "Development build for commit ${GITHUB_SHA}. Linux artifacts are published as soon as Linux packaging is green; Windows is added later by the same workflow." \
+              --prerelease \
+              "${assets[@]}"
+            exit 0
+          fi
+
+          existing_target="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha')"
+          if [[ "$existing_target" != "$GITHUB_SHA" ]]; then
+            echo "existing tag $tag points to $existing_target, expected $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          mkdir -p existing-assets
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing-assets
+              expected="$(sha256sum "$asset" | awk '{print $1}')"
+              actual="$(sha256sum "existing-assets/$name" | awk '{print $1}')"
+              if [[ "$actual" != "$expected" ]]; then
+                echo "immutable release asset mismatch for $name: existing=$actual expected=$expected" >&2
+                exit 1
+              fi
+              rm -f "existing-assets/$name"
+            else
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$asset"
+            fi
+          done
+
   manifest:
-    name: Build Release Manifest
+    name: Build Complete Release Manifest
     runs-on: ubuntu-24.04
     needs:
       - linux-amd64
@@ -210,9 +340,15 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: dist-artifacts
-          pattern: neta-agent-*
+          pattern: neta-agent-*-amd64-*
           merge-multiple: true
-      - name: Create release manifest
+      - name: Download Linux ARM64 flavor
+        uses: actions/download-artifact@v7
+        with:
+          path: dist-artifacts
+          pattern: neta-agent-linux-arm64-*
+          merge-multiple: true
+      - name: Create complete release manifest
         shell: bash
         run: |
           set -euo pipefail
@@ -247,7 +383,7 @@ jobs:
           pathlib.Path('release-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           print(pathlib.Path('release-manifest.json').read_text())
           PY
-      - name: Upload release manifest
+      - name: Upload complete release manifest
         uses: actions/upload-artifact@v7
         with:
           name: neta-agent-release-manifest-${{ github.sha }}
@@ -255,52 +391,39 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  publish-development-release:
-    name: Publish Immutable Development Release
+  finalize-development-release:
+    name: Add Windows To Development Release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     needs:
-      - linux-amd64
-      - linux-arm64
+      - publish-development-linux
       - windows-amd64
       - manifest
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Download packaged flavors and manifest
+      - name: Download packaged Windows flavor
         uses: actions/download-artifact@v7
         with:
           path: release-assets
-          pattern: neta-agent-*
+          pattern: neta-agent-windows-*
           merge-multiple: true
-      - name: Publish immutable prerelease
+      - name: Download complete manifest
+        uses: actions/download-artifact@v7
+        with:
+          name: neta-agent-release-manifest-${{ github.sha }}
+          path: release-assets
+      - name: Add Windows and monotonically extend manifest
         shell: bash
         run: |
           set -euo pipefail
 
           tag="dev-${GITHUB_SHA}"
           short_sha="${GITHUB_SHA:0:12}"
-          assets=(
-            "release-assets/neta-agent-linux-amd64-${short_sha}.tar.gz"
-            "release-assets/neta-agent-linux-arm64-${short_sha}.tar.gz"
-            "release-assets/neta-agent-windows-amd64-${short_sha}.zip"
-            "release-assets/release-manifest.json"
-          )
-
-          for asset in "${assets[@]}"; do
-            [[ -f "$asset" ]] || { echo "missing release asset: $asset" >&2; exit 1; }
-          done
-
-          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "NETA Agent development ${short_sha}" \
-              --notes "Immutable development build for commit ${GITHUB_SHA}." \
-              --prerelease \
-              "${assets[@]}"
-            exit 0
-          fi
+          windows_asset="release-assets/neta-agent-windows-amd64-${short_sha}.zip"
+          manifest="release-assets/release-manifest.json"
+          [[ -f "$windows_asset" ]] || { echo "missing release asset: $windows_asset" >&2; exit 1; }
+          [[ -f "$manifest" ]] || { echo "missing release manifest: $manifest" >&2; exit 1; }
 
           existing_target="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha')"
           if [[ "$existing_target" != "$GITHUB_SHA" ]]; then
@@ -309,18 +432,39 @@ jobs:
           fi
 
           mkdir -p existing-assets
-          for asset in "${assets[@]}"; do
-            name="$(basename "$asset")"
-            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
-              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing-assets
-              expected="$(sha256sum "$asset" | awk '{print $1}')"
-              actual="$(sha256sum "existing-assets/$name" | awk '{print $1}')"
-              if [[ "$actual" != "$expected" ]]; then
-                echo "immutable release asset mismatch for $name: existing=$actual expected=$expected" >&2
-                exit 1
-              fi
-              rm -f "existing-assets/$name"
-            else
-              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$asset"
+          name="$(basename "$windows_asset")"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing-assets
+            expected="$(sha256sum "$windows_asset" | awk '{print $1}')"
+            actual="$(sha256sum "existing-assets/$name" | awk '{print $1}')"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "immutable release asset mismatch for $name: existing=$actual expected=$expected" >&2
+              exit 1
             fi
-          done
+            rm -f "existing-assets/$name"
+          else
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$windows_asset"
+          fi
+
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern release-manifest.json --dir existing-assets
+          python3 - "$manifest" existing-assets/release-manifest.json <<'PY'
+          import json, sys
+          new = json.load(open(sys.argv[1]))
+          old = json.load(open(sys.argv[2]))
+          for key in ('version', 'build_id', 'git_commit'):
+              if old.get(key) != new.get(key):
+                  raise SystemExit(f'manifest identity changed for {key}: {old.get(key)!r} != {new.get(key)!r}')
+          old_artifacts = {(a['os'], a['arch']): a for a in old.get('artifacts', [])}
+          new_artifacts = {(a['os'], a['arch']): a for a in new.get('artifacts', [])}
+          for platform, artifact in old_artifacts.items():
+              if new_artifacts.get(platform) != artifact:
+                  raise SystemExit(f'existing manifest artifact changed for {platform}: {artifact!r} != {new_artifacts.get(platform)!r}')
+          if not set(old_artifacts).issubset(new_artifacts):
+              raise SystemExit('complete manifest is not a monotonic extension of the published manifest')
+          PY
+
+          if cmp -s existing-assets/release-manifest.json "$manifest"; then
+            echo "complete manifest already published"
+          else
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$manifest"
+          fi
