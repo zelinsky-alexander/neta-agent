@@ -5,8 +5,8 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/sock_diag.h>
+#include <linux/tcp.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -20,6 +20,10 @@
 
 namespace neta::platform {
 namespace {
+
+constexpr std::uint8_t kTcpTimeWait = 6;
+constexpr std::uint8_t kTcpClose = 7;
+constexpr std::uint8_t kTcpListen = 10;
 
 class Fd {
 public:
@@ -123,11 +127,11 @@ private:
                 item.transport.observed_ns = steady_now_ns();
                 item.transport.state = diag->idiag_state;
                 switch (diag->idiag_state) {
-                    case TCP_LISTEN:
+                    case kTcpListen:
                         item.endpoint_kind = TcpEndpointKind::Listener;
                         break;
-                    case TCP_TIME_WAIT:
-                    case TCP_CLOSE:
+                    case kTcpTimeWait:
+                    case kTcpClose:
                         item.endpoint_kind = TcpEndpointKind::LifecycleTail;
                         break;
                     default:
