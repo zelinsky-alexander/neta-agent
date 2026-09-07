@@ -7,6 +7,7 @@
 #include "neta/platform.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
+#include "neta/transfer_assurance.hpp"
 #include "neta/upgrade_runtime.hpp"
 #include "neta/verdict.hpp"
 
@@ -160,6 +161,16 @@ void log_behavior_reporting_result(const BehaviorReportingResult& reporting) {
               << reporting.failed << " failed" << std::endl;
 }
 
+void log_transfer_reporting_result(const TransferReportingResult& reporting) {
+    if (reporting.detected == 0 && reporting.announced == 0 && reporting.failed == 0) return;
+    std::cout << "Large ingress: " << reporting.detected << " detected, "
+              << reporting.persisted << " persisted, "
+              << reporting.announced << " announced, "
+              << reporting.suppressed_policy << " suppressed by policy, "
+              << reporting.suppressed_cooldown << " suppressed by cooldown, "
+              << reporting.failed << " failed" << std::endl;
+}
+
 } // namespace
 
 void request_observation_stop() noexcept {
@@ -170,6 +181,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     const auto options = parse_observation_options(argc, argv, service_mode);
     SignalHandlers signals;
     HistoryStore store(options.database);
+    TransferEvidenceStore transfer_store(options.database);
     StorageMaintenance maintenance(store, options.max_database_bytes,
                                    options.maintenance_interval);
     maintenance.run_now();
@@ -180,6 +192,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     auto lifecycle = platform::make_lifecycle_observer();
     auto name_resolution = platform::make_name_resolution_observer();
     auto tls_session = platform::make_tls_session_observer();
+    TransferSampler transfer_sampler(transfer_store);
     const bool lifecycle_active = lifecycle_supports(lifecycle->capability(), options.mode);
 
     if (options.mode != ObservationMode::Target && !lifecycle_active) {
@@ -258,6 +271,14 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         }
     };
     callbacks.periodic = [&] {
+        if (service_mode) {
+            try {
+                transfer_sampler.capture(*sockets, store);
+            } catch (const std::exception& error) {
+                std::cerr << "Transfer sampling failed; observation continues: "
+                          << error.what() << std::endl;
+            }
+        }
         if (!service_mode || !fleet_identity_available) return;
         const auto now = std::chrono::steady_clock::now();
         if (now < next_heartbeat) return;
@@ -275,6 +296,16 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     };
     callbacks.connection_completed = [&](std::int64_t connection_id) {
         if (!service_mode) return;
+
+        try {
+            transfer_sampler.capture(*sockets, store, true);
+        } catch (const std::exception& error) {
+            std::cerr << "Final transfer sampling failed for CONN-" << connection_id
+                      << "; observation continues: " << error.what() << std::endl;
+        }
+        const auto transfer_reporting = auto_report_large_ingress(
+            store, transfer_store, connection_id, reporting_policy);
+        log_transfer_reporting_result(transfer_reporting);
 
         const auto behavior_reporting = auto_report_periodic_behavior(
             store, connection_id, reporting_policy);
