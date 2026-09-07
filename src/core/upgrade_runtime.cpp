@@ -741,6 +741,7 @@ void run_upgrade_worker(const UpgradeWorkerOptions& options) {
     UpgradeActivationRecord activation;
     activation.upgrade_id = state->instruction.upgrade_id;
     activation.install_root = options.install_root;
+    bool activation_attempted = false;
 
     try {
         if (state->state != UpgradeLocalState::Verified) {
@@ -753,6 +754,7 @@ void run_upgrade_worker(const UpgradeWorkerOptions& options) {
         const auto target = extract_version(*state, options.install_root);
         activation.active_target = target.string();
         stop_service(options.service_name);
+        activation_attempted = true;
         activation.previous_target = activate_version(options.install_root, target);
         write_installed_build(options.state_dir, state->instruction);
         activation_store.save(activation);
@@ -772,6 +774,7 @@ void run_upgrade_worker(const UpgradeWorkerOptions& options) {
         activation_store.save(activation);
         best_effort_report(options.state_dir, state->instruction.upgrade_id, "FAILED",
                            activation.failure_code, message);
+        if (!activation_attempted) throw;
         try {
             stop_service(options.service_name);
             rollback_version(activation);
@@ -807,7 +810,11 @@ bool launch_upgrade_worker_if_needed(const std::filesystem::path& state_dir) {
         ? std::filesystem::path(L"C:\\ProgramData\\NETA")
         : std::filesystem::path(program_data) / L"NETA";
     const std::filesystem::path install_root = L"C:\\Program Files\\NETA";
-    const auto updater = install_root / L"neta-agent-updater.exe";
+    const auto running_build = current_build_identity(state_dir);
+    std::filesystem::path updater = install_root / L"versions" / running_build.build_id / L"neta-agent-updater.exe";
+    if (!std::filesystem::is_regular_file(updater)) updater = install_root / L"current" / L"neta-agent-updater.exe";
+    if (!std::filesystem::is_regular_file(updater)) updater = install_root / L"neta-agent-updater.exe";
+    if (!std::filesystem::is_regular_file(updater)) return false;
     std::wstring command = quote_windows_arg(updater.wstring()) + L" apply --state-dir " +
                            quote_windows_arg(state_dir.wstring()) + L" --install-root " +
                            quote_windows_arg(install_root.wstring()) + L" --service NETAAgent";
