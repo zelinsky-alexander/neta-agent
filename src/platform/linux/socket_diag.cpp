@@ -151,6 +151,10 @@ private:
                         item.transport.snd_ssthresh = info->tcpi_snd_ssthresh;
                         item.transport.snd_mss = info->tcpi_snd_mss;
                         item.transport.rcv_mss = info->tcpi_rcv_mss;
+                        item.transport.bytes_sent = info->tcpi_bytes_sent;
+                        item.transport.bytes_received = info->tcpi_bytes_received;
+                        item.transport.transfer_source = "linux:tcp_info";
+                        item.transport.transfer_fidelity = EvidenceFidelity::Exact;
                     }
                 }
                 out.push_back(std::move(item));
