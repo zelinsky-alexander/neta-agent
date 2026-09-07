@@ -4,6 +4,7 @@
 
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include <openssl/ssl.h>
 #include <openssl/x509_vfy.h>
 
 #include <chrono>
@@ -14,12 +15,24 @@
 
 namespace neta {
 
-// Upgrade progress currently uses its own OpenSSL transport. Adapt the
-// unqualified verification setter used by that implementation so coordinator
-// IP literals are verified against iPAddress SANs, while DNS names retain the
-// normal hostname-verification path. The int overload is intentionally a
-// better match for the existing call's literal 0 length argument than
-// OpenSSL's size_t overload.
+// Upgrade progress still uses its own OpenSSL transport. Keep its peer-name
+// handling aligned with FleetClient until that duplicate transport is removed:
+// IP literals are verified against iPAddress SANs and must not be sent as DNS
+// SNI names; DNS names retain normal hostname verification and SNI.
+inline int upgrade_progress_set_server_name(SSL* ssl, const char* name) {
+    if (ssl == nullptr || name == nullptr) return 0;
+    X509_VERIFY_PARAM* param = SSL_get0_param(ssl);
+    if (param == nullptr) return 0;
+    if (::X509_VERIFY_PARAM_set1_ip_asc(param, name) == 1) {
+        return 1;
+    }
+    ERR_clear_error();
+    return static_cast<int>(SSL_ctrl(ssl,
+                                     SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                                     TLSEXT_NAMETYPE_host_name,
+                                     const_cast<char*>(name)));
+}
+
 inline int X509_VERIFY_PARAM_set1_host(X509_VERIFY_PARAM* param,
                                        const char* name,
                                        int namelen) {
@@ -91,3 +104,8 @@ void run_upgrade_worker(const UpgradeWorkerOptions& options);
 bool launch_upgrade_worker_if_needed(const std::filesystem::path& state_dir);
 
 } // namespace neta
+
+#ifdef SSL_set_tlsext_host_name
+#undef SSL_set_tlsext_host_name
+#endif
+#define SSL_set_tlsext_host_name(ssl, name) ::neta::upgrade_progress_set_server_name((ssl), (name))
