@@ -12,10 +12,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -177,8 +179,29 @@ private:
     std::optional<std::chrono::steady_clock::time_point> last_capture_;
 };
 
+inline std::uint64_t configured_large_ingress_minimum_bytes() {
+    constexpr std::uint64_t bytes_per_mib = 1024ULL * 1024ULL;
+    constexpr std::uint64_t default_mib = 256ULL;
+    const char* raw = std::getenv("NETA_LARGE_INGRESS_MIN_MIB");
+    if (raw == nullptr || *raw == '\0') return default_mib * bytes_per_mib;
+
+    try {
+        const std::string value(raw);
+        std::size_t consumed = 0;
+        const auto mib = std::stoull(value, &consumed, 10);
+        if (consumed != value.size() ||
+            mib > std::numeric_limits<std::uint64_t>::max() / bytes_per_mib) {
+            throw std::runtime_error("invalid range");
+        }
+        return static_cast<std::uint64_t>(mib) * bytes_per_mib;
+    } catch (const std::exception&) {
+        throw std::runtime_error(
+            "NETA_LARGE_INGRESS_MIN_MIB must be a non-negative whole number of MiB");
+    }
+}
+
 struct LargeIngressPolicy {
-    std::uint64_t minimum_bytes_received{32ULL * 1024ULL * 1024ULL};
+    std::uint64_t minimum_bytes_received{configured_large_ingress_minimum_bytes()};
 };
 
 struct LargeIngressFinding {
@@ -333,6 +356,10 @@ inline FindingAnnouncementInput announcement(const LargeIngressFinding& finding)
     input.evidence_root = finding.evidence_root;
     input.changes.emplace_back("Finding type: " + finding.type);
     input.changes.emplace_back("Severity: " + finding.severity);
+    std::ostringstream confidence;
+    confidence << std::fixed << std::setprecision(2) << finding.confidence;
+    input.changes.emplace_back("Confidence: " + confidence.str());
+    input.changes.emplace_back("Malicious intent: " + finding.malicious_intent);
     input.changes.emplace_back("Process: " + finding.process_name);
     input.changes.emplace_back("Connection: CONN-" + std::to_string(finding.connection_id));
     input.changes.emplace_back("Bytes received: " + std::to_string(finding.bytes_received));
