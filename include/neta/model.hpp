@@ -46,6 +46,14 @@ struct TcpSnapshot {
     std::uint32_t rcv_mss{0};
     std::uint32_t send_queue_bytes{0};
     std::uint32_t recv_queue_bytes{0};
+
+    // Cumulative TCP payload counters at observed_ns. These are deliberately
+    // distinct from queue depth: queue sizes describe bytes currently queued,
+    // while these counters describe bytes transferred over the connection.
+    std::optional<std::uint64_t> bytes_sent;
+    std::optional<std::uint64_t> bytes_received;
+    std::string transfer_source;
+    EvidenceFidelity transfer_fidelity{EvidenceFidelity::Contextual};
 };
 
 struct SocketObservation {
