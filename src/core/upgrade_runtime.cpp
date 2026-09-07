@@ -258,30 +258,74 @@ int run_process(const std::vector<std::wstring>& args) {
     return static_cast<int>(code);
 }
 
-bool service_running(const std::string& name) {
+DWORD service_state(const std::string& name) {
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (manager == nullptr) return false;
+    if (manager == nullptr) throw std::runtime_error("cannot open Windows Service Control Manager");
     const std::wstring wname(name.begin(), name.end());
     SC_HANDLE service = OpenServiceW(manager, wname.c_str(), SERVICE_QUERY_STATUS);
-    if (service == nullptr) { CloseServiceHandle(manager); return false; }
+    if (service == nullptr) {
+        CloseServiceHandle(manager);
+        throw std::runtime_error("cannot open Windows NETA service");
+    }
     SERVICE_STATUS_PROCESS status{};
     DWORD needed = 0;
-    const bool ok = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
-        reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed) != FALSE;
+    if (QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                             reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed) == FALSE) {
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+        throw std::runtime_error("cannot query Windows NETA service state");
+    }
     CloseServiceHandle(service);
     CloseServiceHandle(manager);
-    return ok && status.dwCurrentState == SERVICE_RUNNING;
+    return status.dwCurrentState;
+}
+
+bool wait_for_service_state(const std::string& name, DWORD desired,
+                            std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    do {
+        if (service_state(name) == desired) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return service_state(name) == desired;
+}
+
+bool service_running(const std::string& name) {
+    try {
+        return service_state(name) == SERVICE_RUNNING;
+    } catch (...) {
+        return false;
+    }
 }
 
 void stop_service(const std::string& name) {
-    static_cast<void>(run_process({L"sc.exe", L"stop", std::wstring(name.begin(), name.end())}));
-    for (int i = 0; i < 40 && service_running(name); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    const DWORD initial = service_state(name);
+    if (initial == SERVICE_STOPPED) return;
+    if (initial != SERVICE_STOP_PENDING) {
+        const int rc = run_process({L"sc.exe", L"stop", std::wstring(name.begin(), name.end())});
+        if (rc != 0 && service_state(name) != SERVICE_STOP_PENDING && service_state(name) != SERVICE_STOPPED)
+            throw std::runtime_error("failed to request Windows NETA service stop");
+    }
+    if (!wait_for_service_state(name, SERVICE_STOPPED, std::chrono::seconds(30)))
+        throw std::runtime_error("timed out waiting for Windows NETA service to stop");
 }
 
 void start_service(const std::string& name) {
-    if (run_process({L"sc.exe", L"start", std::wstring(name.begin(), name.end())}) != 0 && !service_running(name))
-        throw std::runtime_error("failed to start Windows NETA service");
+    DWORD initial = service_state(name);
+    if (initial == SERVICE_RUNNING) return;
+    if (initial == SERVICE_STOP_PENDING) {
+        if (!wait_for_service_state(name, SERVICE_STOPPED, std::chrono::seconds(30)))
+            throw std::runtime_error("timed out waiting for Windows NETA service to finish stopping before start");
+        initial = SERVICE_STOPPED;
+    }
+    if (initial != SERVICE_START_PENDING) {
+        const int rc = run_process({L"sc.exe", L"start", std::wstring(name.begin(), name.end())});
+        const DWORD after_start = service_state(name);
+        if (rc != 0 && after_start != SERVICE_START_PENDING && after_start != SERVICE_RUNNING)
+            throw std::runtime_error("failed to request Windows NETA service start");
+    }
+    if (!wait_for_service_state(name, SERVICE_RUNNING, std::chrono::seconds(30)))
+        throw std::runtime_error("timed out waiting for Windows NETA service to reach RUNNING");
 }
 #else
 int run_process(const std::vector<std::string>& args) {
