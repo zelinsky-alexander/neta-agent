@@ -19,6 +19,8 @@
 namespace neta::platform {
 namespace {
 
+constexpr std::uint64_t kMaxPlausibleSingleConnectionBytes = 1ULL << 50; // 1 PiB
+
 std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -48,26 +50,38 @@ TcpEndpointKind endpoint_kind(DWORD state) {
     return TcpEndpointKind::Connection;
 }
 
+bool plausible_estats(const TCP_ESTATS_DATA_ROD_v0& data) {
+    return data.DataBytesOut <= kMaxPlausibleSingleConnectionBytes &&
+           data.DataBytesIn <= kMaxPlausibleSingleConnectionBytes;
+}
+
 void collect_estats(MIB_TCPROW row, TcpSnapshot& snapshot) {
-    TCP_ESTATS_DATA_ROD_v0 data{};
+    TCP_ESTATS_DATA_RW_v0 rw{};
     auto rc = GetPerTcpConnectionEStats(
         &row, TcpConnectionEstatsData,
-        nullptr, 0, 0, nullptr, 0, 0,
-        reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
-    if (rc != NO_ERROR) {
-        TCP_ESTATS_DATA_RW_v0 rw{};
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0, nullptr, 0, 0);
+    if (rc != NO_ERROR) return;
+
+    if (rw.EnableCollection != TcpBoolOptEnabled) {
+        rw = {};
         rw.EnableCollection = TcpBoolOptEnabled;
         rc = SetPerTcpConnectionEStats(
             &row, TcpConnectionEstatsData,
             reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw), 0);
-        if (rc != NO_ERROR) return;
-        data = {};
-        rc = GetPerTcpConnectionEStats(
-            &row, TcpConnectionEstatsData,
-            nullptr, 0, 0, nullptr, 0, 0,
-            reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
-        if (rc != NO_ERROR) return;
+        // The first observation after enabling collection is intentionally not published.
+        // A later snapshot must confirm collection is enabled and provide dynamic counters.
+        return;
     }
+
+    TCP_ESTATS_DATA_ROD_v0 data{};
+    rc = GetPerTcpConnectionEStats(
+        &row, TcpConnectionEstatsData,
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
+    if (rc != NO_ERROR || rw.EnableCollection != TcpBoolOptEnabled || !plausible_estats(data)) return;
+
     snapshot.bytes_sent = static_cast<std::uint64_t>(data.DataBytesOut);
     snapshot.bytes_received = static_cast<std::uint64_t>(data.DataBytesIn);
     snapshot.transfer_source = "windows:tcp-estats:data";
@@ -75,25 +89,31 @@ void collect_estats(MIB_TCPROW row, TcpSnapshot& snapshot) {
 }
 
 void collect_estats(MIB_TCP6ROW row, TcpSnapshot& snapshot) {
-    TCP_ESTATS_DATA_ROD_v0 data{};
+    TCP_ESTATS_DATA_RW_v0 rw{};
     auto rc = GetPerTcp6ConnectionEStats(
         &row, TcpConnectionEstatsData,
-        nullptr, 0, 0, nullptr, 0, 0,
-        reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
-    if (rc != NO_ERROR) {
-        TCP_ESTATS_DATA_RW_v0 rw{};
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0, nullptr, 0, 0);
+    if (rc != NO_ERROR) return;
+
+    if (rw.EnableCollection != TcpBoolOptEnabled) {
+        rw = {};
         rw.EnableCollection = TcpBoolOptEnabled;
         rc = SetPerTcp6ConnectionEStats(
             &row, TcpConnectionEstatsData,
             reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw), 0);
-        if (rc != NO_ERROR) return;
-        data = {};
-        rc = GetPerTcp6ConnectionEStats(
-            &row, TcpConnectionEstatsData,
-            nullptr, 0, 0, nullptr, 0, 0,
-            reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
-        if (rc != NO_ERROR) return;
+        // Do not publish a same-snapshot value after enabling collection.
+        return;
     }
+
+    TCP_ESTATS_DATA_ROD_v0 data{};
+    rc = GetPerTcp6ConnectionEStats(
+        &row, TcpConnectionEstatsData,
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
+    if (rc != NO_ERROR || rw.EnableCollection != TcpBoolOptEnabled || !plausible_estats(data)) return;
+
     snapshot.bytes_sent = static_cast<std::uint64_t>(data.DataBytesOut);
     snapshot.bytes_received = static_cast<std::uint64_t>(data.DataBytesIn);
     snapshot.transfer_source = "windows:tcp-estats:data";
