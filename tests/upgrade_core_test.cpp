@@ -1,14 +1,17 @@
+#include "neta/behavior_detection.hpp"
 #include "neta/crypto.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
 
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -311,6 +314,72 @@ void test_progress_status_is_bounded() {
     assert(rejected);
 }
 
+neta::ConnectionSummary behavior_connection(std::int64_t id, std::uint64_t first_seen_ns,
+                                            const char* process, const char* remote,
+                                            std::uint16_t port) {
+    neta::ConnectionSummary result;
+    result.id = id;
+    result.first_seen_ns = first_seen_ns;
+    result.last_seen_ns = first_seen_ns + 10'000'000ULL;
+    result.direction = neta::ConnectionDirection::Outbound;
+    result.process.comm = process;
+    result.process.executable_path = std::string("/test/") + process;
+    result.remote_ip = remote;
+    result.remote_port = port;
+    result.lifecycle_state = "CLOSED";
+    return result;
+}
+
+std::vector<neta::ConnectionSummary> periodic_connections(std::size_t count,
+                                                           std::uint64_t interval_ns) {
+    std::vector<neta::ConnectionSummary> result;
+    result.reserve(count);
+    constexpr std::uint64_t start = 10'000'000'000ULL;
+    for (std::size_t index = 0; index < count; ++index) {
+        result.push_back(behavior_connection(
+            static_cast<std::int64_t>(index + 1),
+            start + static_cast<std::uint64_t>(index) * interval_ns,
+            "curl", "192.0.2.10", 18080));
+    }
+    return result;
+}
+
+void test_periodic_outbound_behavior_detection() {
+    const auto beacon = periodic_connections(12, 5'000'000'000ULL);
+    const auto finding = neta::detect_periodic_outbound(beacon, 12);
+    assert(finding.has_value());
+    assert(finding->type == "PERIODIC_OUTBOUND_CONNECTION");
+    assert(finding->severity == "LOW");
+    assert(finding->malicious_intent == "UNKNOWN");
+    assert(finding->connection_ids.size() == 12);
+    assert(finding->median_interval_ns == 5'000'000'000ULL);
+    assert(finding->regular_interval_fraction == 1.0);
+    assert(finding->confidence == 1.0);
+    assert(finding->evidence_root.starts_with("sha256:"));
+    assert(finding->interpretation.find("Malicious intent is not established") !=
+           std::string::npos);
+
+    const auto too_few = periodic_connections(2, 5'000'000'000ULL);
+    assert(!neta::detect_periodic_outbound(too_few, 2));
+
+    auto irregular = periodic_connections(12, 5'000'000'000ULL);
+    const std::uint64_t irregular_seconds[] = {10, 13, 22, 26, 40, 45, 53, 57, 70, 75, 87, 92};
+    for (std::size_t index = 0; index < irregular.size(); ++index) {
+        irregular[index].first_seen_ns = irregular_seconds[index] * 1'000'000'000ULL;
+    }
+    assert(!neta::detect_periodic_outbound(irregular, 12));
+
+    std::vector<neta::ConnectionSummary> browser_burst;
+    const std::uint64_t burst_ms[] = {0, 35, 80, 120, 180, 260, 350, 470, 900, 1400, 2200, 3100};
+    for (std::size_t index = 0; index < std::size(burst_ms); ++index) {
+        browser_burst.push_back(behavior_connection(
+            static_cast<std::int64_t>(index + 1),
+            20'000'000'000ULL + burst_ms[index] * 1'000'000ULL,
+            "chrome", "192.0.2.20", 443));
+    }
+    assert(!neta::detect_periodic_outbound(browser_burst, 12));
+}
+
 } // namespace
 
 int main() {
@@ -326,6 +395,7 @@ int main() {
     test_health_is_fail_closed();
     test_terminal_activation_does_not_relaunch();
     test_progress_status_is_bounded();
-    std::cout << "upgrade core tests passed\n";
+    test_periodic_outbound_behavior_detection();
+    std::cout << "upgrade core and portable behavior tests passed\n";
     return 0;
 }

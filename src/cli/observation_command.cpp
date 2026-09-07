@@ -1,5 +1,6 @@
 #include "neta/cli/observation_command.hpp"
 
+#include "neta/behavior_reporting.hpp"
 #include "neta/cli/observation_options.hpp"
 #include "neta/fleet_reporting.hpp"
 #include "neta/history_store.hpp"
@@ -149,6 +150,16 @@ void log_reporting_result(const FleetReportingResult& reporting, const char* pre
               << reporting.failed << " failed" << std::endl;
 }
 
+void log_behavior_reporting_result(const BehaviorReportingResult& reporting) {
+    if (reporting.detected == 0 && reporting.announced == 0 && reporting.failed == 0) return;
+    std::cout << "Periodic behavior: " << reporting.detected << " detected, "
+              << reporting.persisted << " persisted, "
+              << reporting.announced << " announced, "
+              << reporting.suppressed_policy << " suppressed by policy, "
+              << reporting.suppressed_cooldown << " suppressed by cooldown, "
+              << reporting.failed << " failed" << std::endl;
+}
+
 } // namespace
 
 void request_observation_stop() noexcept {
@@ -264,6 +275,11 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     };
     callbacks.connection_completed = [&](std::int64_t connection_id) {
         if (!service_mode) return;
+
+        const auto behavior_reporting = auto_report_periodic_behavior(
+            store, connection_id, reporting_policy);
+        log_behavior_reporting_result(behavior_reporting);
+
         try {
             if (!finalize_inbound_connection(connection_id, store)) return;
             const auto reporting = auto_report_connections(
