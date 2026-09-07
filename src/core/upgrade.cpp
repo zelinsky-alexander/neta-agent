@@ -4,11 +4,14 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+#include <windows.h>
+#include <wincrypt.h>
 #endif
 
 #include <algorithm>
@@ -326,8 +329,46 @@ void ensure_winsock() {
     }();
     (void)initialized;
 }
+
+void load_system_trust_roots(SSL_CTX* context) {
+    HCERTSTORE roots = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0,
+                                     CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG,
+                                     L"ROOT");
+    if (roots == nullptr) throw std::runtime_error("cannot open Windows ROOT certificate store");
+    X509_STORE* store = SSL_CTX_get_cert_store(context);
+    if (store == nullptr) {
+        CertCloseStore(roots, 0);
+        throw std::runtime_error("OpenSSL certificate store is unavailable for upgrade download");
+    }
+
+    std::size_t imported = 0;
+    PCCERT_CONTEXT certificate = nullptr;
+    while ((certificate = CertEnumCertificatesInStore(roots, certificate)) != nullptr) {
+        const unsigned char* encoded = certificate->pbCertEncoded;
+        X509* x509 = d2i_X509(nullptr, &encoded, static_cast<long>(certificate->cbCertEncoded));
+        if (x509 == nullptr) {
+            ERR_clear_error();
+            continue;
+        }
+        if (X509_STORE_add_cert(store, x509) == 1) {
+            ++imported;
+        } else {
+            const unsigned long error = ERR_peek_last_error();
+            if (error != 0 && ERR_GET_REASON(error) == X509_R_CERT_ALREADY_IN_HASH_TABLE) ++imported;
+            ERR_clear_error();
+        }
+        X509_free(x509);
+    }
+    CertCloseStore(roots, 0);
+    if (imported == 0) throw std::runtime_error("Windows ROOT certificate store contained no usable certificates");
+}
 #else
 void ensure_winsock() {}
+
+void load_system_trust_roots(SSL_CTX* context) {
+    if (SSL_CTX_set_default_verify_paths(context) != 1)
+        ssl_error("cannot load system trust roots for upgrade download");
+}
 #endif
 
 HttpGetResponse https_get_once(const ParsedHttpsUrl& url, std::size_t max_bytes) {
@@ -337,8 +378,7 @@ HttpGetResponse https_get_once(const ParsedHttpsUrl& url, std::size_t max_bytes)
     if (SSL_CTX_set_min_proto_version(context.get(), TLS1_2_VERSION) != 1)
         ssl_error("cannot set minimum TLS version for upgrade download");
     SSL_CTX_set_verify(context.get(), SSL_VERIFY_PEER, nullptr);
-    if (SSL_CTX_set_default_verify_paths(context.get()) != 1)
-        ssl_error("cannot load system trust roots for upgrade download");
+    load_system_trust_roots(context.get());
 
     BioPtr bio(BIO_new_ssl_connect(context.get()), BIO_free_all);
     if (!bio) ssl_error("BIO_new_ssl_connect failed");
