@@ -2,9 +2,7 @@
 
 #include "neta/fleet_client.hpp"
 
-#include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -30,21 +28,6 @@ const ProcessNode* node_for_event(const ProcessExecEvent& event,
     return nullptr;
 }
 
-std::string image_leaf(std::string path) {
-    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
-        return ch == '\\' ? '/' : static_cast<char>(std::tolower(ch));
-    });
-    const auto slash = path.find_last_of('/');
-    return slash == std::string::npos ? path : path.substr(slash + 1);
-}
-
-bool expected_privilege_broker_transition(const StoredProcessFinding& finding) {
-    if (finding.rule_id != "PROCESS_UNEXPECTED_ELEVATION") return false;
-    const auto parent = image_leaf(finding.parent_image);
-    return parent == "sudo" || parent == "su" || parent == "pkexec" ||
-           parent == "doas" || parent == "consent.exe";
-}
-
 FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
     FindingAnnouncementInput input;
     input.finding_id = finding.finding_id;
@@ -66,14 +49,10 @@ FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
     input.subject_command_line = finding.command_line;
     input.severity = finding.severity;
     input.rule_id = finding.rule_id;
-    input.rule_set_id = "neta-process-rules";
+    input.rule_set_id = "neta-default";
     input.rule_set_version = finding.ruleset_version;
     input.interpretation = finding.interpretation;
 
-    // Existing FindingAnnouncement serializers only emit the legacy fields.
-    // Carry the structured MS5.2 semantics in changes as well, so both old and
-    // new coordinators preserve the evidence. New coordinators normalize these
-    // into dedicated columns during ingestion.
     input.changes.push_back("Rule: " + finding.rule_id);
     input.changes.push_back("Severity: " + finding.severity);
     input.changes.push_back("Ruleset: " + finding.ruleset_version);
@@ -131,10 +110,6 @@ ProcessFindingReportResult ProcessFindingRuntime::report_pending(
     const auto current_ns = now_ns();
     for (const auto& finding : store_.pending_for_report(32, current_ns, retry_after_ns)) {
         ++result.considered;
-        if (expected_privilege_broker_transition(finding)) {
-            store_.mark_suppressed(finding.finding_id, current_ns);
-            continue;
-        }
         store_.mark_report_attempt(finding.finding_id, current_ns);
         try {
             static_cast<void>(FleetClient::send_finding(policy.state_dir, announcement(finding)));
