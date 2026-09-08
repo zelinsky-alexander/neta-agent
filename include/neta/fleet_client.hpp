@@ -31,14 +31,9 @@ struct FleetIdentity {
 struct FindingAnnouncementInput {
     std::string finding_id;
     std::string finding_key;
-
-    // Existing connection-oriented subject. Preserved unchanged for current callers.
     std::string host;
     std::uint16_t port{0};
     std::string transport{"tcp"};
-
-    // Generic subject introduced by MS5.2. When subject_type is non-empty the
-    // finding may omit a network target. Process findings use subject_type=PROCESS.
     std::string subject_type;
     std::string subject_id;
     std::optional<std::int64_t> subject_pid;
@@ -51,7 +46,6 @@ struct FindingAnnouncementInput {
     std::string rule_set_id;
     std::string rule_set_version;
     std::string interpretation;
-
     std::vector<std::string> changes;
     std::string performance_verdict{"UNKNOWN"};
     std::string trust_verdict{"UNVERIFIED"};
@@ -66,6 +60,14 @@ public:
     static std::string send_heartbeat(const std::filesystem::path& state_dir);
     static std::string send_finding(const std::filesystem::path& state_dir,
                                     const FindingAnnouncementInput& finding);
+
+    // RM1 central detection-policy plane. Both calls use the enrolled agent mTLS identity.
+    static std::string fetch_rule_bundle(const std::filesystem::path& state_dir);
+    static std::string acknowledge_rule_bundle(const std::filesystem::path& state_dir,
+                                               std::uint64_t revision,
+                                               const std::string& sha256,
+                                               const std::string& status,
+                                               const std::string& error = {});
 };
 
 } // namespace neta
