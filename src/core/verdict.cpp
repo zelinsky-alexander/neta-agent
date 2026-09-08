@@ -288,7 +288,7 @@ AssuranceVerdict evaluate_inbound(const std::optional<Baseline>& accepted_identi
 
     if (!rules.inbound_authenticated_identity) {
         verdict.trust = TrustState::Unverified;
-        verdict.trust_hypothesis = "INBOUND_TRUST_POLICY_DISABLED";
+        verdict.trust_hypothesis = "INBOUND_TRUST_POLICY_UNAVAILABLE";
     } else if (context.ambiguous) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_CLIENT_IDENTITY_AMBIGUOUS";
