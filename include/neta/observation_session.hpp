@@ -2,7 +2,6 @@
 
 #include "neta/history_store.hpp"
 #include "neta/connection_admission_policy.hpp"
-#include "neta/process_graph.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/platform.hpp"
 
@@ -26,12 +25,6 @@ struct ObservationRunResult {
     std::vector<std::int64_t> connection_ids;
     std::size_t admitted_connections{0};
     bool lifecycle_events_active{false};
-    bool process_events_active{false};
-    std::size_t process_events_observed{0};
-    std::size_t process_nodes_observed{0};
-    std::uint64_t process_rejected_without_stable_identity{0};
-    std::uint64_t process_ambiguous_parent_links{0};
-    std::uint64_t process_ambiguous_exit_events{0};
     bool name_resolution_events_active{false};
     std::size_t name_resolution_events_observed{0};
     std::size_t name_resolution_evidence_attached{0};
@@ -59,9 +52,7 @@ public:
                        std::string target_label,
                        StorageMaintenance* storage_maintenance = nullptr,
                        NameResolutionObserver* name_resolution_observer = nullptr,
-                       TlsSessionObserver* tls_session_observer = nullptr,
-                       ProcessExecObserver* process_event_observer = nullptr,
-                       ProcessGraph* process_graph = nullptr);
+                       TlsSessionObserver* tls_session_observer = nullptr);
 
     ObservationRunResult run(std::optional<std::chrono::seconds> duration,
                              std::chrono::milliseconds transport_poll_interval,
@@ -84,8 +75,6 @@ private:
     StorageMaintenance* storage_maintenance_;
     NameResolutionObserver* name_resolution_observer_;
     TlsSessionObserver* tls_session_observer_;
-    ProcessExecObserver* process_event_observer_;
-    ProcessGraph* process_graph_;
 };
 
 } // namespace neta
