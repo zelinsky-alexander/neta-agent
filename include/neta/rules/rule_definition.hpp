@@ -19,27 +19,35 @@ public:
     std::map<std::string, std::string> string_parameters;
     std::map<std::string, std::vector<std::string>> string_list_parameters;
 
-    [[nodiscard]] double numeric(const std::string& name) const {
-        const auto it = numeric_parameters.find(name);
-        if (it == numeric_parameters.end()) throw std::runtime_error("missing numeric rule parameter: " + name);
+    [[nodiscard]] double numeric(const std::string& parameter_name) const {
+        const auto it = numeric_parameters.find(parameter_name);
+        if (it == numeric_parameters.end()) {
+            throw std::runtime_error("missing numeric rule parameter: " + parameter_name);
+        }
         return it->second;
     }
 
-    [[nodiscard]] bool boolean(const std::string& name) const {
-        const auto it = boolean_parameters.find(name);
-        if (it == boolean_parameters.end()) throw std::runtime_error("missing boolean rule parameter: " + name);
+    [[nodiscard]] bool boolean(const std::string& parameter_name) const {
+        const auto it = boolean_parameters.find(parameter_name);
+        if (it == boolean_parameters.end()) {
+            throw std::runtime_error("missing boolean rule parameter: " + parameter_name);
+        }
         return it->second;
     }
 
-    [[nodiscard]] const std::string& string(const std::string& name) const {
-        const auto it = string_parameters.find(name);
-        if (it == string_parameters.end()) throw std::runtime_error("missing string rule parameter: " + name);
+    [[nodiscard]] const std::string& string(const std::string& parameter_name) const {
+        const auto it = string_parameters.find(parameter_name);
+        if (it == string_parameters.end()) {
+            throw std::runtime_error("missing string rule parameter: " + parameter_name);
+        }
         return it->second;
     }
 
-    [[nodiscard]] const std::vector<std::string>& string_list(const std::string& name) const {
-        const auto it = string_list_parameters.find(name);
-        if (it == string_list_parameters.end()) throw std::runtime_error("missing string-list rule parameter: " + name);
+    [[nodiscard]] const std::vector<std::string>& string_list(const std::string& parameter_name) const {
+        const auto it = string_list_parameters.find(parameter_name);
+        if (it == string_list_parameters.end()) {
+            throw std::runtime_error("missing string-list rule parameter: " + parameter_name);
+        }
         return it->second;
     }
 };
