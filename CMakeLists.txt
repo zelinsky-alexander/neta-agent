@@ -128,6 +128,7 @@ if(WIN32)
         src/platform/windows/connection_observer.cpp
         src/platform/windows/etw_lifecycle.cpp
         src/platform/windows/process_exec_observer.cpp
+        src/platform/windows/process_snapshot.cpp
         src/platform/windows/process_resolver.cpp
         src/platform/windows/route_observer.cpp
         src/platform/windows/service.cpp
@@ -139,6 +140,7 @@ else()
         src/platform/linux/host_network_environment.cpp
         src/platform/linux/socket_diag.cpp
         src/platform/linux/process_resolver.cpp
+        src/platform/linux/process_snapshot.cpp
         src/platform/linux/route_observer.cpp
         src/platform/linux/yara_x_provider.cpp
         src/platform/linux/ebpf/lifecycle_decoder.cpp
@@ -290,6 +292,7 @@ add_library(neta_core
     src/cli/observation_options.cpp
     src/cli/observation_command.cpp
     src/cli/fleet_command.cpp
+    src/cli/process_command.cpp
     ${NETA_PLATFORM_SOURCES}
 )
 
