@@ -53,6 +53,15 @@ FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
     input.rule_set_version = finding.ruleset_version;
     input.interpretation = finding.interpretation;
 
+    // Existing FindingAnnouncement serializers only emit the legacy fields.
+    // Carry the structured MS5.2 semantics in changes as well, so both old and
+    // new coordinators preserve the evidence. New coordinators normalize these
+    // into dedicated columns during ingestion.
+    input.changes.push_back("Rule: " + finding.rule_id);
+    input.changes.push_back("Severity: " + finding.severity);
+    input.changes.push_back("Ruleset: " + finding.ruleset_version);
+    input.changes.push_back("Process PID: " + std::to_string(finding.pid));
+    if (finding.parent_pid) input.changes.push_back("Parent PID: " + std::to_string(*finding.parent_pid));
     input.changes.push_back(finding.summary);
     if (!finding.interpretation.empty()) input.changes.push_back("Interpretation: " + finding.interpretation);
     if (!finding.process_image.empty()) input.changes.push_back("Process image: " + finding.process_image);
