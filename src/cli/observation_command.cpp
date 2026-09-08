@@ -5,7 +5,7 @@
 #include "neta/fleet_reporting.hpp"
 #include "neta/history_store.hpp"
 #include "neta/platform.hpp"
-#include "neta/process_graph.hpp"
+#include "neta/process_finding_runtime.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/transfer_assurance.hpp"
@@ -172,6 +172,12 @@ void log_transfer_reporting_result(const TransferReportingResult& reporting) {
               << reporting.failed << " failed" << std::endl;
 }
 
+void log_process_reporting_result(const ProcessFindingReportResult& reporting) {
+    if (reporting.considered == 0 && reporting.announced == 0 && reporting.failed == 0) return;
+    std::cout << "Process findings: " << reporting.announced << " announced, "
+              << reporting.failed << " retained for retry" << std::endl;
+}
+
 } // namespace
 
 void request_observation_stop() noexcept {
@@ -194,7 +200,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     auto name_resolution = platform::make_name_resolution_observer();
     auto tls_session = platform::make_tls_session_observer();
     auto process_events = platform::make_process_exec_observer();
-    ProcessGraph process_graph;
+    ProcessFindingRuntime process_runtime(options.database);
     std::size_t process_events_observed = 0;
     TransferSampler transfer_sampler(transfer_store);
     const bool lifecycle_active = lifecycle_supports(lifecycle->capability(), options.mode);
@@ -221,16 +227,18 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
                   << process_events->capability().unavailable_reason << '\n';
     }
 
+    // Persist a point-in-time process graph even if the event collector is unavailable.
+    // This makes static MS5.1 findings durable on both supported platforms.
+    process_runtime.bootstrap(platform::snapshot_processes());
+
     const auto drain_process_graph = [&] {
         if (!process_events->capability().available()) return;
         try {
             auto events = process_events->poll(std::chrono::milliseconds(0));
             process_events_observed += events.size();
-            for (const auto& event : events) {
-                static_cast<void>(process_graph.observe(event));
-            }
+            process_runtime.observe(events);
         } catch (const std::exception& error) {
-            std::cerr << "Endpoint process graph collection failed; observation continues: "
+            std::cerr << "Endpoint process graph/findings collection failed; observation continues: "
                       << error.what() << std::endl;
         }
     };
@@ -252,6 +260,11 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     const auto reporting_policy = fleet_reporting_policy_from_environment();
     const bool fleet_identity_available =
         std::filesystem::exists(reporting_policy.state_dir / "identity.conf");
+    const auto report_process_findings = [&] {
+        if (!service_mode || !fleet_identity_available) return;
+        log_process_reporting_result(
+            process_runtime.report_pending(reporting_policy, fleet_identity_available));
+    };
     const auto heartbeat_interval = fleet_heartbeat_interval();
     const auto heartbeat_jitter_percent = fleet_heartbeat_jitter_percent();
     auto next_heartbeat = std::chrono::steady_clock::now() +
@@ -291,10 +304,12 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
                 std::cerr << "Fleet service AgentHello failed; observation continues: "
                           << error.what() << std::endl;
             }
+            report_process_findings();
         }
     };
     callbacks.periodic = [&] {
         drain_process_graph();
+        report_process_findings();
         if (service_mode) {
             try {
                 transfer_sampler.capture(*sockets, store);
@@ -354,6 +369,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         },
         callbacks);
     drain_process_graph();
+    report_process_findings();
     if (tls_probe.valid()) {
         try {
             tls = tls_probe.get();
@@ -379,15 +395,15 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     const auto name_health = name_resolution->health();
     const auto tls_health = tls_session->health();
     const auto process_health = process_events->health();
-    const auto& graph_health = process_graph.health();
+    const auto& graph_health = process_runtime.graph().health();
     std::cout << "Observed " << result.admitted_connections << " matching connection(s). History: "
               << options.database << '\n'
               << "Lifecycle dropped events: "
               << (lifecycle_health.dropped_events
                   ? std::to_string(*lifecycle_health.dropped_events) : "UNAVAILABLE") << '\n'
               << "Process events: " << process_events_observed << " observed, "
-              << process_graph.active_count() << " active, "
-              << process_graph.snapshot().size() << " retained\n"
+              << process_runtime.graph().active_count() << " active, "
+              << process_runtime.graph().snapshot().size() << " retained\n"
               << "Process event source: "
               << (process_events->capability().source.empty()
                   ? "UNAVAILABLE" : process_events->capability().source) << '\n'
