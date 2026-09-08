@@ -1,0 +1,114 @@
+#include "neta/process_graph.hpp"
+
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+
+using namespace neta;
+
+namespace {
+
+ProcessExecEvent start_event(std::int64_t pid, std::uint64_t start_ns,
+                             std::uint64_t observed_ns) {
+    ProcessExecEvent event;
+    event.type = ProcessExecEventType::Start;
+    event.timestamp_ns = observed_ns;
+    event.pid = pid;
+    event.tgid = pid;
+    event.process_start_time_ns = start_ns;
+    return event;
+}
+
+}  // namespace
+
+int main() {
+    ProcessGraph graph(16);
+
+    auto parent = start_event(100, 1'000, 10);
+    parent.uid = 1000;
+    parent.gid = 1000;
+    parent.session_id = 7;
+    parent.user_identity = "uid:1000";
+    parent.integrity_level = "user";
+    parent.elevated = false;
+    parent.comm = "shell";
+    parent.executable_path = "/bin/sh";
+    parent.command_line = "/bin/sh -c child";
+    parent.working_directory = "/tmp";
+    assert(graph.observe(parent));
+
+    auto child = start_event(101, 1'100, 20);
+    child.parent_pid = 100;
+    child.parent_tgid = 100;
+    child.uid = 1000;
+    child.gid = 1000;
+    child.session_id = 7;
+    child.user_identity = "uid:1000";
+    child.integrity_level = "user";
+    child.elevated = false;
+    child.comm = "child";
+    child.executable_path = "/tmp/child";
+    child.command_line = "/tmp/child --test";
+    child.working_directory = "/tmp";
+    assert(graph.observe(child));
+    assert(graph.active_count() == 2);
+
+    const ProcessInstanceKey parent_key{100, 1'000, std::nullopt};
+    const ProcessInstanceKey child_key{101, 1'100, std::nullopt};
+    const auto child_node = graph.find(child_key);
+    assert(child_node);
+    assert(child_node->parent);
+    assert(*child_node->parent == parent_key);
+    assert(child_node->command_line == "/tmp/child --test");
+    assert(child_node->working_directory == "/tmp");
+    assert(child_node->session_id == 7);
+    assert(child_node->elevated == false);
+
+    ProcessExecEvent child_exit;
+    child_exit.type = ProcessExecEventType::Exit;
+    child_exit.timestamp_ns = 30;
+    child_exit.pid = 101;
+    child_exit.tgid = 101;
+    child_exit.process_start_time_ns = 1'100;
+    child_exit.exit_code = 0;
+    assert(graph.observe(child_exit));
+    assert(graph.active_count() == 1);
+    const auto exited_child = graph.find(child_key);
+    assert(exited_child && exited_child->exited_at_ns == 30);
+    assert(exited_child->exit_code == 0);
+
+    auto reused_pid = start_event(101, 2'100, 40);
+    reused_pid.parent_tgid = 100;
+    reused_pid.executable_path = "/tmp/reused";
+    assert(graph.observe(reused_pid));
+    const ProcessInstanceKey reused_key{101, 2'100, std::nullopt};
+    assert(graph.find(reused_key));
+    assert(graph.find(child_key));
+    assert(graph.active_count() == 2);
+
+    auto duplicate_pid_instance = start_event(101, 3'100, 50);
+    duplicate_pid_instance.executable_path = "/tmp/synthetic-second-active";
+    assert(graph.observe(duplicate_pid_instance));
+
+    ProcessExecEvent ambiguous_exit;
+    ambiguous_exit.type = ProcessExecEventType::Exit;
+    ambiguous_exit.timestamp_ns = 60;
+    ambiguous_exit.pid = 101;
+    ambiguous_exit.tgid = 101;
+    assert(!graph.observe(ambiguous_exit));
+    assert(graph.health().ambiguous_exit_events == 1);
+
+    ProcessExecEvent unstable_start;
+    unstable_start.type = ProcessExecEventType::Start;
+    unstable_start.timestamp_ns = 70;
+    unstable_start.pid = 999;
+    unstable_start.tgid = 999;
+    assert(!graph.observe(unstable_start));
+    assert(graph.health().rejected_without_stable_identity == 1);
+
+    const auto nodes = graph.snapshot();
+    assert(nodes.size() == 4);
+
+    std::cout << "process graph tests passed\n";
+    return 0;
+}
