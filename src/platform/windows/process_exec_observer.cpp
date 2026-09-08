@@ -40,6 +40,7 @@ constexpr UCHAR kProcessDcStart = 3;
 constexpr UCHAR kProcessDcEnd = 4;
 constexpr UCHAR kProcessDefunct = 39;
 constexpr std::size_t kMaxQueuedEvents = 8192;
+constexpr std::uint64_t kFiletimeUnixEpochTicks = 116'444'736'000'000'000ULL;
 
 bool same_guid(const GUID& left, const GUID& right) noexcept {
     return std::memcmp(&left, &right, sizeof(GUID)) == 0;
@@ -164,8 +165,10 @@ std::optional<std::uint64_t> process_creation_key(DWORD pid) {
 }
 
 std::optional<std::uint64_t> filetime_to_ns(std::uint64_t value) {
-    if (value > std::numeric_limits<std::uint64_t>::max() / 100ULL) return std::nullopt;
-    return value * 100ULL;
+    if (value < kFiletimeUnixEpochTicks) return std::nullopt;
+    const auto unix_ticks = value - kFiletimeUnixEpochTicks;
+    if (unix_ticks > std::numeric_limits<std::uint64_t>::max() / 100ULL) return std::nullopt;
+    return unix_ticks * 100ULL;
 }
 
 std::string process_image(DWORD pid) {
@@ -376,7 +379,7 @@ private:
         event.type = exit ? ProcessExecEventType::Exit : ProcessExecEventType::Start;
         if (record.EventHeader.TimeStamp.QuadPart > 0) {
             const auto timestamp = static_cast<std::uint64_t>(record.EventHeader.TimeStamp.QuadPart);
-            event.timestamp_ns = filetime_to_ns(timestamp).value_or(timestamp);
+            event.timestamp_ns = filetime_to_ns(timestamp).value_or(0);
         }
         event.pid = static_cast<std::int64_t>(*pid);
         event.tgid = static_cast<std::int64_t>(*pid);
