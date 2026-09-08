@@ -1,4 +1,5 @@
 #include "neta/cli/fleet_command.hpp"
+#include "neta/cli/process_command.hpp"
 #include "neta/platform.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
@@ -84,6 +85,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (argc >= 2 && std::string(argv[1]) == "process") {
+        try {
+            return neta::cli::run_process_command(argc, argv);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return 1;
+        }
+    }
+
     if (argc >= 3 && std::string(argv[1]) == "health" && std::string(argv[2]) == "--upgrade") {
         try {
             return upgrade_health(argc, argv);
@@ -110,6 +120,10 @@ int main(int argc, char** argv) {
     const int result = neta_legacy_main(argc, argv);
     if (argc < 2) {
         std::cout
+            << "\nProcess / MS5:\n"
+            << "  neta-agent process watch\n"
+            << "  neta-agent process show <pid>\n"
+            << "  neta-agent process graph\n"
             << "\nFleet / NAP/1:\n"
             << "  neta-agent fleet enroll --coordinator https://host:port --fleet-ca FILE --token TOKEN [--fleet-id ID] [--display-name NAME] [--state-dir DIR]\n"
             << "  neta-agent fleet status [--state-dir DIR]\n"
