@@ -18,6 +18,8 @@
 namespace neta::platform {
 namespace {
 
+constexpr std::uint64_t kFiletimeUnixEpochTicks = 116'444'736'000'000'000ULL;
+
 std::string wide_to_utf8(const wchar_t* text, std::size_t length) {
     if (text == nullptr || length == 0) return {};
     const int required = WideCharToMultiByte(CP_UTF8, 0, text, static_cast<int>(length),
@@ -42,6 +44,11 @@ std::optional<std::uint64_t> creation_key(DWORD pid) {
     value.LowPart = creation.dwLowDateTime;
     value.HighPart = creation.dwHighDateTime;
     return value.QuadPart;
+}
+
+std::optional<std::uint64_t> filetime_to_unix_ns(std::uint64_t value) {
+    if (value < kFiletimeUnixEpochTicks) return std::nullopt;
+    return (value - kFiletimeUnixEpochTicks) * 100ULL;
 }
 
 std::string process_image(DWORD pid) {
@@ -130,6 +137,8 @@ std::vector<ProcessExecEvent> snapshot_processes() {
         if (entry.th32ProcessID == 0) continue;
         const auto key = creation_key(entry.th32ProcessID);
         if (!key) continue;
+        const auto started_at_ns = filetime_to_unix_ns(*key);
+        if (!started_at_ns) continue;
 
         ProcessExecEvent event;
         event.type = ProcessExecEventType::Start;
@@ -138,11 +147,15 @@ std::vector<ProcessExecEvent> snapshot_processes() {
         event.parent_pid = static_cast<std::int64_t>(entry.th32ParentProcessID);
         event.parent_tgid = static_cast<std::int64_t>(entry.th32ParentProcessID);
         event.platform_process_key = *key;
-        event.timestamp_ns = *key * 100ULL;
+        event.process_start_time_ns = *started_at_ns;
+        event.timestamp_ns = *started_at_ns;
         event.comm = wide_to_utf8(entry.szExeFile, std::wcslen(entry.szExeFile));
         event.executable_path = process_image(entry.th32ProcessID);
         if (entry.th32ParentProcessID != 0) {
             event.parent_platform_process_key = creation_key(entry.th32ParentProcessID);
+            if (event.parent_platform_process_key) {
+                event.parent_process_start_time_ns = filetime_to_unix_ns(*event.parent_platform_process_key);
+            }
         }
         DWORD session = 0;
         if (ProcessIdToSessionId(entry.th32ProcessID, &session) != FALSE) event.session_id = session;
