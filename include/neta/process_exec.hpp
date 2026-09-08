@@ -25,6 +25,8 @@ struct ProcessExecEvent {
     std::optional<std::uint32_t> gid;
     std::optional<std::uint64_t> process_start_time_ns;
     std::optional<std::uint64_t> platform_process_key;
+    std::optional<std::uint64_t> parent_process_start_time_ns;
+    std::optional<std::uint64_t> parent_platform_process_key;
     std::optional<std::uint32_t> session_id;
     std::string user_identity;
     std::string integrity_level;
