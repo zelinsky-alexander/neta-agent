@@ -2,6 +2,7 @@
 
 #include "neta/process_graph.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -48,7 +49,6 @@ class ProcessFindingEngine {
 public:
     explicit ProcessFindingEngine(ProcessFindingConfig config = {});
 
-    // Stateless findings over a current graph snapshot.
     [[nodiscard]] std::vector<ProcessFinding> evaluate_snapshot(const ProcessGraph& graph) const;
 
     // Stateful event-time findings. Call after the graph has observed the event.
