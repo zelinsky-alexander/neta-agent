@@ -48,7 +48,7 @@ TrustState trust_state_from_string(const std::string& value) {
 
 } // namespace neta
 
-// MS5.2 is kept in its own implementation unit for ownership/readability. It is
-// included here so existing build manifests remain unchanged across all supported
-// flavors; a later build-file cleanup can list it explicitly without changing ABI.
+// MS5.2 implementation units are included here so all existing supported build
+// manifests pick them up without perturbing platform source lists or linker ABI.
 #include "process_finding_store.cpp"
+#include "process_finding_runtime.cpp"
