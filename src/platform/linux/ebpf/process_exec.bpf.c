@@ -32,7 +32,9 @@ static __always_inline struct neta_process_exec_wire_event *reserve_event(__u16 
     const __u64 pid_tgid = bpf_get_current_pid_tgid();
     const __u64 uid_gid = bpf_get_current_uid_gid();
     struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+    struct task_struct *leader = 0;
     struct task_struct *parent = 0;
+    struct task_struct *parent_leader = 0;
 
     event = bpf_ringbuf_reserve(&process_exec_events, sizeof(*event), 0);
     if (!event) {
@@ -52,17 +54,29 @@ static __always_inline struct neta_process_exec_wire_event *reserve_event(__u16 
     event->availability |= NETA_EXEC_HAS_PID | NETA_EXEC_HAS_UID | NETA_EXEC_HAS_GID;
     bpf_get_current_comm(event->comm, sizeof(event->comm));
 
-    if (task && bpf_core_field_exists(task->start_boottime)) {
-        event->process_start_time_ns = BPF_CORE_READ(task, start_boottime);
+    if (task) {
+        leader = BPF_CORE_READ(task, group_leader);
+        if (!leader)
+            leader = task;
+    }
+    if (leader && bpf_core_field_exists(leader->start_boottime)) {
+        event->process_start_time_ns = BPF_CORE_READ(leader, start_boottime);
         event->availability |= NETA_EXEC_HAS_START_TIME;
     }
 
     if (task && bpf_core_field_exists(task->real_parent)) {
         parent = BPF_CORE_READ(task, real_parent);
         if (parent) {
+            parent_leader = BPF_CORE_READ(parent, group_leader);
+            if (!parent_leader)
+                parent_leader = parent;
             event->parent_pid = BPF_CORE_READ(parent, pid);
-            event->parent_tgid = BPF_CORE_READ(parent, tgid);
+            event->parent_tgid = BPF_CORE_READ(parent_leader, tgid);
             event->availability |= NETA_EXEC_HAS_PARENT;
+            if (bpf_core_field_exists(parent_leader->start_boottime)) {
+                event->parent_process_start_time_ns = BPF_CORE_READ(parent_leader, start_boottime);
+                event->availability |= NETA_EXEC_HAS_PARENT_START_TIME;
+            }
         }
     }
 
@@ -94,7 +108,11 @@ int neta_sched_process_exit(void *ctx)
 {
     struct neta_process_exec_wire_event *event;
     struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+    const __u64 pid_tgid = bpf_get_current_pid_tgid();
     (void)ctx;
+
+    if ((__u32)pid_tgid != (__u32)(pid_tgid >> 32))
+        return 0;
 
     event = reserve_event(NETA_PROCESS_EVENT_EXIT);
     if (!event)
