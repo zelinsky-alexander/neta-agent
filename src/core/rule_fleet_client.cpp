@@ -8,16 +8,25 @@
 #include <openssl/ssl.h>
 #include <openssl/x509_vfy.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace neta {
 namespace {
@@ -164,6 +173,58 @@ ActiveRuleBundleState state_from_text(const std::filesystem::path& path, const s
     state.sha256 = sha256_hex(text); state.rule_count = loaded.definitions.size(); state.centrally_managed = centrally_managed; return state;
 }
 
+#ifdef _WIN32
+DWORD query_service_state(SC_HANDLE service) {
+    SERVICE_STATUS_PROCESS status{}; DWORD needed = 0;
+    if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed))
+        throw std::runtime_error("cannot query NETAAgent service state");
+    return status.dwCurrentState;
+}
+
+bool reload_service_if_running() {
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!manager) throw std::runtime_error("cannot open Windows Service Control Manager");
+    SC_HANDLE service = OpenServiceW(manager, L"NETAAgent", SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START);
+    if (!service) {
+        const DWORD error = GetLastError(); CloseServiceHandle(manager);
+        if (error == ERROR_SERVICE_DOES_NOT_EXIST) return false;
+        throw std::runtime_error("cannot open NETAAgent service");
+    }
+    const bool was_running = query_service_state(service) != SERVICE_STOPPED;
+    if (!was_running) { CloseServiceHandle(service); CloseServiceHandle(manager); return false; }
+    SERVICE_STATUS status{};
+    if (!ControlService(service, SERVICE_CONTROL_STOP, &status) && GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+        CloseServiceHandle(service); CloseServiceHandle(manager); throw std::runtime_error("cannot stop NETAAgent service");
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (query_service_state(service) != SERVICE_STOPPED) {
+        if (std::chrono::steady_clock::now() >= deadline) { CloseServiceHandle(service); CloseServiceHandle(manager); throw std::runtime_error("NETAAgent service did not stop for rule reload"); }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    if (!StartServiceW(service, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+        CloseServiceHandle(service); CloseServiceHandle(manager); throw std::runtime_error("cannot restart NETAAgent service after rule update");
+    }
+    while (query_service_state(service) != SERVICE_RUNNING) {
+        if (std::chrono::steady_clock::now() >= deadline) { CloseServiceHandle(service); CloseServiceHandle(manager); throw std::runtime_error("NETAAgent service did not become RUNNING after rule update"); }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    CloseServiceHandle(service); CloseServiceHandle(manager); return true;
+}
+#else
+bool reload_service_if_running() {
+    const int active = std::system("systemctl is-active --quiet neta-agent.service >/dev/null 2>&1");
+    if (active != 0) return false;
+    if (std::system("systemctl restart neta-agent.service") != 0)
+        throw std::runtime_error("failed to restart neta-agent.service after rule update");
+    return true;
+}
+#endif
+
+void restore_previous(const std::filesystem::path& path, const std::optional<std::string>& previous) {
+    if (previous) atomic_write(path, *previous);
+    else { std::error_code ec; std::filesystem::remove(path, ec); }
+}
+
 } // namespace
 
 std::string FleetClient::fetch_rule_bundle(const std::filesystem::path& state_dir) {
@@ -184,10 +245,32 @@ ActiveRuleBundleState update_rules_from_coordinator(const std::filesystem::path&
     if (parsed.schema_version != 2) throw std::runtime_error("coordinator rule bundle must use schema version 2");
     const std::string hash = sha256_hex(bundle);
     const auto path = state_dir / "rules" / "active.json";
+    std::optional<std::string> previous;
+    if (std::filesystem::is_regular_file(path)) previous = read_file(path);
     atomic_write(path, bundle);
-    // Installation and runtime activation are distinct. The CLI restarts/reloads the
-    // running service and only then sends the final ACTIVE acknowledgement.
-    FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "INSTALLED");
+    try {
+        // Coordinator validates revision/hash on this acknowledgement; a mismatch
+        // rolls the local file back before the running detector is touched.
+        FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "INSTALLED");
+    } catch (...) {
+        restore_previous(path, previous);
+        throw;
+    }
+
+    bool reloaded = false;
+    try {
+        reloaded = reload_service_if_running();
+    } catch (const std::exception& error) {
+        restore_previous(path, previous);
+        try { static_cast<void>(reload_service_if_running()); } catch (...) {}
+        try { FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "APPLY_FAILED", error.what()); } catch (...) {}
+        throw;
+    }
+
+    if (reloaded) {
+        // Only now is the long-running detector executing the new rule file.
+        FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "ACTIVE");
+    }
     return state_from_text(path, bundle, true);
 }
 
