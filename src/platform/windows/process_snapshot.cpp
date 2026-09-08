@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cwchar>
 #include <optional>
 #include <string>
 #include <vector>
@@ -77,7 +78,7 @@ TokenEvidence token_evidence(DWORD pid) {
             const auto* user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
             LPWSTR text = nullptr;
             if (ConvertSidToStringSidW(user->User.Sid, &text) != FALSE && text != nullptr) {
-                result.sid = wide_to_utf8(text, wcslen(text));
+                result.sid = wide_to_utf8(text, std::wcslen(text));
                 LocalFree(text);
             }
         }
@@ -138,7 +139,7 @@ std::vector<ProcessExecEvent> snapshot_processes() {
         event.parent_tgid = static_cast<std::int64_t>(entry.th32ParentProcessID);
         event.platform_process_key = *key;
         event.timestamp_ns = *key * 100ULL;
-        event.comm = wide_to_utf8(entry.szExeFile, wcslen(entry.szExeFile));
+        event.comm = wide_to_utf8(entry.szExeFile, std::wcslen(entry.szExeFile));
         event.executable_path = process_image(entry.th32ProcessID);
         if (entry.th32ParentProcessID != 0) {
             event.parent_platform_process_key = creation_key(entry.th32ParentProcessID);
