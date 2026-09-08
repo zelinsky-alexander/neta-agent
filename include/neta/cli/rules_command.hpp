@@ -29,6 +29,27 @@ inline void print_rule_set_header(const RuleSet& set) {
               << "Version:  " << set.version << "\n";
 }
 
+inline void print_rule_parameters(const rules::RuleDefinition& rule) {
+    if (rule.numeric_parameters.empty() && rule.boolean_parameters.empty() &&
+        rule.string_parameters.empty() && rule.string_list_parameters.empty()) return;
+
+    std::cout << "Parameters:\n";
+    for (const auto& [name, value] : rule.numeric_parameters)
+        std::cout << "  " << name << ": " << value << '\n';
+    for (const auto& [name, value] : rule.boolean_parameters)
+        std::cout << "  " << name << ": " << (value ? "true" : "false") << '\n';
+    for (const auto& [name, value] : rule.string_parameters)
+        std::cout << "  " << name << ": " << value << '\n';
+    for (const auto& [name, values] : rule.string_list_parameters) {
+        std::cout << "  " << name << ": [";
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) std::cout << ", ";
+            std::cout << values[i];
+        }
+        std::cout << "]\n";
+    }
+}
+
 inline int run_rules_command(int argc, char** argv) {
     if (argc < 3) {
         std::cout << "Usage:\n"
@@ -44,7 +65,7 @@ inline int run_rules_command(int argc, char** argv) {
         if (argc < 4) throw std::runtime_error("rules validate requires a file path");
         const auto set = rules::RuleSetLoader::load_file(argv[3]);
         print_rule_set_header(set);
-        std::cout << "Validation: OK\n";
+        std::cout << "Rules:      " << set.definitions.size() << "\nValidation: OK\n";
         return 0;
     }
 
@@ -80,12 +101,7 @@ inline int run_rules_command(int argc, char** argv) {
                       << "Severity: " << (rule.severity.empty() ? "-" : rule.severity) << "\n"
                       << "Rule set: " << set.id << " / " << set.revision << "\n"
                       << "Version:  " << set.version << "\n";
-            if (!rule.numeric_parameters.empty()) {
-                std::cout << "Parameters:\n";
-                for (const auto& [name, value] : rule.numeric_parameters) {
-                    std::cout << "  " << name << ": " << value << '\n';
-                }
-            }
+            print_rule_parameters(rule);
             return 0;
         }
         throw std::runtime_error("unknown rule id: " + id);
