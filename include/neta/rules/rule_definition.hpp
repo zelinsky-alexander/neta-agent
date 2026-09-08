@@ -10,6 +10,9 @@ namespace neta::rules {
 class RuleDefinition {
 public:
     std::string id;
+    // Stable trusted evaluator identifier. Defaults use engine_rule_id == id;
+    // centrally-defined custom rules keep their own id and select one supported engine.
+    std::string engine_rule_id;
     std::string name;
     std::string category;
     std::string severity;
