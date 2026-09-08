@@ -52,6 +52,7 @@ public:
                                                          std::uint64_t retry_after_ns) const;
     void mark_report_attempt(const std::string& finding_id, std::uint64_t now_ns);
     void mark_reported(const std::string& finding_id, std::uint64_t now_ns);
+    void mark_suppressed(const std::string& finding_id, std::uint64_t now_ns);
 
 private:
     void initialize_schema();
