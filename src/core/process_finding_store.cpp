@@ -279,4 +279,11 @@ void ProcessFindingStore::mark_reported(const std::string& finding_id, std::uint
     stmt.done();
 }
 
+void ProcessFindingStore::mark_suppressed(const std::string& finding_id, std::uint64_t now_ns) {
+    Statement stmt(db_, "UPDATE process_findings_ms5 SET report_state='SUPPRESSED',last_report_attempt_ns=? WHERE finding_id=?;");
+    sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(now_ns));
+    sqlite3_bind_text(stmt.get(), 2, finding_id.c_str(), -1, SQLITE_TRANSIENT);
+    stmt.done();
+}
+
 }  // namespace neta
