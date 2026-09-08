@@ -78,6 +78,7 @@ struct task_struct {
     int exit_code;
     __u64 start_boottime;
     struct task_struct *real_parent;
+    struct task_struct *group_leader;
     struct nsproxy *nsproxy;
 } __attribute__((preserve_access_index));
 
