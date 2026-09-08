@@ -73,7 +73,11 @@ struct sock {
 } __attribute__((preserve_access_index));
 
 struct task_struct {
+    int pid;
+    int tgid;
+    int exit_code;
     __u64 start_boottime;
+    struct task_struct *real_parent;
     struct nsproxy *nsproxy;
 } __attribute__((preserve_access_index));
 
