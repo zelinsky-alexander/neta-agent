@@ -1,6 +1,7 @@
 #pragma once
 
 #include "neta/process_graph.hpp"
+#include "neta/rules/rule_set.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +27,7 @@ struct ProcessFinding {
     ProcessFindingKind kind{};
     ProcessFindingSeverity severity{ProcessFindingSeverity::Low};
     std::string rule_id;
-    std::string ruleset_version{"neta-process-rules/0.1.0"};
+    std::string ruleset_version;
     std::uint64_t observed_at_ns{0};
     ProcessInstanceKey process;
     std::optional<ProcessInstanceKey> parent;
@@ -37,17 +38,42 @@ struct ProcessFinding {
     std::string interpretation;
 };
 
+// Explicit override used by focused tests and local embedding. Production default
+// construction is populated from the active declarative RuleSet.
 struct ProcessFindingConfig {
-    std::size_t fanout_count{6};
-    std::uint64_t fanout_window_ns{10'000'000'000ULL};
-    std::size_t short_lived_count{6};
-    std::uint64_t short_lived_max_ns{2'000'000'000ULL};
-    std::uint64_t short_lived_window_ns{15'000'000'000ULL};
+    std::string ruleset_version;
+
+    bool transient_path_enabled{false};
+    std::string transient_path_severity;
+    std::vector<std::string> transient_path_prefixes;
+    std::vector<std::string> transient_path_substrings;
+
+    bool unexpected_shell_enabled{false};
+    std::string unexpected_shell_severity;
+    std::vector<std::string> shell_names;
+    std::vector<std::string> expected_shell_parent_names;
+
+    bool unexpected_elevation_enabled{false};
+    std::string unexpected_elevation_severity;
+    std::vector<std::string> expected_elevation_parent_names;
+
+    bool fanout_enabled{false};
+    std::string fanout_severity;
+    std::size_t fanout_count{0};
+    std::uint64_t fanout_window_ns{0};
+
+    bool short_lived_enabled{false};
+    std::string short_lived_severity;
+    std::size_t short_lived_count{0};
+    std::uint64_t short_lived_max_ns{0};
+    std::uint64_t short_lived_window_ns{0};
 };
 
 class ProcessFindingEngine {
 public:
-    explicit ProcessFindingEngine(ProcessFindingConfig config = {});
+    ProcessFindingEngine();
+    explicit ProcessFindingEngine(const RuleSet& rules);
+    explicit ProcessFindingEngine(ProcessFindingConfig config);
 
     [[nodiscard]] std::vector<ProcessFinding> evaluate_snapshot(const ProcessGraph& graph) const;
 
