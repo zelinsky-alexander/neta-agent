@@ -3,6 +3,7 @@
 #include "neta/rules/json_value.hpp"
 
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
