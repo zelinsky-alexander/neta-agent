@@ -5,6 +5,7 @@
 #include "neta/fleet_reporting.hpp"
 #include "neta/history_store.hpp"
 #include "neta/platform.hpp"
+#include "neta/process_graph.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/transfer_assurance.hpp"
@@ -192,6 +193,9 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     auto lifecycle = platform::make_lifecycle_observer();
     auto name_resolution = platform::make_name_resolution_observer();
     auto tls_session = platform::make_tls_session_observer();
+    auto process_events = platform::make_process_exec_observer();
+    ProcessGraph process_graph;
+    std::size_t process_events_observed = 0;
     TransferSampler transfer_sampler(transfer_store);
     const bool lifecycle_active = lifecycle_supports(lifecycle->capability(), options.mode);
 
@@ -212,6 +216,24 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         std::cerr << "Application TLS session collection unavailable: "
                   << tls_session->capability().unavailable_reason << '\n';
     }
+    if (!process_events->capability().available()) {
+        std::cerr << "Endpoint process event collection unavailable: "
+                  << process_events->capability().unavailable_reason << '\n';
+    }
+
+    const auto drain_process_graph = [&] {
+        if (!process_events->capability().available()) return;
+        try {
+            auto events = process_events->poll(std::chrono::milliseconds(0));
+            process_events_observed += events.size();
+            for (const auto& event : events) {
+                static_cast<void>(process_graph.observe(event));
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "Endpoint process graph collection failed; observation continues: "
+                      << error.what() << std::endl;
+        }
+    };
 
     std::optional<TlsObservation> tls;
     std::optional<std::int64_t> tls_id;
@@ -246,6 +268,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
 
     ObservationRuntimeCallbacks callbacks;
     callbacks.started = [&] {
+        drain_process_graph();
         if (options.target) {
             tls_probe = std::async(std::launch::async, [&] {
                 return TlsProbe{}.probe(options.target->host, options.target->port,
@@ -271,6 +294,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         }
     };
     callbacks.periodic = [&] {
+        drain_process_graph();
         if (service_mode) {
             try {
                 transfer_sampler.capture(*sockets, store);
@@ -329,6 +353,7 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
                    external_stop_requested.load(std::memory_order_relaxed);
         },
         callbacks);
+    drain_process_graph();
     if (tls_probe.valid()) {
         try {
             tls = tls_probe.get();
@@ -353,11 +378,26 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     const auto lifecycle_health = lifecycle->health();
     const auto name_health = name_resolution->health();
     const auto tls_health = tls_session->health();
+    const auto process_health = process_events->health();
+    const auto& graph_health = process_graph.health();
     std::cout << "Observed " << result.admitted_connections << " matching connection(s). History: "
               << options.database << '\n'
               << "Lifecycle dropped events: "
               << (lifecycle_health.dropped_events
                   ? std::to_string(*lifecycle_health.dropped_events) : "UNAVAILABLE") << '\n'
+              << "Process events: " << process_events_observed << " observed, "
+              << process_graph.active_count() << " active, "
+              << process_graph.snapshot().size() << " retained\n"
+              << "Process event source: "
+              << (process_events->capability().source.empty()
+                  ? "UNAVAILABLE" : process_events->capability().source) << '\n'
+              << "Process dropped events: "
+              << (process_health.dropped_events
+                  ? std::to_string(*process_health.dropped_events) : "UNAVAILABLE") << '\n'
+              << "Process graph unresolved: "
+              << graph_health.rejected_without_stable_identity << " unstable identity, "
+              << graph_health.ambiguous_parent_links << " ambiguous parent, "
+              << graph_health.ambiguous_exit_events << " ambiguous exit\n"
               << "Resolver API events: " << result.name_resolution_events_observed
               << " observed, " << result.name_resolution_evidence_attached
               << " attached, " << result.ambiguous_name_resolution_matches
@@ -375,6 +415,9 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
               << "TLS session rejected events: " << tls_health.rejected_events << '\n';
     if (lifecycle_health.evidence_may_be_incomplete()) {
         std::cerr << "Lifecycle evidence may be incomplete because the collector dropped events\n";
+    }
+    if (process_health.dropped_events && *process_health.dropped_events != 0) {
+        std::cerr << "Process graph evidence may be incomplete because the collector dropped events\n";
     }
     if (name_health.evidence_may_be_incomplete()) {
         std::cerr << "Name-resolution evidence may be incomplete because the collector dropped events\n";
