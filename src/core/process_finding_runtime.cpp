@@ -2,7 +2,9 @@
 
 #include "neta/fleet_client.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -26,6 +28,21 @@ const ProcessNode* node_for_event(const ProcessExecEvent& event,
         if (event.type == ProcessExecEventType::Exit && node.exited_at_ns == event.timestamp_ns) return &node;
     }
     return nullptr;
+}
+
+std::string image_leaf(std::string path) {
+    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
+        return ch == '\\' ? '/' : static_cast<char>(std::tolower(ch));
+    });
+    const auto slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+bool expected_privilege_broker_transition(const StoredProcessFinding& finding) {
+    if (finding.rule_id != "PROCESS_UNEXPECTED_ELEVATION") return false;
+    const auto parent = image_leaf(finding.parent_image);
+    return parent == "sudo" || parent == "su" || parent == "pkexec" ||
+           parent == "doas" || parent == "consent.exe";
 }
 
 FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
@@ -114,6 +131,10 @@ ProcessFindingReportResult ProcessFindingRuntime::report_pending(
     const auto current_ns = now_ns();
     for (const auto& finding : store_.pending_for_report(32, current_ns, retry_after_ns)) {
         ++result.considered;
+        if (expected_privilege_broker_transition(finding)) {
+            store_.mark_suppressed(finding.finding_id, current_ns);
+            continue;
+        }
         store_.mark_report_attempt(finding.finding_id, current_ns);
         try {
             static_cast<void>(FleetClient::send_finding(policy.state_dir, announcement(finding)));
