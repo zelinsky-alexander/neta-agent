@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -111,9 +112,13 @@ std::string read_cmdline(std::int64_t pid) {
 std::vector<ProcessExecEvent> snapshot_processes() {
     std::vector<ProcessExecEvent> result;
     std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator("/proc", error)) {
-        if (error) break;
-        if (!entry.is_directory(error)) continue;
+    std::filesystem::directory_iterator current("/proc", error);
+    const std::filesystem::directory_iterator end;
+    while (!error && current != end) {
+        const auto entry = *current;
+        current.increment(error);
+        std::error_code type_error;
+        if (!entry.is_directory(type_error) || type_error) continue;
         const auto pid = parse_pid(entry.path().filename().string());
         if (!pid) continue;
         const auto stat = read_stat(*pid);
