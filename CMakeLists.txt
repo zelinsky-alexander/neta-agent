@@ -127,6 +127,7 @@ if(WIN32)
         src/platform/windows/host_network_environment.cpp
         src/platform/windows/connection_observer.cpp
         src/platform/windows/etw_lifecycle.cpp
+        src/platform/windows/process_exec_observer.cpp
         src/platform/windows/process_resolver.cpp
         src/platform/windows/route_observer.cpp
         src/platform/windows/service.cpp
@@ -268,6 +269,7 @@ add_library(neta_core
     src/core/upgrade_runtime.cpp
     src/core/antimalware.cpp
     src/core/exec_antimalware_monitor.cpp
+    src/core/process_graph.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     ${NETA_FLEET_CLIENT_SOURCE}
@@ -347,6 +349,11 @@ if(NETA_ENABLE_TESTS)
     target_link_libraries(neta_upgrade_core_test PRIVATE neta_core)
     neta_enable_warnings(neta_upgrade_core_test)
     add_test(NAME neta_upgrade_core_test COMMAND neta_upgrade_core_test)
+
+    add_executable(neta_process_graph_test tests/process_graph_test.cpp)
+    target_link_libraries(neta_process_graph_test PRIVATE neta_core)
+    neta_enable_warnings(neta_process_graph_test)
+    add_test(NAME neta_process_graph_test COMMAND neta_process_graph_test)
 
     if(WIN32)
         add_executable(neta_windows_platform_test tests/windows_platform_test.cpp)
