@@ -19,6 +19,7 @@ struct RuleSet {
     std::uint64_t schema_version{1};
     std::string version{kRuleSetVersion};
 
+    bool performance_enabled{true};
     double rtt_ratio{2.0};
     double rttvar_ratio{2.0};
     std::uint64_t retransmission_threshold{2};
