@@ -1,8 +1,12 @@
 #include "neta/process_graph.hpp"
+#include "neta/process_findings.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <string>
+#include <vector>
 
 using namespace neta;
 
@@ -17,6 +21,12 @@ ProcessExecEvent start_event(std::int64_t pid, std::uint64_t start_ns,
     event.tgid = pid;
     event.process_start_time_ns = start_ns;
     return event;
+}
+
+bool has_finding(const std::vector<ProcessFinding>& findings, ProcessFindingKind kind) {
+    return std::any_of(findings.begin(), findings.end(), [&](const ProcessFinding& finding) {
+        return finding.kind == kind;
+    });
 }
 
 }  // namespace
@@ -64,6 +74,10 @@ int main() {
     assert(child_node->working_directory == "/tmp");
     assert(child_node->session_id == 7);
     assert(child_node->elevated == false);
+
+    ProcessFindingEngine snapshot_engine;
+    const auto initial_findings = snapshot_engine.evaluate_snapshot(graph);
+    assert(has_finding(initial_findings, ProcessFindingKind::ExecFromTransientPath));
 
     ProcessExecEvent child_exit;
     child_exit.type = ProcessExecEventType::Exit;
@@ -121,6 +135,78 @@ int main() {
     const auto nodes = graph.snapshot();
     assert(nodes.size() == 5);
 
-    std::cout << "process graph tests passed\n";
+    // Cross-platform transient path normalization.
+    {
+        ProcessGraph windows_graph;
+        auto win = start_event(300, 9'000, 9'000);
+        win.process_start_time_ns.reset();
+        win.platform_process_key = 777;
+        win.executable_path = "C:\\Users\\lab\\AppData\\Local\\Temp\\neta-lab.exe";
+        win.comm = "neta-lab.exe";
+        assert(windows_graph.observe(win));
+        const auto findings = snapshot_engine.evaluate_snapshot(windows_graph);
+        assert(has_finding(findings, ProcessFindingKind::ExecFromTransientPath));
+    }
+
+    // Parent/child semantic findings.
+    {
+        ProcessGraph finding_graph;
+        auto service = start_event(400, 10'000, 10'000);
+        service.executable_path = "/usr/sbin/nginx";
+        service.comm = "nginx";
+        service.elevated = false;
+        assert(finding_graph.observe(service));
+
+        auto shell = start_event(401, 10'100, 10'100);
+        shell.parent_tgid = 400;
+        shell.parent_process_start_time_ns = 10'000;
+        shell.executable_path = "/bin/sh";
+        shell.comm = "sh";
+        shell.elevated = true;
+        assert(finding_graph.observe(shell));
+        const auto findings = snapshot_engine.evaluate_snapshot(finding_graph);
+        assert(has_finding(findings, ProcessFindingKind::ShellFromUnexpectedParent));
+        assert(has_finding(findings, ProcessFindingKind::UnexpectedElevation));
+    }
+
+    // Event-time fan-out and short-lived burst rules.
+    {
+        ProcessFindingConfig config;
+        config.fanout_count = 3;
+        config.fanout_window_ns = 1'000;
+        config.short_lived_count = 3;
+        config.short_lived_max_ns = 100;
+        config.short_lived_window_ns = 1'000;
+        ProcessFindingEngine engine(config);
+        ProcessGraph event_graph;
+
+        auto runner = start_event(500, 20'000, 20'000);
+        runner.executable_path = "/usr/bin/runner";
+        runner.comm = "runner";
+        assert(event_graph.observe(runner));
+
+        std::vector<ProcessFinding> start_findings;
+        std::vector<ProcessFinding> exit_findings;
+        for (std::int64_t pid = 501; pid <= 503; ++pid) {
+            const auto when = 20'100 + static_cast<std::uint64_t>(pid - 501) * 100;
+            auto helper = start_event(pid, when, when);
+            helper.parent_tgid = 500;
+            helper.parent_process_start_time_ns = 20'000;
+            helper.executable_path = "/usr/bin/helper";
+            helper.comm = "helper";
+            assert(event_graph.observe(helper));
+            start_findings = engine.observe(helper, event_graph);
+
+            ProcessExecEvent exit = helper;
+            exit.type = ProcessExecEventType::Exit;
+            exit.timestamp_ns = when + 20;
+            assert(event_graph.observe(exit));
+            exit_findings = engine.observe(exit, event_graph);
+        }
+        assert(has_finding(start_findings, ProcessFindingKind::RapidChildFanout));
+        assert(has_finding(exit_findings, ProcessFindingKind::ShortLivedProcessBurst));
+    }
+
+    std::cout << "process graph and MS5.1 finding tests passed\n";
     return 0;
 }
