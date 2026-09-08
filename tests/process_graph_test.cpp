@@ -40,6 +40,7 @@ int main() {
     auto child = start_event(101, 1'100, 20);
     child.parent_pid = 100;
     child.parent_tgid = 100;
+    child.parent_process_start_time_ns = 1'000;
     child.uid = 1000;
     child.gid = 1000;
     child.session_id = 7;
@@ -79,12 +80,21 @@ int main() {
 
     auto reused_pid = start_event(101, 2'100, 40);
     reused_pid.parent_tgid = 100;
+    reused_pid.parent_process_start_time_ns = 1'000;
     reused_pid.executable_path = "/tmp/reused";
     assert(graph.observe(reused_pid));
     const ProcessInstanceKey reused_key{101, 2'100, std::nullopt};
     assert(graph.find(reused_key));
     assert(graph.find(child_key));
     assert(graph.active_count() == 2);
+
+    auto orphan_child = start_event(200, 4'000, 45);
+    orphan_child.parent_tgid = 199;
+    orphan_child.parent_process_start_time_ns = 3'900;
+    assert(graph.observe(orphan_child));
+    const auto orphan_node = graph.find(ProcessInstanceKey{200, 4'000, std::nullopt});
+    assert(orphan_node && orphan_node->parent);
+    assert(*orphan_node->parent == ProcessInstanceKey{199, 3'900, std::nullopt});
 
     auto duplicate_pid_instance = start_event(101, 3'100, 50);
     duplicate_pid_instance.executable_path = "/tmp/synthetic-second-active";
@@ -107,7 +117,7 @@ int main() {
     assert(graph.health().rejected_without_stable_identity == 1);
 
     const auto nodes = graph.snapshot();
-    assert(nodes.size() == 4);
+    assert(nodes.size() == 5);
 
     std::cout << "process graph tests passed\n";
     return 0;
