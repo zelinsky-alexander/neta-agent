@@ -35,6 +35,9 @@ ProcessExecDecodeResult decode_process_exec_event(std::span<const std::byte> byt
     if ((wire.availability & NETA_EXEC_HAS_START_TIME) != 0U) {
         event.process_start_time_ns = wire.process_start_time_ns;
     }
+    if ((wire.availability & NETA_EXEC_HAS_PARENT_START_TIME) != 0U) {
+        event.parent_process_start_time_ns = wire.parent_process_start_time_ns;
+    }
     if ((wire.availability & NETA_EXEC_HAS_EXIT_CODE) != 0U) event.exit_code = wire.exit_code;
     event.comm = std::string(wire.comm, strnlen(wire.comm, sizeof(wire.comm)));
     if ((wire.availability & NETA_EXEC_HAS_PATH) != 0U) {
