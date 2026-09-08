@@ -1,6 +1,7 @@
 #include "neta/cli/process_command.hpp"
 
 #include "neta/platform.hpp"
+#include "neta/process_findings.hpp"
 #include "neta/process_graph.hpp"
 
 #include <algorithm>
@@ -75,6 +76,27 @@ ProcessGraph current_graph() {
     return graph;
 }
 
+void print_finding(const ProcessFinding& finding, bool compact = false) {
+    if (compact) {
+        std::cout << "FINDING " << finding.rule_id << ' ' << to_string(finding.severity)
+                  << " pid=" << finding.process.pid;
+        if (finding.parent) std::cout << " parent=" << finding.parent->pid;
+        if (!finding.process_image.empty()) std::cout << " image=" << finding.process_image;
+        std::cout << '\n';
+        return;
+    }
+    std::cout << finding.rule_id << " [" << to_string(finding.severity) << "]\n"
+              << "  PID            " << finding.process.pid << '\n'
+              << "  Identity       " << stable_id(finding.process) << '\n'
+              << "  Parent PID     " << (finding.parent ? std::to_string(finding.parent->pid) : "-") << '\n'
+              << "  Image          " << value_or_dash(finding.process_image) << '\n'
+              << "  Parent image   " << value_or_dash(finding.parent_image) << '\n'
+              << "  Command        " << value_or_dash(finding.command_line) << '\n'
+              << "  Summary        " << finding.summary << '\n'
+              << "  Interpretation " << finding.interpretation << '\n'
+              << "  Ruleset        " << finding.ruleset_version << "\n\n";
+}
+
 void print_node_details(const ProcessNode& node, const std::vector<ProcessNode>& all) {
     std::cout << "PROCESS INSTANCE\n"
               << "PID        " << node.key.pid << '\n'
@@ -138,11 +160,8 @@ void print_tree(const ProcessNode& node,
 int show_command(int argc, char** argv) {
     if (argc < 4) throw std::runtime_error("usage: neta-agent process show <pid>");
     std::int64_t pid = 0;
-    try {
-        pid = std::stoll(argv[3]);
-    } catch (...) {
-        throw std::runtime_error("process show requires a numeric PID");
-    }
+    try { pid = std::stoll(argv[3]); }
+    catch (...) { throw std::runtime_error("process show requires a numeric PID"); }
     if (pid <= 0) throw std::runtime_error("process show requires a positive PID");
 
     auto graph = current_graph();
@@ -161,6 +180,19 @@ int show_command(int argc, char** argv) {
         return 2;
     }
     print_node_details(*match, nodes);
+
+    ProcessFindingEngine engine;
+    const auto findings = engine.evaluate_snapshot(graph);
+    bool heading = false;
+    for (const auto& finding : findings) {
+        if (finding.process != match->key) continue;
+        if (!heading) {
+            std::cout << "\nFINDINGS\n";
+            heading = true;
+        }
+        print_finding(finding);
+    }
+    if (!heading) std::cout << "\nFINDINGS\n-\n";
     return 0;
 }
 
@@ -177,9 +209,7 @@ int graph_command() {
     std::cout << "Process graph: " << nodes.size() << " visible process instance(s)\n";
     std::unordered_set<ProcessInstanceKey, ProcessInstanceKeyHash> visited;
     for (const auto& node : nodes) {
-        if (!node.parent || !known.contains(*node.parent)) {
-            print_tree(node, children, visited, 0);
-        }
+        if (!node.parent || !known.contains(*node.parent)) print_tree(node, children, visited, 0);
     }
     for (const auto& node : nodes) {
         if (!visited.contains(node.key)) print_tree(node, children, visited, 0);
@@ -193,6 +223,21 @@ int graph_command() {
     return 0;
 }
 
+int findings_command() {
+    auto graph = current_graph();
+    ProcessFindingEngine engine;
+    const auto findings = engine.evaluate_snapshot(graph);
+    std::cout << "Process findings: " << findings.size()
+              << " (ruleset neta-process-rules/0.1.0)\n\n";
+    if (findings.empty()) {
+        std::cout << "No MS5.1 process patterns matched the current snapshot.\n";
+        return 0;
+    }
+    for (const auto& finding : findings) print_finding(finding);
+    std::cout << "Findings describe observed behavioral patterns; malicious intent is not established.\n";
+    return 0;
+}
+
 int watch_command() {
     ProcessSignalHandlers signals;
     auto observer = platform::make_process_exec_observer();
@@ -202,9 +247,8 @@ int watch_command() {
     }
 
     ProcessGraph graph;
-    for (const auto& event : platform::snapshot_processes()) {
-        static_cast<void>(graph.observe(event));
-    }
+    for (const auto& event : platform::snapshot_processes()) static_cast<void>(graph.observe(event));
+    ProcessFindingEngine finding_engine;
 
     std::cout << "Watching process events from " << value_or_dash(capability.source)
               << ". Press Ctrl-C to stop.\n";
@@ -221,10 +265,10 @@ int watch_command() {
             if (!event.user_identity.empty()) std::cout << " [" << event.user_identity << ']';
             if (!event.executable_path.empty()) std::cout << "  " << event.executable_path;
             if (!event.command_line.empty()) std::cout << "  cmd=" << event.command_line;
-            if (event.type == ProcessExecEventType::Exit && event.exit_code) {
-                std::cout << "  code=" << *event.exit_code;
-            }
+            if (event.type == ProcessExecEventType::Exit && event.exit_code) std::cout << "  code=" << *event.exit_code;
             std::cout << '\n';
+
+            for (const auto& finding : finding_engine.observe(event, graph)) print_finding(finding, true);
         }
     }
 
@@ -237,13 +281,15 @@ int watch_command() {
 }
 
 void print_process_help() {
-    std::cout << "Process / MS5:\n"
+    std::cout << "Process / MS5 + MS5.1:\n"
               << "  neta-agent process watch\n"
-              << "      Stream process START/EXIT evidence until Ctrl-C.\n"
+              << "      Stream process START/EXIT evidence and event-time findings until Ctrl-C.\n"
               << "  neta-agent process show <pid>\n"
-              << "      Show the current process instance, identity, parent and children.\n"
+              << "      Show the current process instance, identity, parent, children and findings.\n"
               << "  neta-agent process graph\n"
-              << "      Print the current best-effort endpoint process tree.\n";
+              << "      Print the current best-effort endpoint process tree.\n"
+              << "  neta-agent process findings\n"
+              << "      Evaluate deterministic MS5.1 findings over the current endpoint snapshot.\n";
 }
 
 }  // namespace
@@ -257,6 +303,7 @@ int run_process_command(int argc, char** argv) {
     if (command == "watch") return watch_command();
     if (command == "show") return show_command(argc, argv);
     if (command == "graph") return graph_command();
+    if (command == "findings") return findings_command();
     throw std::runtime_error("unknown process command: " + command);
 }
 
