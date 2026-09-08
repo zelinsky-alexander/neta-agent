@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "neta-default",
+  "revision": 1,
+  "version": "neta-rules/0.2.0",
+  "rules": [
+    {
+      "id": "NETA-PERF-001",
+      "name": "Network path degradation",
+      "category": "performance",
+      "severity": "medium",
+      "enabled": true,
+      "parameters": {
+        "rtt_ratio": 2.0,
+        "rttvar_ratio": 2.0,
+        "retransmission_threshold": 2,
+        "rtt_weight": 0.50,
+        "rttvar_weight": 0.20,
+        "retransmission_weight": 0.30,
+        "degraded_threshold": 0.50
+      }
+    },
+    {
+      "id": "NETA-TRUST-001",
+      "name": "Outbound TLS identity",
+      "category": "trust",
+      "severity": "high",
+      "enabled": true,
+      "parameters": {}
+    },
+    {
+      "id": "NETA-TRUST-002",
+      "name": "Inbound authenticated TLS identity",
+      "category": "trust",
+      "severity": "high",
+      "enabled": true,
+      "parameters": {}
+    }
+  ]
+}
