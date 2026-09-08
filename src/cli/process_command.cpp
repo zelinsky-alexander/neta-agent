@@ -3,11 +3,10 @@
 #include "neta/platform.hpp"
 #include "neta/process_graph.hpp"
 
-#include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
-#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
