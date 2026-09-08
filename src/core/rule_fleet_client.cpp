@@ -2,6 +2,7 @@
 #include "neta/crypto.hpp"
 #include "neta/rule_update.hpp"
 #include "neta/rules/rule_set_loader.hpp"
+#include "neta/verdict.hpp"
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -158,9 +159,9 @@ void atomic_write(const std::filesystem::path& path, const std::string& content)
 }
 
 ActiveRuleBundleState state_from_text(const std::filesystem::path& path, const std::string& text, bool centrally_managed) {
-    const auto rules = rules::RuleSetLoader::load_text(text, path.string());
-    ActiveRuleBundleState state; state.path = path; state.revision = rules.revision; state.version = rules.version;
-    state.sha256 = sha256_hex(text); state.rule_count = rules.definitions.size(); state.centrally_managed = centrally_managed; return state;
+    const auto loaded = rules::RuleSetLoader::load_text(text, path.string());
+    ActiveRuleBundleState state; state.path = path; state.revision = loaded.revision; state.version = loaded.version;
+    state.sha256 = sha256_hex(text); state.rule_count = loaded.definitions.size(); state.centrally_managed = centrally_managed; return state;
 }
 
 } // namespace
@@ -184,12 +185,9 @@ ActiveRuleBundleState update_rules_from_coordinator(const std::filesystem::path&
     const std::string hash = sha256_hex(bundle);
     const auto path = state_dir / "rules" / "active.json";
     atomic_write(path, bundle);
-    try {
-        FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "ACTIVE");
-    } catch (...) {
-        try { FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "ACK_FAILED", "bundle activated locally but ACTIVE acknowledgement failed"); } catch (...) {}
-        throw;
-    }
+    // Installation and runtime activation are distinct. The CLI restarts/reloads the
+    // running service and only then sends the final ACTIVE acknowledgement.
+    FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "INSTALLED");
     return state_from_text(path, bundle, true);
 }
 
@@ -198,7 +196,7 @@ ActiveRuleBundleState active_rule_bundle_state(const std::filesystem::path& stat
     if (std::filesystem::is_regular_file(path)) return state_from_text(path, read_file(path), true);
     const auto built_in = rules::RuleSetLoader::built_in();
     ActiveRuleBundleState state; state.path.clear(); state.revision = built_in.revision; state.version = built_in.version;
-    state.sha256 = sha256_hex(rules::RuleSetLoader::built_in().version); state.rule_count = built_in.definitions.size(); state.centrally_managed = false;
+    state.sha256 = rule_set_hash(built_in); state.rule_count = built_in.definitions.size(); state.centrally_managed = false;
     return state;
 }
 
