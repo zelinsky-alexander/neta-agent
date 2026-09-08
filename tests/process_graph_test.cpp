@@ -92,9 +92,11 @@ int main() {
     orphan_child.parent_tgid = 199;
     orphan_child.parent_process_start_time_ns = 3'900;
     assert(graph.observe(orphan_child));
-    const auto orphan_node = graph.find(ProcessInstanceKey{200, 4'000, std::nullopt});
+    const ProcessInstanceKey orphan_key{200, 4'000, std::nullopt};
+    const ProcessInstanceKey orphan_parent_key{199, 3'900, std::nullopt};
+    const auto orphan_node = graph.find(orphan_key);
     assert(orphan_node && orphan_node->parent);
-    assert(*orphan_node->parent == ProcessInstanceKey{199, 3'900, std::nullopt});
+    assert(*orphan_node->parent == orphan_parent_key);
 
     auto duplicate_pid_instance = start_event(101, 3'100, 50);
     duplicate_pid_instance.executable_path = "/tmp/synthetic-second-active";
