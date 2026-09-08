@@ -1,5 +1,6 @@
 #include "neta/cli/fleet_command.hpp"
 #include "neta/cli/process_command.hpp"
+#include "neta/cli/rules_command.hpp"
 #include "neta/platform.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
@@ -94,6 +95,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (argc >= 2 && std::string(argv[1]) == "rules") {
+        try {
+            return neta::cli::run_rules_command(argc, argv);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return 1;
+        }
+    }
+
     if (argc >= 3 && std::string(argv[1]) == "health" && std::string(argv[2]) == "--upgrade") {
         try {
             return upgrade_health(argc, argv);
@@ -120,6 +130,12 @@ int main(int argc, char** argv) {
     const int result = neta_legacy_main(argc, argv);
     if (argc < 2) {
         std::cout
+            << "\nRules / RM1:\n"
+            << "  neta-agent rules list [--file FILE]\n"
+            << "  neta-agent rules show RULE_ID [--file FILE]\n"
+            << "  neta-agent rules validate FILE\n"
+            << "  neta-agent rules active\n"
+            << "  Set NETA_RULE_SET_FILE=FILE to activate a validated local rule set at process startup.\n"
             << "\nProcess / MS5:\n"
             << "  neta-agent process watch\n"
             << "  neta-agent process show <pid>\n"
