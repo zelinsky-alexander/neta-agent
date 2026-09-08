@@ -123,10 +123,20 @@ bool ProcessGraph::observe(const ProcessExecEvent& event) {
     node.started_at_ns = event.timestamp_ns;
 
     if (event.parent_tgid && *event.parent_tgid > 0) {
-        node.parent = unique_active_key_for_pid(*event.parent_tgid);
-        if (!node.parent) {
-            const auto [begin, end] = active_by_pid_.equal_range(*event.parent_tgid);
-            if (begin != end) ++health_.ambiguous_parent_links;
+        ProcessInstanceKey parent_key;
+        parent_key.pid = *event.parent_tgid;
+        parent_key.platform_key = event.parent_platform_process_key;
+        if (!parent_key.platform_key) {
+            parent_key.start_time_ns = event.parent_process_start_time_ns;
+        }
+        if (parent_key.durable()) {
+            node.parent = parent_key;
+        } else {
+            node.parent = unique_active_key_for_pid(*event.parent_tgid);
+            if (!node.parent) {
+                const auto [begin, end] = active_by_pid_.equal_range(*event.parent_tgid);
+                if (begin != end) ++health_.ambiguous_parent_links;
+            }
         }
     }
 
