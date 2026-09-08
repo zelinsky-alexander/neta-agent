@@ -24,8 +24,8 @@ std::optional<ProcessInstanceKey> ProcessGraph::key_from(const ProcessExecEvent&
     if (!event.tgid || *event.tgid <= 0) return std::nullopt;
     ProcessInstanceKey key;
     key.pid = *event.tgid;
-    key.start_time_ns = event.process_start_time_ns;
     key.platform_key = event.platform_process_key;
+    if (!key.platform_key) key.start_time_ns = event.process_start_time_ns;
     if (!key.durable()) return std::nullopt;
     return key;
 }
