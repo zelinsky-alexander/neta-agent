@@ -1,9 +1,11 @@
+#include "neta/process_finding_store.hpp"
 #include "neta/process_graph.hpp"
 #include "neta/process_findings.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -78,6 +80,43 @@ int main() {
     ProcessFindingEngine snapshot_engine;
     const auto initial_findings = snapshot_engine.evaluate_snapshot(graph);
     assert(has_finding(initial_findings, ProcessFindingKind::ExecFromTransientPath));
+
+    // MS5.2 persistence: durable process identity, deduplicated finding key,
+    // occurrence count, and retry/report state all survive beyond the graph.
+    {
+        const auto db = std::filesystem::temp_directory_path() / "neta-process-findings-ms52-test.sqlite";
+        std::error_code ec;
+        std::filesystem::remove(db, ec);
+        std::filesystem::remove(db.string() + "-wal", ec);
+        std::filesystem::remove(db.string() + "-shm", ec);
+        {
+            ProcessFindingStore store(db);
+            store.upsert_process(*graph.find(parent_key));
+            store.upsert_process(*child_node);
+            const auto transient = std::find_if(initial_findings.begin(), initial_findings.end(), [](const ProcessFinding& finding) {
+                return finding.kind == ProcessFindingKind::ExecFromTransientPath;
+            });
+            assert(transient != initial_findings.end());
+            const auto first = store.upsert_finding(*transient);
+            assert(first.finding_id.starts_with("FINDING-PROC-"));
+            assert(first.finding_key.find("PROCESS_EXEC_FROM_TRANSIENT_PATH") != std::string::npos);
+            assert(first.report_state == "PENDING");
+            assert(first.occurrence_count == 1);
+            const auto second = store.upsert_finding(*transient);
+            assert(second.finding_id == first.finding_id);
+            assert(second.occurrence_count == 2);
+            const auto pending = store.pending_for_report(10, 1000, 0);
+            assert(pending.size() == 1);
+            store.mark_report_attempt(first.finding_id, 1000);
+            store.mark_reported(first.finding_id, 1100);
+            const auto recent = store.recent_findings(10);
+            assert(recent.size() == 1);
+            assert(recent.front().report_state == "REPORTED");
+        }
+        std::filesystem::remove(db, ec);
+        std::filesystem::remove(db.string() + "-wal", ec);
+        std::filesystem::remove(db.string() + "-shm", ec);
+    }
 
     ProcessExecEvent child_exit;
     child_exit.type = ProcessExecEventType::Exit;
@@ -207,6 +246,6 @@ int main() {
         assert(has_finding(exit_findings, ProcessFindingKind::ShortLivedProcessBurst));
     }
 
-    std::cout << "process graph and MS5.1 finding tests passed\n";
+    std::cout << "process graph, MS5.1 findings, and MS5.2 persistence tests passed\n";
     return 0;
 }
