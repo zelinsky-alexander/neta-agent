@@ -7,11 +7,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace neta::rules {
 
@@ -40,8 +42,6 @@ public:
         if (const char* configured = std::getenv("NETA_RULE_SET_FILE"); configured && *configured) {
             return load_file(configured);
         }
-        const std::filesystem::path local_default{"rules/default-rules.json"};
-        if (std::filesystem::exists(local_default)) return load_file(local_default);
         return built_in();
     }
 
@@ -136,7 +136,8 @@ private:
                 set.rtt_ratio = require_parameter(parameters, "rtt_ratio");
                 set.rttvar_ratio = require_parameter(parameters, "rttvar_ratio");
                 const double retransmissions = require_parameter(parameters, "retransmission_threshold");
-                if (retransmissions < 0.0 || std::floor(retransmissions) != retransmissions) {
+                if (retransmissions < 0.0 || std::floor(retransmissions) != retransmissions ||
+                    retransmissions > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
                     throw std::runtime_error("retransmission_threshold must be a non-negative integer");
                 }
                 set.retransmission_threshold = static_cast<std::uint64_t>(retransmissions);
