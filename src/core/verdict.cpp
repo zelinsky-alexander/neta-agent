@@ -1,7 +1,9 @@
 #include "neta/verdict.hpp"
 #include "neta/crypto.hpp"
+#include "neta/rules/rule_set_loader.hpp"
 
 #include <algorithm>
+#include <iomanip>
 #include <sstream>
 #include <utility>
 
@@ -10,6 +12,26 @@ namespace {
 
 constexpr const char* kNetworkRule =
     "|network_path_degradation:rtt_ratio=2.0,rttvar_ratio=2.0,retransmissions=2,weights=0.50/0.20/0.30,threshold=0.50";
+constexpr const char* kOutboundTrustRule =
+    "|outbound_tls_identity:supporting_probe,invalid=SUSPICIOUS,spki_change=CHANGED,match=STABLE";
+constexpr const char* kInboundTrustRule =
+    "|inbound_mtls_identity:exact_application_session_only,principal=certificate_subject,"
+    "accepted_identity=issuer+spki,no_cert=UNVERIFIED,present_not_authenticated=UNVERIFIED,"
+    "verification_failure=SUSPICIOUS,authenticated_without_accepted_principal=UNVERIFIED,"
+    "accepted_issuer_spki=STABLE,accepted_principal_identity_change=CHANGED";
+
+bool is_default_semantics(const RuleSet& rules) {
+    return rules.rtt_ratio == 2.0 && rules.rttvar_ratio == 2.0 &&
+           rules.retransmission_threshold == 2 && rules.rtt_weight == 0.50 &&
+           rules.rttvar_weight == 0.20 && rules.retransmission_weight == 0.30 &&
+           rules.degraded_threshold == 0.50 && rules.inbound_authenticated_identity;
+}
+
+std::string number_text(double value) {
+    std::ostringstream out;
+    out << std::setprecision(17) << value;
+    return out.str();
+}
 
 void evaluate_performance(AssuranceVerdict& verdict, const Baseline& baseline,
                           const AggregateMetrics& metrics, const RuleSet& rules) {
@@ -45,16 +67,24 @@ std::string bool_text(bool value) { return value ? "1" : "0"; }
 
 } // namespace
 
-RuleSet current_rule_set() { return RuleSet{}; }
+RuleSet current_rule_set() {
+    static const RuleSet active = rules::RuleSetLoader::active();
+    return active;
+}
 
 std::optional<RuleSet> rule_set_for_version(const std::string& version) {
-    if (version == kRuleSetVersion) return current_rule_set();
     if (version == kLegacyRuleSetVersion) {
         RuleSet legacy;
+        legacy.id = "neta-legacy";
+        legacy.revision = 1;
         legacy.version = kLegacyRuleSetVersion;
         legacy.inbound_authenticated_identity = false;
         return legacy;
     }
+    if (version == kRuleSetVersion) return rules::RuleSetLoader::built_in();
+
+    const auto active = current_rule_set();
+    if (version == active.version) return active;
     return std::nullopt;
 }
 
@@ -63,16 +93,22 @@ std::string rule_set_canonical(const RuleSet& rules) {
         return std::string(kLegacyRuleSetVersion) + kNetworkRule;
     }
 
-    if (rules.version == kRuleSetVersion) {
-        return std::string(kRuleSetVersion) + kNetworkRule +
-               "|outbound_tls_identity:supporting_probe,invalid=SUSPICIOUS,spki_change=CHANGED,match=STABLE" +
-               "|inbound_mtls_identity:exact_application_session_only,principal=certificate_subject,"
-               "accepted_identity=issuer+spki,no_cert=UNVERIFIED,present_not_authenticated=UNVERIFIED,"
-               "verification_failure=SUSPICIOUS,authenticated_without_accepted_principal=UNVERIFIED,"
-               "accepted_issuer_spki=STABLE,accepted_principal_identity_change=CHANGED";
+    if (rules.version == kRuleSetVersion && is_default_semantics(rules)) {
+        return std::string(kRuleSetVersion) + kNetworkRule + kOutboundTrustRule + kInboundTrustRule;
     }
 
-    return rules.version + kNetworkRule;
+    std::ostringstream canonical;
+    canonical << rules.version
+              << "|network_path_degradation:rtt_ratio=" << number_text(rules.rtt_ratio)
+              << ",rttvar_ratio=" << number_text(rules.rttvar_ratio)
+              << ",retransmissions=" << rules.retransmission_threshold
+              << ",weights=" << number_text(rules.rtt_weight) << '/'
+              << number_text(rules.rttvar_weight) << '/'
+              << number_text(rules.retransmission_weight)
+              << ",threshold=" << number_text(rules.degraded_threshold)
+              << kOutboundTrustRule
+              << "|inbound_mtls_identity:enabled=" << bool_text(rules.inbound_authenticated_identity);
+    return canonical.str();
 }
 
 std::string rule_set_hash(const RuleSet& rules) {
