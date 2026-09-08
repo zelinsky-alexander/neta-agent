@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "id": "neta-default",
-  "revision": 1,
-  "version": "neta-rules/0.2.0",
+  "revision": 2,
+  "version": "neta-rules/0.3.0",
   "rules": [
     {
       "id": "NETA-PERF-001",
@@ -26,7 +26,11 @@
       "category": "trust",
       "severity": "high",
       "enabled": true,
-      "parameters": {}
+      "parameters": {
+        "require_chain_valid": true,
+        "require_hostname_valid": true,
+        "compare_spki": true
+      }
     },
     {
       "id": "NETA-TRUST-002",
@@ -34,7 +38,69 @@
       "category": "trust",
       "severity": "high",
       "enabled": true,
-      "parameters": {}
+      "parameters": {
+        "require_exact_evidence": true,
+        "require_peer_certificate": true,
+        "require_peer_authentication": true,
+        "verification_failure_suspicious": true,
+        "compare_spki": true,
+        "compare_issuer": true
+      }
+    },
+    {
+      "id": "NETA-PROC-001",
+      "name": "Execution from transient path",
+      "category": "process",
+      "severity": "medium",
+      "enabled": true,
+      "parameters": {
+        "path_prefixes": ["/tmp/", "/var/tmp/", "/dev/shm/"],
+        "path_substrings": ["/appdata/local/temp/", "/windows/temp/"]
+      }
+    },
+    {
+      "id": "NETA-PROC-002",
+      "name": "Shell from unexpected parent",
+      "category": "process",
+      "severity": "medium",
+      "enabled": true,
+      "parameters": {
+        "shell_names": ["sh", "bash", "dash", "zsh", "ksh", "fish", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe"],
+        "expected_parent_names": ["sh", "bash", "dash", "zsh", "ksh", "fish", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe", "sshd", "sudo", "su", "login", "systemd", "init", "tmux", "screen", "gnome-terminal-server", "konsole", "windowsterminal.exe", "wt.exe", "conhost.exe", "explorer.exe", "winlogon.exe"]
+      }
+    },
+    {
+      "id": "NETA-PROC-003",
+      "name": "Unexpected elevation",
+      "category": "process",
+      "severity": "medium",
+      "enabled": true,
+      "parameters": {
+        "expected_parent_names": ["sudo", "su", "pkexec", "doas", "consent.exe"]
+      }
+    },
+    {
+      "id": "NETA-PROC-004",
+      "name": "Rapid child process fanout",
+      "category": "process",
+      "severity": "medium",
+      "enabled": true,
+      "parameters": {
+        "child_count": 6,
+        "window_ms": 10000
+      }
+    },
+    {
+      "id": "NETA-PROC-005",
+      "name": "Short-lived process burst",
+      "category": "process",
+      "severity": "medium",
+      "enabled": true,
+      "parameters": {
+        "child_count": 6,
+        "max_lifetime_ms": 2000,
+        "window_ms": 15000
+      }
     }
   ]
 }
