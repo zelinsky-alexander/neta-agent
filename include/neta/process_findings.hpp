@@ -82,12 +82,17 @@ public:
                                                       const ProcessGraph& graph);
 
 private:
+    using ProcessWindowMap = std::unordered_map<ProcessInstanceKey, std::deque<std::uint64_t>, ProcessInstanceKeyHash>;
+
     std::vector<ProcessFinding> evaluate_node(const ProcessNode& node,
                                               const std::vector<ProcessNode>& nodes) const;
     ProcessFindingConfig config_;
+    std::vector<rules::RuleDefinition> custom_process_rules_;
     std::unordered_map<ProcessInstanceKey, std::uint64_t, ProcessInstanceKeyHash> starts_;
-    std::unordered_map<ProcessInstanceKey, std::deque<std::uint64_t>, ProcessInstanceKeyHash> child_starts_;
-    std::unordered_map<ProcessInstanceKey, std::deque<std::uint64_t>, ProcessInstanceKeyHash> short_exits_;
+    ProcessWindowMap child_starts_;
+    ProcessWindowMap short_exits_;
+    std::unordered_map<std::string, ProcessWindowMap> custom_child_starts_;
+    std::unordered_map<std::string, ProcessWindowMap> custom_short_exits_;
 };
 
 [[nodiscard]] const char* to_string(ProcessFindingSeverity severity) noexcept;
