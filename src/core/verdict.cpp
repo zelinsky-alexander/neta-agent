@@ -20,11 +20,16 @@ constexpr const char* kInboundTrustRule =
     "verification_failure=SUSPICIOUS,authenticated_without_accepted_principal=UNVERIFIED,"
     "accepted_issuer_spki=STABLE,accepted_principal_identity_change=CHANGED";
 
-bool is_default_semantics(const RuleSet& rules) {
-    return rules.rtt_ratio == 2.0 && rules.rttvar_ratio == 2.0 &&
+bool is_previous_default_semantics(const RuleSet& rules) {
+    return rules.performance_enabled && rules.rtt_ratio == 2.0 && rules.rttvar_ratio == 2.0 &&
            rules.retransmission_threshold == 2 && rules.rtt_weight == 0.50 &&
            rules.rttvar_weight == 0.20 && rules.retransmission_weight == 0.30 &&
-           rules.degraded_threshold == 0.50 && rules.inbound_authenticated_identity;
+           rules.degraded_threshold == 0.50 && rules.outbound_tls_identity &&
+           rules.outbound_require_chain_valid && rules.outbound_require_hostname_valid &&
+           rules.outbound_compare_spki && rules.inbound_authenticated_identity &&
+           rules.inbound_require_exact_evidence && rules.inbound_require_peer_certificate &&
+           rules.inbound_require_peer_authentication && rules.inbound_verification_failure_suspicious &&
+           rules.inbound_compare_spki && rules.inbound_compare_issuer;
 }
 
 std::string number_text(double value) {
@@ -33,9 +38,28 @@ std::string number_text(double value) {
     return out.str();
 }
 
+void append_rule_definition(std::ostringstream& canonical, const rules::RuleDefinition& definition) {
+    canonical << "|rule:" << definition.id
+              << ",enabled=" << (definition.enabled ? '1' : '0')
+              << ",severity=" << definition.severity;
+    for (const auto& [name, value] : definition.numeric_parameters)
+        canonical << ",n:" << name << '=' << number_text(value);
+    for (const auto& [name, value] : definition.boolean_parameters)
+        canonical << ",b:" << name << '=' << (value ? '1' : '0');
+    for (const auto& [name, value] : definition.string_parameters)
+        canonical << ",s:" << name << '=' << value;
+    for (const auto& [name, values] : definition.string_list_parameters) {
+        canonical << ",l:" << name << '=';
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) canonical << ';';
+            canonical << values[i];
+        }
+    }
+}
+
 void evaluate_performance(AssuranceVerdict& verdict, const Baseline& baseline,
                           const AggregateMetrics& metrics, const RuleSet& rules) {
-    if (baseline.sample_count == 0 || baseline.rtt_median_us == 0) {
+    if (!rules.performance_enabled || baseline.sample_count == 0 || baseline.rtt_median_us == 0) {
         verdict.performance = PerformanceState::InsufficientEvidence;
         return;
     }
@@ -47,8 +71,7 @@ void evaluate_performance(AssuranceVerdict& verdict, const Baseline& baseline,
     }
     if (baseline.rttvar_median_us > 0 &&
         metrics.observed_rttvar_us >=
-            static_cast<std::uint64_t>(static_cast<double>(baseline.rttvar_median_us) *
-                                       rules.rttvar_ratio)) {
+            static_cast<std::uint64_t>(static_cast<double>(baseline.rttvar_median_us) * rules.rttvar_ratio)) {
         score += rules.rttvar_weight;
     }
     if (metrics.retransmission_delta >= rules.retransmission_threshold) {
@@ -81,6 +104,13 @@ std::optional<RuleSet> rule_set_for_version(const std::string& version) {
         legacy.inbound_authenticated_identity = false;
         return legacy;
     }
+    if (version == kPreviousRuleSetVersion) {
+        RuleSet previous;
+        previous.id = "neta-default";
+        previous.revision = 1;
+        previous.version = kPreviousRuleSetVersion;
+        return previous;
+    }
     if (version == kRuleSetVersion) return rules::RuleSetLoader::built_in();
 
     const auto active = current_rule_set();
@@ -92,13 +122,18 @@ std::string rule_set_canonical(const RuleSet& rules) {
     if (rules.version == kLegacyRuleSetVersion) {
         return std::string(kLegacyRuleSetVersion) + kNetworkRule;
     }
-
-    if (rules.version == kRuleSetVersion && is_default_semantics(rules)) {
-        return std::string(kRuleSetVersion) + kNetworkRule + kOutboundTrustRule + kInboundTrustRule;
+    if (rules.version == kPreviousRuleSetVersion && is_previous_default_semantics(rules)) {
+        return std::string(kPreviousRuleSetVersion) + kNetworkRule + kOutboundTrustRule + kInboundTrustRule;
     }
 
     std::ostringstream canonical;
-    canonical << rules.version
+    canonical << rules.version << "|id=" << rules.id << "|revision=" << rules.revision;
+    if (!rules.definitions.empty()) {
+        for (const auto& definition : rules.definitions) append_rule_definition(canonical, definition);
+        return canonical.str();
+    }
+
+    canonical << "|performance_enabled=" << bool_text(rules.performance_enabled)
               << "|network_path_degradation:rtt_ratio=" << number_text(rules.rtt_ratio)
               << ",rttvar_ratio=" << number_text(rules.rttvar_ratio)
               << ",retransmissions=" << rules.retransmission_threshold
@@ -106,8 +141,17 @@ std::string rule_set_canonical(const RuleSet& rules) {
               << number_text(rules.rttvar_weight) << '/'
               << number_text(rules.retransmission_weight)
               << ",threshold=" << number_text(rules.degraded_threshold)
-              << kOutboundTrustRule
-              << "|inbound_mtls_identity:enabled=" << bool_text(rules.inbound_authenticated_identity);
+              << "|outbound_tls_identity:enabled=" << bool_text(rules.outbound_tls_identity)
+              << ",chain=" << bool_text(rules.outbound_require_chain_valid)
+              << ",hostname=" << bool_text(rules.outbound_require_hostname_valid)
+              << ",spki=" << bool_text(rules.outbound_compare_spki)
+              << "|inbound_mtls_identity:enabled=" << bool_text(rules.inbound_authenticated_identity)
+              << ",exact=" << bool_text(rules.inbound_require_exact_evidence)
+              << ",cert=" << bool_text(rules.inbound_require_peer_certificate)
+              << ",auth=" << bool_text(rules.inbound_require_peer_authentication)
+              << ",verify_suspicious=" << bool_text(rules.inbound_verification_failure_suspicious)
+              << ",spki=" << bool_text(rules.inbound_compare_spki)
+              << ",issuer=" << bool_text(rules.inbound_compare_issuer);
     return canonical.str();
 }
 
@@ -116,7 +160,6 @@ std::string rule_set_hash(const RuleSet& rules) {
 }
 
 std::string rule_set_canonical() { return rule_set_canonical(current_rule_set()); }
-
 std::string rule_set_hash() { return rule_set_hash(current_rule_set()); }
 
 AggregateMetrics aggregate_metrics(const std::vector<TcpSnapshot>& samples) {
@@ -124,10 +167,8 @@ AggregateMetrics aggregate_metrics(const std::vector<TcpSnapshot>& samples) {
     if (samples.empty()) return result;
     for (const auto& sample : samples) {
         if (sample.rtt_us != 0) {
-            result.observed_rtt_us = std::max<std::uint64_t>(result.observed_rtt_us,
-                                                             sample.rtt_us);
-            result.observed_rttvar_us = std::max<std::uint64_t>(result.observed_rttvar_us,
-                                                                 sample.rtt_variance_us);
+            result.observed_rtt_us = std::max<std::uint64_t>(result.observed_rtt_us, sample.rtt_us);
+            result.observed_rttvar_us = std::max<std::uint64_t>(result.observed_rttvar_us, sample.rtt_variance_us);
         }
     }
     const auto first = samples.front().total_retrans;
@@ -142,15 +183,12 @@ InboundTrustContext inbound_trust_context(const std::vector<TlsSessionEvidence>&
     std::vector<const TlsSessionEvidence*> exact;
 
     for (const auto& item : evidence) {
-        const bool inbound_relation =
-            item.relation == TlsSessionRelation::InboundTlsSession ||
-            item.relation == TlsSessionRelation::InboundClientIdentity;
+        const bool inbound_relation = item.relation == TlsSessionRelation::InboundTlsSession ||
+                                      item.relation == TlsSessionRelation::InboundClientIdentity;
         if (item.observation.local_role != TlsSessionRole::Server || !inbound_relation) continue;
         relevant.push_back(&item);
         if (item.observation.fidelity == EvidenceFidelity::Exact &&
-            item.correlation_fidelity == EvidenceFidelity::Exact) {
-            exact.push_back(&item);
-        }
+            item.correlation_fidelity == EvidenceFidelity::Exact) exact.push_back(&item);
     }
 
     context.tls_session_observed = !relevant.empty();
@@ -170,8 +208,7 @@ InboundTrustContext inbound_trust_context(const std::vector<TlsSessionEvidence>&
         return context;
     }
 
-    const auto& selected = *exact.front();
-    const auto& observation = selected.observation;
+    const auto& observation = exact.front()->observation;
     context.exact_evidence = true;
     context.peer_certificate_present = observation.peer_certificate_present;
     context.peer_verification_required = observation.peer_verification_required;
@@ -180,7 +217,7 @@ InboundTrustContext inbound_trust_context(const std::vector<TlsSessionEvidence>&
     context.spki_sha256 = observation.spki_sha256;
     context.subject = observation.subject;
     context.issuer = observation.issuer;
-    context.evidence_hash = tls_session_evidence_hash(selected);
+    context.evidence_hash = tls_session_evidence_hash(*exact.front());
     return context;
 }
 
@@ -193,9 +230,7 @@ std::string inbound_client_baseline_key(const ConnectionSummary& connection,
     if (process_identity.empty()) return {};
 
     std::string canonical = "uid=" + std::to_string(connection.process.uid) + "|" + process_identity;
-    if (connection.network_namespace_inode) {
-        canonical += "|netns=" + std::to_string(*connection.network_namespace_inode);
-    }
+    if (connection.network_namespace_inode) canonical += "|netns=" + std::to_string(*connection.network_namespace_inode);
     canonical += "|subject=" + client_subject;
     return "inbound-client:" + sha256_hex(canonical);
 }
@@ -209,12 +244,16 @@ AssuranceVerdict evaluate(const Baseline& baseline, const AggregateMetrics& metr
 
     evaluate_performance(verdict, baseline, metrics, rules);
 
-    if (!tls || baseline.accepted_spki_sha256.empty()) {
+    if (!rules.outbound_tls_identity) {
         verdict.trust = TrustState::Unverified;
-    } else if (!tls->chain_valid || !tls->hostname_valid) {
+        verdict.trust_hypothesis = "OUTBOUND_TRUST_POLICY_DISABLED";
+    } else if (!tls || baseline.accepted_spki_sha256.empty()) {
+        verdict.trust = TrustState::Unverified;
+    } else if ((rules.outbound_require_chain_valid && !tls->chain_valid) ||
+               (rules.outbound_require_hostname_valid && !tls->hostname_valid)) {
         verdict.trust = TrustState::Suspicious;
         verdict.trust_hypothesis = "TLS_VALIDATION_FAILURE";
-    } else if (tls->spki_sha256 != baseline.accepted_spki_sha256) {
+    } else if (rules.outbound_compare_spki && tls->spki_sha256 != baseline.accepted_spki_sha256) {
         verdict.trust = TrustState::Changed;
         verdict.trust_hypothesis = "TLS_IDENTITY_CHANGE";
     } else {
@@ -249,24 +288,24 @@ AssuranceVerdict evaluate_inbound(const std::optional<Baseline>& accepted_identi
 
     if (!rules.inbound_authenticated_identity) {
         verdict.trust = TrustState::Unverified;
-        verdict.trust_hypothesis = "INBOUND_TRUST_POLICY_UNAVAILABLE";
+        verdict.trust_hypothesis = "INBOUND_TRUST_POLICY_DISABLED";
     } else if (context.ambiguous) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_CLIENT_IDENTITY_AMBIGUOUS";
     } else if (!context.tls_session_observed) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_TLS_EVIDENCE_UNAVAILABLE";
-    } else if (!context.exact_evidence) {
+    } else if (rules.inbound_require_exact_evidence && !context.exact_evidence) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_TLS_EVIDENCE_NOT_EXACT";
-    } else if (!context.peer_certificate_present) {
+    } else if (rules.inbound_require_peer_certificate && !context.peer_certificate_present) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_CLIENT_CERTIFICATE_ABSENT";
-    } else if (context.peer_verification_required && context.verify_result &&
-               *context.verify_result != 0) {
+    } else if (rules.inbound_verification_failure_suspicious && context.peer_verification_required &&
+               context.verify_result && *context.verify_result != 0) {
         verdict.trust = TrustState::Suspicious;
         verdict.trust_hypothesis = "INBOUND_CLIENT_CERTIFICATE_VERIFICATION_FAILURE";
-    } else if (!context.peer_authenticated) {
+    } else if (rules.inbound_require_peer_authentication && !context.peer_authenticated) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_CLIENT_CERTIFICATE_NOT_AUTHENTICATED";
     } else if (context.subject.empty()) {
@@ -275,8 +314,8 @@ AssuranceVerdict evaluate_inbound(const std::optional<Baseline>& accepted_identi
     } else if (!accepted_identity || accepted_identity->accepted_spki_sha256.empty()) {
         verdict.trust = TrustState::Unverified;
         verdict.trust_hypothesis = "INBOUND_CLIENT_IDENTITY_NOT_ACCEPTED";
-    } else if (context.spki_sha256 != accepted_identity->accepted_spki_sha256 ||
-               (!accepted_identity->accepted_issuer.empty() &&
+    } else if ((rules.inbound_compare_spki && context.spki_sha256 != accepted_identity->accepted_spki_sha256) ||
+               (rules.inbound_compare_issuer && !accepted_identity->accepted_issuer.empty() &&
                 context.issuer != accepted_identity->accepted_issuer)) {
         verdict.trust = TrustState::Changed;
         verdict.trust_hypothesis = "INBOUND_CLIENT_IDENTITY_CHANGE";
@@ -296,8 +335,7 @@ AssuranceVerdict evaluate_inbound(const std::optional<Baseline>& accepted_identi
               << "|tls_ambiguous=" << bool_text(context.ambiguous)
               << "|peer_cert=" << bool_text(context.peer_certificate_present)
               << "|verify_required=" << bool_text(context.peer_verification_required)
-              << "|verify_result="
-              << (context.verify_result ? std::to_string(*context.verify_result) : std::string("none"))
+              << "|verify_result=" << (context.verify_result ? std::to_string(*context.verify_result) : std::string("none"))
               << "|peer_authenticated=" << bool_text(context.peer_authenticated)
               << "|client_subject=" << context.subject
               << "|client_issuer=" << context.issuer
