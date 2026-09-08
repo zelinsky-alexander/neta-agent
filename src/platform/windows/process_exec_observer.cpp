@@ -17,12 +17,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <deque>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -40,6 +43,16 @@ constexpr std::size_t kMaxQueuedEvents = 8192;
 
 bool same_guid(const GUID& left, const GUID& right) noexcept {
     return std::memcmp(&left, &right, sizeof(GUID)) == 0;
+}
+
+GUID make_session_guid() noexcept {
+    GUID guid{0x8c5a8e2b, 0x6b85, 0x4be0, {0x91, 0x23, 0x5e, 0x54, 0x41, 0x50, 0x35, 0x01}};
+    const auto pid = static_cast<std::uint32_t>(GetCurrentProcessId());
+    const auto tick = static_cast<std::uint32_t>(GetTickCount64());
+    guid.Data1 ^= pid;
+    guid.Data2 ^= static_cast<unsigned short>(tick & 0xffffU);
+    guid.Data3 ^= static_cast<unsigned short>((tick >> 16U) & 0xffffU);
+    return guid;
 }
 
 std::vector<std::byte> property_bytes(const EVENT_RECORD& record, const wchar_t* name) {
@@ -66,6 +79,43 @@ std::optional<T> scalar_property(const EVENT_RECORD& record, const wchar_t* name
     T value{};
     std::memcpy(&value, bytes.data(), sizeof(T));
     return value;
+}
+
+template <typename T>
+std::optional<T> raw_scalar(const EVENT_RECORD& record, std::size_t offset) {
+    if (record.UserData == nullptr ||
+        offset + sizeof(T) > static_cast<std::size_t>(record.UserDataLength)) {
+        return std::nullopt;
+    }
+    T value{};
+    const auto* bytes = static_cast<const std::byte*>(record.UserData);
+    std::memcpy(&value, bytes + offset, sizeof(T));
+    return value;
+}
+
+std::size_t process_pointer_size(const EVENT_RECORD& record) noexcept {
+    return (record.EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0U ? 4U : 8U;
+}
+
+std::optional<std::uint32_t> process_id(const EVENT_RECORD& record) {
+    if (const auto value = scalar_property<std::uint32_t>(record, L"ProcessId")) return value;
+    return raw_scalar<std::uint32_t>(record, process_pointer_size(record));
+}
+
+std::optional<std::uint32_t> parent_process_id(const EVENT_RECORD& record) {
+    if (const auto value = scalar_property<std::uint32_t>(record, L"ParentId")) return value;
+    return raw_scalar<std::uint32_t>(record, process_pointer_size(record) + sizeof(std::uint32_t));
+}
+
+std::optional<std::uint64_t> unique_process_key(const EVENT_RECORD& record) {
+    if (const auto value = scalar_property<std::uint64_t>(record, L"UniqueProcessKey")) return value;
+    if (process_pointer_size(record) == 4U) {
+        if (const auto value = raw_scalar<std::uint32_t>(record, 0)) {
+            return static_cast<std::uint64_t>(*value);
+        }
+        return std::nullopt;
+    }
+    return raw_scalar<std::uint64_t>(record, 0);
 }
 
 std::string wide_to_utf8(const wchar_t* text, std::size_t length) {
@@ -111,6 +161,11 @@ std::optional<std::uint64_t> process_creation_key(DWORD pid) {
     value.LowPart = creation.dwLowDateTime;
     value.HighPart = creation.dwHighDateTime;
     return value.QuadPart;
+}
+
+std::optional<std::uint64_t> filetime_to_ns(std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint64_t>::max() / 100ULL) return std::nullopt;
+    return value * 100ULL;
 }
 
 std::string process_image(DWORD pid) {
@@ -187,13 +242,14 @@ TokenEvidence process_token_evidence(DWORD pid) {
     return result;
 }
 
-std::vector<std::byte> trace_properties_buffer(const std::wstring& name) {
+std::vector<std::byte> trace_properties_buffer(const std::wstring& name, const GUID& guid) {
     const auto bytes = sizeof(EVENT_TRACE_PROPERTIES) + (name.size() + 1U) * sizeof(wchar_t);
     std::vector<std::byte> buffer(bytes);
     auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
     properties->Wnode.BufferSize = static_cast<ULONG>(bytes);
     properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-    properties->Wnode.ClientContext = 1;
+    properties->Wnode.Guid = guid;
+    properties->Wnode.ClientContext = 2;
     properties->EnableFlags = EVENT_TRACE_FLAG_PROCESS;
     properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
     properties->FlushTimer = 1;
@@ -206,12 +262,12 @@ std::vector<std::byte> trace_properties_buffer(const std::wstring& name) {
 
 class WindowsProcessExecObserver final : public ProcessExecObserver {
 public:
-    WindowsProcessExecObserver() {
+    WindowsProcessExecObserver() : session_guid_(make_session_guid()) {
         capability_.built_in = true;
         capability_.source = "windows:etw-process";
         session_name_ = L"NETA-MS5-PROCESS-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
                         std::to_wstring(GetTickCount64());
-        properties_buffer_ = trace_properties_buffer(session_name_);
+        properties_buffer_ = trace_properties_buffer(session_name_, session_guid_);
         auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(properties_buffer_.data());
         const ULONG start = StartTraceW(&session_handle_, session_name_.c_str(), properties);
         if (start != ERROR_SUCCESS) {
@@ -262,7 +318,7 @@ public:
     ProcessExecHealth health() const override {
         if (!capability_.drop_counter || session_handle_ == 0) return {};
         std::uint64_t dropped = locally_dropped_.load(std::memory_order_relaxed);
-        auto buffer = trace_properties_buffer(session_name_);
+        auto buffer = trace_properties_buffer(session_name_, session_guid_);
         auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
         if (ControlTraceW(session_handle_, session_name_.c_str(), properties,
                           EVENT_TRACE_CONTROL_QUERY) == ERROR_SUCCESS) {
@@ -298,7 +354,7 @@ private:
         }
         condition_.notify_all();
         if (session_handle_ != 0) {
-            auto buffer = trace_properties_buffer(session_name_);
+            auto buffer = trace_properties_buffer(session_name_, session_guid_);
             auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
             static_cast<void>(ControlTraceW(session_handle_, session_name_.c_str(), properties,
                                             EVENT_TRACE_CONTROL_STOP));
@@ -313,25 +369,41 @@ private:
         const bool exit = opcode == kProcessEnd || opcode == kProcessDcEnd || opcode == kProcessDefunct;
         if (!start && !exit) return;
 
-        const auto pid = scalar_property<std::uint32_t>(record, L"ProcessId");
+        const auto pid = process_id(record);
         if (!pid || *pid == 0) return;
 
         ProcessExecEvent event;
         event.type = exit ? ProcessExecEventType::Exit : ProcessExecEventType::Start;
-        event.timestamp_ns = static_cast<std::uint64_t>(record.EventHeader.TimeStamp.QuadPart);
+        if (record.EventHeader.TimeStamp.QuadPart > 0) {
+            const auto timestamp = static_cast<std::uint64_t>(record.EventHeader.TimeStamp.QuadPart);
+            event.timestamp_ns = filetime_to_ns(timestamp).value_or(timestamp);
+        }
         event.pid = static_cast<std::int64_t>(*pid);
         event.tgid = static_cast<std::int64_t>(*pid);
-        if (const auto parent = scalar_property<std::uint32_t>(record, L"ParentId")) {
+
+        const auto parent = parent_process_id(record);
+        if (parent && *parent != 0) {
             event.parent_pid = static_cast<std::int64_t>(*parent);
             event.parent_tgid = static_cast<std::int64_t>(*parent);
+            if (const auto known = active_process_keys_.find(*parent);
+                known != active_process_keys_.end()) {
+                event.parent_platform_process_key = known->second;
+            } else if (const auto creation = process_creation_key(*parent)) {
+                event.parent_platform_process_key = *creation;
+                event.parent_process_start_time_ns = filetime_to_ns(*creation);
+            }
         }
-        if (const auto key = scalar_property<std::uint64_t>(record, L"UniqueProcessKey")) {
-            event.platform_process_key = *key;
-        }
-        event.process_start_time_ns = process_creation_key(*pid);
-        if (!event.platform_process_key) event.platform_process_key = event.process_start_time_ns;
 
         if (start) {
+            const auto creation = process_creation_key(*pid);
+            if (creation) {
+                event.platform_process_key = *creation;
+                event.process_start_time_ns = filetime_to_ns(*creation);
+            } else if (const auto unique = unique_process_key(record)) {
+                event.platform_process_key = *unique;
+            }
+            if (event.platform_process_key) active_process_keys_[*pid] = *event.platform_process_key;
+
             event.executable_path = process_image(*pid);
             if (event.executable_path.empty()) event.executable_path = text_property(record, L"ImageFileName");
             event.comm = leaf_name(event.executable_path);
@@ -342,6 +414,16 @@ private:
             event.user_identity = token.sid;
             event.integrity_level = token.integrity;
             event.elevated = token.elevated;
+        } else {
+            if (const auto known = active_process_keys_.find(*pid); known != active_process_keys_.end()) {
+                event.platform_process_key = known->second;
+                active_process_keys_.erase(known);
+            } else if (const auto unique = unique_process_key(record)) {
+                event.platform_process_key = *unique;
+            }
+            if (const auto status = scalar_property<std::int32_t>(record, L"ExitStatus")) {
+                event.exit_code = *status;
+            }
         }
 
         {
@@ -356,6 +438,7 @@ private:
     }
 
     ProcessExecCapability capability_;
+    GUID session_guid_{};
     std::wstring session_name_;
     std::vector<std::byte> properties_buffer_;
     TRACEHANDLE session_handle_{0};
@@ -364,6 +447,7 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<ProcessExecEvent> queue_;
+    std::unordered_map<std::uint32_t, std::uint64_t> active_process_keys_;
     bool stopping_{false};
     std::atomic<std::uint64_t> locally_dropped_{0};
 };
