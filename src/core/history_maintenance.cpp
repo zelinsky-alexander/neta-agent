@@ -88,6 +88,24 @@ WHERE NOT EXISTS (
     hosts.step_done();
 }
 
+void prune_process_orphans(sqlite3* db) {
+    if (!table_exists(db, "process_instances_ms5")) return;
+    if (!table_exists(db, "process_findings_ms5")) {
+        Statement all_exited(db, "DELETE FROM process_instances_ms5 WHERE exited_at_ns IS NOT NULL;");
+        all_exited.step_done();
+        return;
+    }
+    Statement processes(db, R"SQL(
+DELETE FROM process_instances_ms5
+WHERE exited_at_ns IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM process_findings_ms5 f
+      WHERE f.process_key = process_instances_ms5.process_key
+  );
+)SQL");
+    processes.step_done();
+}
+
 void prune_orphans(sqlite3* db) {
     Statement processes(db, R"SQL(
 DELETE FROM processes
@@ -125,6 +143,45 @@ AND EXISTS (
     baselines.step_done();
 
     prune_environment_orphans(db);
+    prune_process_orphans(db);
+}
+
+int prune_old_process_findings(sqlite3* db, bool reported_only) {
+    if (!table_exists(db, "process_findings_ms5")) return 0;
+    const char* sql = reported_only ? R"SQL(
+DELETE FROM process_findings_ms5
+WHERE finding_id IN (
+    SELECT finding_id FROM process_findings_ms5
+    WHERE report_state='REPORTED'
+    ORDER BY last_seen_ns ASC,finding_id ASC LIMIT 8
+);
+)SQL" : R"SQL(
+DELETE FROM process_findings_ms5
+WHERE finding_id IN (
+    SELECT finding_id FROM process_findings_ms5
+    ORDER BY CASE WHEN report_state='REPORTED' THEN 0 ELSE 1 END,
+             last_seen_ns ASC,finding_id ASC LIMIT 1
+);
+)SQL";
+    Statement statement(db, sql);
+    statement.step_done();
+    return sqlite3_changes(db);
+}
+
+int prune_unreferenced_process_batch(sqlite3* db) {
+    if (!table_exists(db, "process_instances_ms5") ||
+        !table_exists(db, "process_findings_ms5")) return 0;
+    Statement statement(db, R"SQL(
+DELETE FROM process_instances_ms5
+WHERE process_key IN (
+    SELECT p.process_key FROM process_instances_ms5 p
+    WHERE p.exited_at_ns IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM process_findings_ms5 f WHERE f.process_key=p.process_key)
+    ORDER BY p.updated_at_ns ASC,p.process_key ASC LIMIT 128
+);
+)SQL");
+    statement.step_done();
+    return sqlite3_changes(db);
 }
 
 } // namespace
@@ -183,6 +240,12 @@ WHERE id IN (
         normal.step_done();
         int removed = sqlite3_changes(db_);
         if (removed == 0) {
+            removed = prune_unreferenced_process_batch(db_);
+        }
+        if (removed == 0) {
+            removed = prune_old_process_findings(db_, true);
+        }
+        if (removed == 0) {
             Statement anomalous(db_, R"SQL(
 DELETE FROM connections
 WHERE id IN (
@@ -194,6 +257,11 @@ WHERE id IN (
 )SQL");
             anomalous.step_done();
             removed = sqlite3_changes(db_);
+        }
+        if (removed == 0) {
+            // Last-resort parity with anomalous connection pruning: preserve the
+            // bounded-storage guarantee even if only unsent process findings remain.
+            removed = prune_old_process_findings(db_, false);
         }
         if (removed == 0) break;
         bytes = compact_and_measure();
