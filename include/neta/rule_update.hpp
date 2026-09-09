@@ -8,6 +8,7 @@ namespace neta {
 
 struct ActiveRuleBundleState {
     std::filesystem::path path;
+    std::string id;
     std::uint64_t revision{0};
     std::string version;
     std::string sha256;
