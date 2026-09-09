@@ -15,6 +15,12 @@ on:
       - 'LICENSE'
       - 'THIRD_PARTY_NOTICES.md'
   workflow_dispatch:
+    inputs:
+      publish_development:
+        description: Publish immutable dev release for the selected ref
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -255,7 +261,7 @@ jobs:
 
   publish-development-linux:
     name: Publish Immutable Linux Development Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.publish_development)
     runs-on: ubuntu-24.04
     needs:
       - linux-amd64
@@ -393,7 +399,7 @@ jobs:
 
   finalize-development-release:
     name: Add Windows To Development Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.publish_development)
     runs-on: ubuntu-24.04
     needs:
       - publish-development-linux
