@@ -1,5 +1,7 @@
 #pragma once
 
+#include "neta/rules/rule_exclusion.hpp"
+
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -17,6 +19,7 @@ public:
     std::string category;
     std::string severity;
     bool enabled{true};
+    RuleExclusion exclude;
     std::map<std::string, double> numeric_parameters;
     std::map<std::string, bool> boolean_parameters;
     std::map<std::string, std::string> string_parameters;
