@@ -6,6 +6,7 @@
 #include "neta/history_store.hpp"
 #include "neta/platform.hpp"
 #include "neta/process_finding_runtime.hpp"
+#include "neta/rm2_reporting.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/transfer_assurance.hpp"
@@ -342,13 +343,17 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
             std::cerr << "Final transfer sampling failed for CONN-" << connection_id
                       << "; observation continues: " << error.what() << std::endl;
         }
-        const auto transfer_reporting = auto_report_large_ingress(
+        const auto transfer_reporting = auto_report_rule_large_ingress(
             store, transfer_store, connection_id, reporting_policy);
         log_transfer_reporting_result(transfer_reporting);
 
-        const auto behavior_reporting = auto_report_periodic_behavior(
+        const auto behavior_reporting = auto_report_rule_periodic_behavior(
             store, connection_id, reporting_policy);
         log_behavior_reporting_result(behavior_reporting);
+
+        const auto context_reporting = auto_report_context_rules(
+            store, transfer_store, connection_id, reporting_policy);
+        log_reporting_result(context_reporting, "RM2 context rules");
 
         try {
             if (!finalize_inbound_connection(connection_id, store)) return;
