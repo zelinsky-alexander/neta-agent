@@ -38,8 +38,19 @@ std::string number_text(double value) {
     return out.str();
 }
 
+void append_list(std::ostringstream& canonical, const char* prefix,
+                 const std::vector<std::string>& values) {
+    if (values.empty()) return;
+    canonical << ',' << prefix << '=';
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) canonical << ';';
+        canonical << values[i];
+    }
+}
+
 void append_rule_definition(std::ostringstream& canonical, const rules::RuleDefinition& definition) {
     canonical << "|rule:" << definition.id
+              << ",engine=" << definition.engine_rule_id
               << ",enabled=" << (definition.enabled ? '1' : '0')
               << ",severity=" << definition.severity;
     for (const auto& [name, value] : definition.numeric_parameters)
@@ -55,6 +66,17 @@ void append_rule_definition(std::ostringstream& canonical, const rules::RuleDefi
             canonical << values[i];
         }
     }
+    append_list(canonical, "x:process_names", definition.exclude.process_names);
+    append_list(canonical, "x:executable_paths", definition.exclude.executable_paths);
+    append_list(canonical, "x:process_path_prefixes", definition.exclude.process_path_prefixes);
+    append_list(canonical, "x:parent_process_names", definition.exclude.parent_process_names);
+    append_list(canonical, "x:users", definition.exclude.users);
+    append_list(canonical, "x:remote_hosts", definition.exclude.remote_hosts);
+    append_list(canonical, "x:remote_ips", definition.exclude.remote_ips);
+    append_list(canonical, "x:remote_ports", definition.exclude.remote_ports);
+    append_list(canonical, "x:local_ports", definition.exclude.local_ports);
+    append_list(canonical, "x:domains", definition.exclude.domains);
+    append_list(canonical, "x:directions", definition.exclude.directions);
 }
 
 void evaluate_performance(AssuranceVerdict& verdict, const Baseline& baseline,
@@ -63,7 +85,6 @@ void evaluate_performance(AssuranceVerdict& verdict, const Baseline& baseline,
         verdict.performance = PerformanceState::InsufficientEvidence;
         return;
     }
-
     double score = 0.0;
     if (metrics.observed_rtt_us >=
         static_cast<std::uint64_t>(static_cast<double>(baseline.rtt_median_us) * rules.rtt_ratio)) {
@@ -74,9 +95,7 @@ void evaluate_performance(AssuranceVerdict& verdict, const Baseline& baseline,
             static_cast<std::uint64_t>(static_cast<double>(baseline.rttvar_median_us) * rules.rttvar_ratio)) {
         score += rules.rttvar_weight;
     }
-    if (metrics.retransmission_delta >= rules.retransmission_threshold) {
-        score += rules.retransmission_weight;
-    }
+    if (metrics.retransmission_delta >= rules.retransmission_threshold) score += rules.retransmission_weight;
     verdict.rule_confidence = score;
     if (score >= rules.degraded_threshold) {
         verdict.performance = PerformanceState::Degraded;
@@ -112,6 +131,13 @@ std::optional<RuleSet> rule_set_for_version(const std::string& version) {
         return previous;
     }
     if (version == kRm1RuleSetVersion) return rules::RuleSetLoader::rm1_built_in();
+    if (version == kRm2RuleSetVersion) {
+        auto previous = rules::RuleSetLoader::built_in();
+        previous.version = kRm2RuleSetVersion;
+        previous.revision = 3;
+        for (auto& definition : previous.definitions) definition.exclude = {};
+        return previous;
+    }
     if (version == kRuleSetVersion) return rules::RuleSetLoader::built_in();
 
     const auto active = current_rule_set();
@@ -156,10 +182,7 @@ std::string rule_set_canonical(const RuleSet& rules) {
     return canonical.str();
 }
 
-std::string rule_set_hash(const RuleSet& rules) {
-    return sha256_hex(rule_set_canonical(rules));
-}
-
+std::string rule_set_hash(const RuleSet& rules) { return sha256_hex(rule_set_canonical(rules)); }
 std::string rule_set_canonical() { return rule_set_canonical(current_rule_set()); }
 std::string rule_set_hash() { return rule_set_hash(current_rule_set()); }
 
@@ -182,7 +205,6 @@ InboundTrustContext inbound_trust_context(const std::vector<TlsSessionEvidence>&
     InboundTrustContext context;
     std::vector<const TlsSessionEvidence*> relevant;
     std::vector<const TlsSessionEvidence*> exact;
-
     for (const auto& item : evidence) {
         const bool inbound_relation = item.relation == TlsSessionRelation::InboundTlsSession ||
                                       item.relation == TlsSessionRelation::InboundClientIdentity;
@@ -229,7 +251,6 @@ std::string inbound_client_baseline_key(const ConnectionSummary& connection,
         ? "exe=" + connection.process.executable_path
         : !connection.process.comm.empty() ? "comm=" + connection.process.comm : std::string{};
     if (process_identity.empty()) return {};
-
     std::string canonical = "uid=" + std::to_string(connection.process.uid) + "|" + process_identity;
     if (connection.network_namespace_inode) canonical += "|netns=" + std::to_string(*connection.network_namespace_inode);
     canonical += "|subject=" + client_subject;
@@ -242,7 +263,6 @@ AssuranceVerdict evaluate(const Baseline& baseline, const AggregateMetrics& metr
     verdict.rule_set_version = rules.version;
     verdict.rule_set_hash = rule_set_hash(rules);
     verdict.baseline_hash = baseline.sha256;
-
     evaluate_performance(verdict, baseline, metrics, rules);
 
     if (!rules.outbound_tls_identity) {
