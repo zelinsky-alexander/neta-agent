@@ -1,106 +1,27 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "neta-default",
-  "revision": 2,
-  "version": "neta-rules/0.3.0",
+  "revision": 3,
+  "version": "neta-rules/0.4.0",
   "rules": [
-    {
-      "id": "NETA-PERF-001",
-      "name": "Network path degradation",
-      "category": "performance",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "rtt_ratio": 2.0,
-        "rttvar_ratio": 2.0,
-        "retransmission_threshold": 2,
-        "rtt_weight": 0.50,
-        "rttvar_weight": 0.20,
-        "retransmission_weight": 0.30,
-        "degraded_threshold": 0.50
-      }
-    },
-    {
-      "id": "NETA-TRUST-001",
-      "name": "Outbound TLS identity",
-      "category": "trust",
-      "severity": "high",
-      "enabled": true,
-      "parameters": {
-        "require_chain_valid": true,
-        "require_hostname_valid": true,
-        "compare_spki": true
-      }
-    },
-    {
-      "id": "NETA-TRUST-002",
-      "name": "Inbound authenticated TLS identity",
-      "category": "trust",
-      "severity": "high",
-      "enabled": true,
-      "parameters": {
-        "require_exact_evidence": true,
-        "require_peer_certificate": true,
-        "require_peer_authentication": true,
-        "verification_failure_suspicious": true,
-        "compare_spki": true,
-        "compare_issuer": true
-      }
-    },
-    {
-      "id": "NETA-PROC-001",
-      "name": "Execution from transient path",
-      "category": "process",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "path_prefixes": ["/tmp/", "/var/tmp/", "/dev/shm/"],
-        "path_substrings": ["/appdata/local/temp/", "/windows/temp/"]
-      }
-    },
-    {
-      "id": "NETA-PROC-002",
-      "name": "Shell from unexpected parent",
-      "category": "process",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "shell_names": ["sh", "bash", "dash", "zsh", "ksh", "fish", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe"],
-        "expected_parent_names": ["sh", "bash", "dash", "zsh", "ksh", "fish", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe", "sshd", "sudo", "su", "login", "systemd", "init", "tmux", "screen", "gnome-terminal-server", "konsole", "windowsterminal.exe", "wt.exe", "conhost.exe", "explorer.exe", "winlogon.exe"]
-      }
-    },
-    {
-      "id": "NETA-PROC-003",
-      "name": "Unexpected elevation",
-      "category": "process",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "expected_parent_names": ["sudo", "su", "pkexec", "doas", "consent.exe"]
-      }
-    },
-    {
-      "id": "NETA-PROC-004",
-      "name": "Rapid child process fanout",
-      "category": "process",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "child_count": 6,
-        "window_ms": 10000
-      }
-    },
-    {
-      "id": "NETA-PROC-005",
-      "name": "Short-lived process burst",
-      "category": "process",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "child_count": 6,
-        "max_lifetime_ms": 2000,
-        "window_ms": 15000
-      }
-    }
+    {"id":"NETA-PERF-001","engine_rule_id":"NETA-PERF-001","name":"Network path degradation","category":"performance","severity":"medium","enabled":true,"parameters":{"rtt_ratio":2.0,"rttvar_ratio":2.0,"retransmission_threshold":2,"rtt_weight":0.50,"rttvar_weight":0.20,"retransmission_weight":0.30,"degraded_threshold":0.50}},
+    {"id":"NETA-TRUST-001","engine_rule_id":"NETA-TRUST-001","name":"Outbound TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_chain_valid":true,"require_hostname_valid":true,"compare_spki":true}},
+    {"id":"NETA-TRUST-002","engine_rule_id":"NETA-TRUST-002","name":"Inbound authenticated TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_exact_evidence":true,"require_peer_certificate":true,"require_peer_authentication":true,"verification_failure_suspicious":true,"compare_spki":true,"compare_issuer":true}},
+    {"id":"NETA-PROC-001","engine_rule_id":"NETA-PROC-001","name":"Execution from transient path","category":"process","severity":"medium","enabled":true,"parameters":{"path_prefixes":["/tmp/","/var/tmp/","/dev/shm/"],"path_substrings":["/appdata/local/temp/","/windows/temp/"]}},
+    {"id":"NETA-PROC-002","engine_rule_id":"NETA-PROC-002","name":"Shell from unexpected parent","category":"process","severity":"medium","enabled":true,"parameters":{"shell_names":["sh","bash","dash","zsh","ksh","fish","powershell","powershell.exe","pwsh","pwsh.exe","cmd","cmd.exe"],"expected_parent_names":["sh","bash","dash","zsh","ksh","fish","powershell","powershell.exe","pwsh","pwsh.exe","cmd","cmd.exe","sshd","sudo","su","login","systemd","init","tmux","screen","gnome-terminal-server","konsole","windowsterminal.exe","wt.exe","conhost.exe","explorer.exe","winlogon.exe"]}},
+    {"id":"NETA-PROC-003","engine_rule_id":"NETA-PROC-003","name":"Unexpected elevation","category":"process","severity":"medium","enabled":true,"parameters":{"expected_parent_names":["sudo","su","pkexec","doas","consent.exe"]}},
+    {"id":"NETA-PROC-004","engine_rule_id":"NETA-PROC-004","name":"Rapid child process fanout","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"window_ms":10000}},
+    {"id":"NETA-PROC-005","engine_rule_id":"NETA-PROC-005","name":"Short-lived process burst","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"max_lifetime_ms":2000,"window_ms":15000}},
+    {"id":"NETA-BEH-001","engine_rule_id":"NETA-BEH-001","name":"Periodic outbound connection pattern","category":"behavior","severity":"medium","enabled":true,"parameters":{"minimum_connections":8,"window_ms":90000,"minimum_interval_ms":3000,"maximum_interval_ms":15000,"interval_tolerance_ratio":0.20,"minimum_regular_fraction":0.80,"recent_connection_limit":512}},
+    {"id":"NETA-NET-001","engine_rule_id":"NETA-NET-001","name":"Large ingress transfer","category":"network","severity":"low","enabled":true,"parameters":{"minimum_bytes_received":268435456}},
+    {"id":"NETA-NET-002","engine_rule_id":"NETA-NET-002","name":"TCP retransmission spike","category":"network","severity":"medium","enabled":true,"parameters":{"retransmission_threshold":5}},
+    {"id":"NETA-NET-003","engine_rule_id":"NETA-NET-003","name":"Unusual outbound destination port","category":"network","severity":"low","enabled":false,"parameters":{"allowed_ports":["22","25","53","80","110","123","143","443","465","587","853","993","995","3389"]}},
+    {"id":"NETA-NET-004","engine_rule_id":"NETA-NET-004","name":"Rare outbound destination","category":"network","severity":"medium","enabled":false,"parameters":{"maximum_prevalence":2}},
+    {"id":"NETA-DNS-001","engine_rule_id":"NETA-DNS-001","name":"Repeated DNS resolution failures","category":"dns","severity":"medium","enabled":true,"parameters":{"minimum_failures":3}},
+    {"id":"NETA-DNS-002","engine_rule_id":"NETA-DNS-002","name":"DNS answer and connection mismatch","category":"dns","severity":"medium","enabled":true,"parameters":{"require_remote_ip_match":true}},
+    {"id":"NETA-DNS-003","engine_rule_id":"NETA-DNS-003","name":"DNS answer churn","category":"dns","severity":"low","enabled":false,"parameters":{"maximum_distinct_answers":12}},
+    {"id":"NETA-TLS-001","engine_rule_id":"NETA-TLS-001","name":"Application TLS validation failure","category":"tls","severity":"high","enabled":true,"parameters":{"require_peer_authentication":true,"verification_failure_match":true}},
+    {"id":"NETA-TLS-002","engine_rule_id":"NETA-TLS-002","name":"TLS peer identity change","category":"tls","severity":"high","enabled":true,"parameters":{"compare_spki":true,"compare_issuer":true}},
+    {"id":"NETA-ROUTE-001","engine_rule_id":"NETA-ROUTE-001","name":"Unexpected route gateway or interface","category":"route","severity":"medium","enabled":false,"parameters":{"allowed_gateways":[],"allowed_interfaces":[]}}
   ]
 }
