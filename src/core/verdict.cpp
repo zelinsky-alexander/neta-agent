@@ -111,6 +111,7 @@ std::optional<RuleSet> rule_set_for_version(const std::string& version) {
         previous.version = kPreviousRuleSetVersion;
         return previous;
     }
+    if (version == kRm1RuleSetVersion) return rules::RuleSetLoader::rm1_built_in();
     if (version == kRuleSetVersion) return rules::RuleSetLoader::built_in();
 
     const auto active = current_rule_set();
