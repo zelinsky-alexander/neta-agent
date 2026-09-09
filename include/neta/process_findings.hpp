@@ -38,8 +38,6 @@ struct ProcessFinding {
     std::string interpretation;
 };
 
-// Explicit override used by focused tests and local embedding. Production default
-// construction is populated from the active declarative RuleSet.
 struct ProcessFindingConfig {
     std::string ruleset_version;
 
@@ -47,26 +45,31 @@ struct ProcessFindingConfig {
     std::string transient_path_severity;
     std::vector<std::string> transient_path_prefixes;
     std::vector<std::string> transient_path_substrings;
+    rules::RuleExclusion transient_path_exclude;
 
     bool unexpected_shell_enabled{false};
     std::string unexpected_shell_severity;
     std::vector<std::string> shell_names;
     std::vector<std::string> expected_shell_parent_names;
+    rules::RuleExclusion unexpected_shell_exclude;
 
     bool unexpected_elevation_enabled{false};
     std::string unexpected_elevation_severity;
     std::vector<std::string> expected_elevation_parent_names;
+    rules::RuleExclusion unexpected_elevation_exclude;
 
     bool fanout_enabled{false};
     std::string fanout_severity;
     std::size_t fanout_count{0};
     std::uint64_t fanout_window_ns{0};
+    rules::RuleExclusion fanout_exclude;
 
     bool short_lived_enabled{false};
     std::string short_lived_severity;
     std::size_t short_lived_count{0};
     std::uint64_t short_lived_max_ns{0};
     std::uint64_t short_lived_window_ns{0};
+    rules::RuleExclusion short_lived_exclude;
 };
 
 class ProcessFindingEngine {
@@ -76,8 +79,6 @@ public:
     explicit ProcessFindingEngine(ProcessFindingConfig config);
 
     [[nodiscard]] std::vector<ProcessFinding> evaluate_snapshot(const ProcessGraph& graph) const;
-
-    // Stateful event-time findings. Call after the graph has observed the event.
     [[nodiscard]] std::vector<ProcessFinding> observe(const ProcessExecEvent& event,
                                                       const ProcessGraph& graph);
 
