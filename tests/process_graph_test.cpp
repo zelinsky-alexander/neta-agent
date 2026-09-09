@@ -1,6 +1,8 @@
+#include "neta/context_rule_engine.hpp"
 #include "neta/process_finding_store.hpp"
 #include "neta/process_graph.hpp"
 #include "neta/process_findings.hpp"
+#include "neta/rules/rule_set_loader.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -270,6 +272,42 @@ int main() {
         assert(exit_findings.back().rule_id == "NETA-PROC-005");
     }
 
-    std::cout << "process graph, unified process rules, and MS5.2 persistence tests passed\n";
+    // RM2 keeps the RM1 snapshot replayable while expanding the built-in catalog.
+    {
+        const auto rm1 = rules::RuleSetLoader::rm1_built_in();
+        const auto rm2 = rules::RuleSetLoader::built_in();
+        assert(rm1.version == kRm1RuleSetVersion);
+        assert(rm1.definitions.size() == 8);
+        assert(rm2.version == kRuleSetVersion);
+        assert(rm2.definitions.size() == 19);
+    }
+
+    // A custom network rule is an independent instance of a trusted evaluator.
+    // It can match even when the default engine instance does not.
+    {
+        RuleSet rm2 = rules::RuleSetLoader::built_in();
+        auto custom = rm2.rule("NETA-NET-002");
+        custom.id = "CUS-RETRANS-STRICT";
+        custom.name = "Strict retransmission spike";
+        custom.severity = "high";
+        custom.numeric_parameters["retransmission_threshold"] = 1.0;
+        rm2.definitions.push_back(custom);
+
+        ConnectionRuleContext context;
+        context.connection.direction = ConnectionDirection::Outbound;
+        context.connection.remote_ip = "203.0.113.8";
+        context.connection.remote_port = 443;
+        context.metrics.retransmission_delta = 2;
+        const auto matches = ContextRuleEngine(rm2).evaluate(context);
+        assert(std::none_of(matches.begin(), matches.end(), [](const ContextRuleMatch& match) {
+            return match.rule_id == "NETA-NET-002";
+        }));
+        assert(std::any_of(matches.begin(), matches.end(), [](const ContextRuleMatch& match) {
+            return match.rule_id == "CUS-RETRANS-STRICT" && match.engine_rule_id == "NETA-NET-002" &&
+                   match.severity == "high";
+        }));
+    }
+
+    std::cout << "process graph, unified RM2 rules, and MS5.2 persistence tests passed\n";
     return 0;
 }
