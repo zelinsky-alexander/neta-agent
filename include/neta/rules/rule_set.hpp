@@ -12,11 +12,12 @@ namespace neta {
 inline constexpr const char* kLegacyRuleSetVersion = "neta-rules/0.1.0";
 inline constexpr const char* kPreviousRuleSetVersion = "neta-rules/0.2.0";
 inline constexpr const char* kRm1RuleSetVersion = "neta-rules/0.3.0";
-inline constexpr const char* kRuleSetVersion = "neta-rules/0.4.0";
+inline constexpr const char* kRm2RuleSetVersion = "neta-rules/0.4.0";
+inline constexpr const char* kRuleSetVersion = "neta-rules/0.4.1";
 
 struct RuleSet {
     std::string id{"neta-default"};
-    std::uint64_t revision{3};
+    std::uint64_t revision{4};
     std::uint64_t schema_version{2};
     std::string version{kRuleSetVersion};
 
@@ -45,9 +46,7 @@ struct RuleSet {
     std::vector<rules::RuleDefinition> definitions;
 
     [[nodiscard]] const rules::RuleDefinition& rule(const std::string& rule_id) const {
-        for (const auto& definition : definitions) {
-            if (definition.id == rule_id) return definition;
-        }
+        for (const auto& definition : definitions) if (definition.id == rule_id) return definition;
         throw std::runtime_error("rule is not present in rule set: " + rule_id);
     }
 };
