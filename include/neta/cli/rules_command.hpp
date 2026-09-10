@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace neta::cli {
 
@@ -48,6 +49,33 @@ inline void print_rule_parameters(const rules::RuleDefinition& rule) {
         }
         std::cout << "]\n";
     }
+}
+
+inline void print_named_values(const char* name, const std::vector<std::string>& values) {
+    if (values.empty()) return;
+    std::cout << "  " << name << ": [";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) std::cout << ", ";
+        std::cout << values[i];
+    }
+    std::cout << "]\n";
+}
+
+inline void print_rule_exclusions(const rules::RuleDefinition& rule) {
+    const auto& exclusion = rule.exclude;
+    if (exclusion.empty()) return;
+    std::cout << "Exclusions:\n";
+    print_named_values("process_names", exclusion.process_names);
+    print_named_values("executable_paths", exclusion.executable_paths);
+    print_named_values("process_path_prefixes", exclusion.process_path_prefixes);
+    print_named_values("parent_process_names", exclusion.parent_process_names);
+    print_named_values("users", exclusion.users);
+    print_named_values("remote_hosts", exclusion.remote_hosts);
+    print_named_values("remote_ips", exclusion.remote_ips);
+    print_named_values("remote_ports", exclusion.remote_ports);
+    print_named_values("local_ports", exclusion.local_ports);
+    print_named_values("domains", exclusion.domains);
+    print_named_values("directions", exclusion.directions);
 }
 
 inline int run_rules_command(int argc, char** argv) {
@@ -102,6 +130,7 @@ inline int run_rules_command(int argc, char** argv) {
                       << "Rule set: " << set.id << " / " << set.revision << "\n"
                       << "Version:  " << set.version << "\n";
             print_rule_parameters(rule);
+            print_rule_exclusions(rule);
             return 0;
         }
         throw std::runtime_error("unknown rule id: " + id);
