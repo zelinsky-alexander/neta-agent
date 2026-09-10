@@ -122,8 +122,9 @@ YaraXRuntimeUpdateResult update_yarax_runtime_from_coordinator(const std::filesy
         return result;
     }
 
-    ack(identity, state_dir, result.active_version, result.active_version,
-        read_trimmed("/usr/local/lib/neta/yara-x/current/ARCHIVE_SHA256"), result.desired_version, "DOWNLOADING");
+    const std::string previous_version = result.active_version;
+    const std::string previous_sha = read_trimmed("/usr/local/lib/neta/yara-x/current/ARCHIVE_SHA256");
+    ack(identity, state_dir, previous_version, previous_version, previous_sha, result.desired_version, "DOWNLOADING");
     try {
         const std::string arch = arch_name();
         if (arch.empty()) throw std::runtime_error("unsupported Linux architecture");
@@ -135,14 +136,19 @@ YaraXRuntimeUpdateResult update_yarax_runtime_from_coordinator(const std::filesy
             "mkdir -p \"$TMP/stage\"; tar -xzf \"$TMP/runtime.tgz\" -C \"$TMP/stage\"; "
             "test \"$(tr -d '[:space:]' < \"$TMP/stage/VERSION\")\" = " + shell_quote(result.desired_version) + "; "
             "ldd -r \"$TMP/stage/libyara_x_capi.so\" >/dev/null; ROOT=/usr/local/lib/neta/yara-x; mkdir -p \"$ROOT\"; "
+            "PREVIOUS=$(readlink \"$ROOT/current\" 2>/dev/null || true); "
             "DEST=\"$ROOT/" + result.desired_version + "\"; rm -rf \"$DEST.new\"; mkdir -p \"$DEST.new\"; "
             "install -m 0755 \"$TMP/stage/libyara_x_capi.so\" \"$DEST.new/libyara_x_capi.so\"; "
             "install -m 0644 \"$TMP/stage/VERSION\" \"$DEST.new/VERSION\"; "
             "test ! -f \"$TMP/stage/MANIFEST\" || install -m 0644 \"$TMP/stage/MANIFEST\" \"$DEST.new/MANIFEST\"; "
             "test ! -f \"$TMP/stage/LICENSE.YARA-X\" || install -m 0644 \"$TMP/stage/LICENSE.YARA-X\" \"$DEST.new/LICENSE.YARA-X\"; "
             "printf '%s\\n' \"$ACTUAL\" > \"$DEST.new/ARCHIVE_SHA256\"; rm -rf \"$DEST\"; mv \"$DEST.new\" \"$DEST\"; "
+            "if [ -n \"$PREVIOUS\" ]; then ln -sfn \"$PREVIOUS\" \"$ROOT/last-known-good.new\"; mv -Tf \"$ROOT/last-known-good.new\" \"$ROOT/last-known-good\"; fi; "
             "ln -sfn " + shell_quote(result.desired_version) + " \"$ROOT/current.new\"; mv -Tf \"$ROOT/current.new\" \"$ROOT/current\"; "
-            "ldd -r \"$ROOT/current/libyara_x_capi.so\" >/dev/null";
+            "if ! ldd -r \"$ROOT/current/libyara_x_capi.so\" >/dev/null 2>&1; then "
+            "  if [ -n \"$PREVIOUS\" ] && [ -e \"$ROOT/$PREVIOUS\" ]; then ln -sfn \"$PREVIOUS\" \"$ROOT/current.rollback\"; mv -Tf \"$ROOT/current.rollback\" \"$ROOT/current\"; else rm -f \"$ROOT/current\"; fi; "
+            "  exit 1; "
+            "fi";
         static_cast<void>(run_capture("bash -c " + shell_quote(script)));
         result.active_version = result.desired_version;
         result.changed = true;
@@ -150,6 +156,7 @@ YaraXRuntimeUpdateResult update_yarax_runtime_from_coordinator(const std::filesy
         ack(identity, state_dir, result.active_version, result.active_version, sha, result.desired_version, "ACTIVE");
         std::system("systemctl try-restart --no-block neta-agent.service >/dev/null 2>&1 || true");
     } catch (const std::exception& error) {
+        result.active_version = read_trimmed("/usr/local/lib/neta/yara-x/current/VERSION");
         result.state = "APPLY_FAILED";
         result.detail = error.what();
         try { ack(identity, state_dir, result.active_version, result.active_version,
