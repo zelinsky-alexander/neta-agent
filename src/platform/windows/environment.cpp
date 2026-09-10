@@ -13,21 +13,6 @@
 namespace neta::platform {
 namespace {
 
-class UnavailableNameResolutionObserver final : public NameResolutionObserver {
-public:
-    UnavailableNameResolutionObserver() {
-        capability_.source = "windows:dns";
-        capability_.unavailable_reason = "Windows DNS ETW collector is not implemented yet";
-    }
-
-    const NameResolutionCapability& capability() const noexcept override { return capability_; }
-    NameResolutionHealth health() const override { return {}; }
-    std::vector<NameResolutionObservation> poll(std::chrono::milliseconds) override { return {}; }
-
-private:
-    NameResolutionCapability capability_;
-};
-
 class UnavailableTlsSessionObserver final : public TlsSessionObserver {
 public:
     UnavailableTlsSessionObserver() {
@@ -94,15 +79,21 @@ PlatformCapabilities capabilities() {
     c.lifecycle_dropped_events = lifecycle->health().dropped_events;
     c.lifecycle_unavailable_reason = lifecycle_capability.unavailable_reason;
 
-    c.name_resolution_source = "windows:dns";
-    c.name_resolution_unavailable_reason = "Windows DNS ETW collector is not implemented yet";
+    const auto name_resolution = make_name_resolution_observer();
+    const auto& name_capability = name_resolution->capability();
+    const auto name_health = name_resolution->health();
+    c.application_name_resolution_events = name_capability.available();
+    c.name_resolution_drop_counter = name_capability.drop_counter;
+    c.name_resolution_dropped_events = name_health.dropped_events;
+    c.name_resolution_source = name_capability.source;
+    c.name_resolution_unavailable_reason = name_capability.unavailable_reason;
+    // DNS Client ETW is native system-resolver evidence and is strongly attributable,
+    // but it is not the same as an in-process resolver hook, so keep this conservative.
+    c.exact_dns_observation = false;
+
     c.tls_session_source = "windows:tls";
     c.tls_session_unavailable_reason = "Windows application TLS collector is not implemented yet";
     return c;
-}
-
-std::unique_ptr<NameResolutionObserver> make_name_resolution_observer() {
-    return std::make_unique<UnavailableNameResolutionObserver>();
 }
 
 std::unique_ptr<TlsSessionObserver> make_tls_session_observer() {
