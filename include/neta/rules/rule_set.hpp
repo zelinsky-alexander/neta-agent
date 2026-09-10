@@ -13,11 +13,11 @@ inline constexpr const char* kLegacyRuleSetVersion = "neta-rules/0.1.0";
 inline constexpr const char* kPreviousRuleSetVersion = "neta-rules/0.2.0";
 inline constexpr const char* kRm1RuleSetVersion = "neta-rules/0.3.0";
 inline constexpr const char* kRm2RuleSetVersion = "neta-rules/0.4.0";
-inline constexpr const char* kRuleSetVersion = "neta-rules/0.4.1";
+inline constexpr const char* kRuleSetVersion = "neta-rules/0.5.0";
 
 struct RuleSet {
     std::string id{"neta-default"};
-    std::uint64_t revision{4};
+    std::uint64_t revision{5};
     std::uint64_t schema_version{2};
     std::string version{kRuleSetVersion};
 
@@ -46,8 +46,11 @@ struct RuleSet {
     std::vector<rules::RuleDefinition> definitions;
 
     [[nodiscard]] const rules::RuleDefinition& rule(const std::string& rule_id) const {
-        for (const auto& definition : definitions) if (definition.id == rule_id) return definition;
-        throw std::runtime_error("rule is not present in rule set: " + rule_id);
+        std::string canonical = rule_id;
+        if (canonical.rfind("NETA-", 0) == 0) canonical.erase(0, 5);
+        if (canonical.rfind("CUS-", 0) == 0) canonical = "CST-" + canonical.substr(4);
+        for (const auto& definition : definitions) if (definition.id == canonical) return definition;
+        throw std::runtime_error("rule is not present in rule set: " + canonical);
     }
 };
 
