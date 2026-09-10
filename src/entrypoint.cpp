@@ -10,6 +10,7 @@
 #include "neta/windows_service.hpp"
 #endif
 
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
