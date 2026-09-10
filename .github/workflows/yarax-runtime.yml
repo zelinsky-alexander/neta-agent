@@ -12,6 +12,12 @@ on:
         required: true
         default: false
         type: boolean
+      priority:
+        description: Runtime rollout priority
+        required: true
+        default: NORMAL
+        type: choice
+        options: [NORMAL, HIGH, EMERGENCY]
 
 permissions:
   contents: write
@@ -37,25 +43,17 @@ jobs:
           repository: VirusTotal/yara-x
           ref: v${{ env.YARAX_VERSION }}
           path: yara-x
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: Install cargo-c
         run: cargo install cargo-c --locked
-
       - name: Build C API runtime
         working-directory: yara-x
         run: |
           set -euo pipefail
           cargo cbuild -p yara-x-capi --release
           LIB="$(find target -type f -path '*/release/libyara_x_capi.so' | head -n1)"
-          if [[ -z "$LIB" ]]; then
-            echo "libyara_x_capi.so not found" >&2
-            find target -maxdepth 5 -type f -name '*yara*x*capi*' -print || true
-            exit 1
-          fi
-          echo "Using YARA-X C API runtime: $LIB"
+          test -n "$LIB"
           mkdir -p ../runtime-package
           cp -L "$LIB" ../runtime-package/libyara_x_capi.so
           cp LICENSE ../runtime-package/LICENSE.YARA-X
@@ -66,25 +64,20 @@ jobs:
             echo "arch=${{ matrix.arch }}"
             echo "source=https://github.com/VirusTotal/yara-x/releases/tag/v${{ env.YARAX_VERSION }}"
           } > ../runtime-package/MANIFEST
-
       - name: Validate native runtime
         run: |
           set -euo pipefail
           file runtime-package/libyara_x_capi.so
           test -s runtime-package/libyara_x_capi.so
           readelf -h runtime-package/libyara_x_capi.so | grep -E 'Class:|Machine:'
-
+          ldd -r runtime-package/libyara_x_capi.so
       - name: Package runtime
         run: |
           set -euo pipefail
           ASSET="neta-yarax-runtime-v${{ env.YARAX_VERSION }}-linux-${{ matrix.arch }}.tar.gz"
-          tar -C runtime-package -czf "$ASSET" \
-            libyara_x_capi.so VERSION LICENSE.YARA-X MANIFEST
+          tar -C runtime-package -czf "$ASSET" libyara_x_capi.so VERSION LICENSE.YARA-X MANIFEST
           sha256sum "$ASSET" > "$ASSET.sha256"
-          ls -lh "$ASSET" "$ASSET.sha256"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: yarax-runtime-${{ matrix.arch }}
           path: |
@@ -102,7 +95,6 @@ jobs:
           pattern: yarax-runtime-*
           path: dist
           merge-multiple: true
-
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,8 +105,27 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" dist/* \
-              --repo "$GITHUB_REPOSITORY" \
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
               --title "NETA YARA-X runtime v${VERSION}" \
-              --notes "Prebuilt YARA-X C API runtime for NETA Linux endpoints. Built in GitHub Actions from VirusTotal/yara-x v${VERSION}; endpoint installation requires no Rust or Cargo."
+              --notes "Prebuilt YARA-X C API runtime for NETA Linux endpoints. Built from VirusTotal/yara-x v${VERSION}."
           fi
+      - name: Register desired runtime with coordinator
+        if: ${{ secrets.NETA_COORDINATOR_RUNTIME_URL != '' && secrets.NETA_COORDINATOR_ADMIN_TOKEN != '' }}
+        env:
+          URL: ${{ secrets.NETA_COORDINATOR_RUNTIME_URL }}
+          TOKEN: ${{ secrets.NETA_COORDINATOR_ADMIN_TOKEN }}
+          VERSION: ${{ env.YARAX_VERSION }}
+          PRIORITY: ${{ inputs.priority }}
+        run: |
+          set -euo pipefail
+          X86="$(awk '{print $1}' "dist/neta-yarax-runtime-v${VERSION}-linux-x86_64.tar.gz.sha256")"
+          ARM="$(awk '{print $1}' "dist/neta-yarax-runtime-v${VERSION}-linux-arm64.tar.gz.sha256")"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/yarax-runtime-v${VERSION}"
+          ROLLOUT=5
+          [[ "$PRIORITY" == "EMERGENCY" ]] && ROLLOUT=25
+          jq -n --arg version "$VERSION" --arg source "VirusTotal/yara-x@v${VERSION}" --arg base "$BASE" \
+            --arg priority "$PRIORITY" --arg x86 "$X86" --arg arm "$ARM" --argjson rollout "$ROLLOUT" \
+            '{version:$version,sourceRef:$source,releaseBaseUrl:$base,priority:$priority,x86_64Sha256:$x86,arm64Sha256:$arm,rolloutPercent:$rollout}' > payload.json
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            -H "X-NETA-Admin-Token: $TOKEN" -H 'X-NETA-Actor: github-yarax-release' -H 'Content-Type: application/json' \
+            --data @payload.json "$URL/api/v1/operator/yarax/runtime/publish"
