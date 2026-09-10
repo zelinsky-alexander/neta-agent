@@ -329,6 +329,51 @@ void verify_dns_capability() {
     assert(health.dropped_events.has_value());
 }
 
+void verify_real_dns_etw() {
+    auto dns = neta::platform::make_name_resolution_observer();
+    if (!dns->capability().available()) {
+        std::cout << "DNS ETW live decode skipped: " << dns->capability().unavailable_reason << '\n';
+        return;
+    }
+
+    WinsockGuard winsock;
+    assert(winsock.ready);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const std::string query = "neta-etw-" + std::to_string(GetCurrentProcessId()) + "-" +
+                              std::to_string(GetTickCount64()) + ".invalid";
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    addrinfo* answers = nullptr;
+    const int resolver_rc = getaddrinfo(query.c_str(), nullptr, &hints, &answers);
+    if (answers != nullptr) freeaddrinfo(answers);
+    assert(resolver_rc != 0);
+
+    bool observed_failure = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    while (std::chrono::steady_clock::now() < deadline && !observed_failure) {
+        for (const auto& observation : dns->poll(std::chrono::milliseconds(250))) {
+            const bool same_query = observation.query_name == query ||
+                                    observation.query_name == query + ".";
+            if (!same_query || !observation.result_code || *observation.result_code == 0) continue;
+            assert(observation.process.agent_visible.tgid.has_value());
+            assert(*observation.process.agent_visible.tgid ==
+                   static_cast<std::int64_t>(GetCurrentProcessId()));
+            assert(observation.process.start_ticks.has_value());
+            assert(observation.source == "windows:dns-etw");
+            observed_failure = true;
+            break;
+        }
+    }
+
+    const auto health = dns->health();
+    assert(health.dropped_events.has_value());
+    assert(health.events_received > 0);
+    assert(observed_failure);
+    std::cout << "DNS ETW live failed-query decode OK; received=" << health.events_received
+              << ", decoded=" << health.events_decoded << '\n';
+}
+
 } // namespace
 
 int main() {
@@ -383,6 +428,7 @@ int main() {
 
     verify_real_etw_lifecycle();
     verify_dns_capability();
+    verify_real_dns_etw();
 
     std::cout << "Windows platform reconciliation OK; sockets=" << sockets.size()
               << ", lifecycle=" << (capabilities.connection_lifecycle_events ? "ETW" : "unavailable")
