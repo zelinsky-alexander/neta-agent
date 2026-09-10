@@ -4,6 +4,7 @@
 #include "neta/platform.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
+#include "neta/yarax_runtime_update.hpp"
 
 #ifdef _WIN32
 #include "neta/windows_service.hpp"
@@ -24,6 +25,16 @@ std::string arg_value(int argc, char** argv, const std::string& key,
         if (argv[i] == key) return argv[i + 1];
     }
     return fallback;
+}
+
+std::filesystem::path fleet_state_dir(int argc, char** argv) {
+#ifdef _WIN32
+    const char* program_data = std::getenv("ProgramData");
+    const std::filesystem::path fallback = program_data == nullptr ? std::filesystem::path("C:/ProgramData/NETA/identity") : std::filesystem::path(program_data) / "NETA" / "identity";
+    return arg_value(argc, argv, "--state-dir", fallback.string());
+#else
+    return arg_value(argc, argv, "--state-dir", "/var/lib/neta/identity");
+#endif
 }
 
 int upgrade_health(int argc, char** argv) {
@@ -55,20 +66,16 @@ int windows_capabilities() {
               << "TCP retransmissions        " << (capabilities.tcp_retransmissions ? "YES" : "NO") << '\n'
               << "TCP cwnd                   " << (capabilities.tcp_cwnd ? "YES" : "NO") << '\n'
               << "Route observation          " << (capabilities.route_observation ? "YES" : "NO") << '\n'
-              << "Lifecycle source           " << (capabilities.lifecycle_source.empty()
-                    ? "UNAVAILABLE" : capabilities.lifecycle_source) << '\n'
+              << "Lifecycle source           " << (capabilities.lifecycle_source.empty() ? "UNAVAILABLE" : capabilities.lifecycle_source) << '\n'
               << "TCP connect events         " << (capabilities.lifecycle_connect_events ? "YES" : "NO") << '\n'
               << "TCP accept events          " << (capabilities.lifecycle_accept_events ? "YES" : "NO") << '\n'
               << "TCP close events           " << (capabilities.lifecycle_close_events ? "YES" : "NO") << '\n'
               << "Exact lifecycle direction  " << (capabilities.exact_lifecycle_direction ? "YES" : "NO") << '\n'
               << "Lifecycle loss counter     " << (capabilities.lifecycle_drop_counter ? "YES" : "NO") << '\n'
-              << "Lifecycle dropped events   " << (capabilities.lifecycle_dropped_events
-                    ? std::to_string(*capabilities.lifecycle_dropped_events) : "UNAVAILABLE") << '\n'
+              << "Lifecycle dropped events   " << (capabilities.lifecycle_dropped_events ? std::to_string(*capabilities.lifecycle_dropped_events) : "UNAVAILABLE") << '\n'
               << "Application resolver API   " << (capabilities.application_name_resolution_events ? "YES" : "NO") << '\n'
               << "Application TLS sessions   " << (capabilities.application_tls_session_events ? "YES" : "NO") << '\n';
-    if (!capabilities.connection_lifecycle_events) {
-        std::cout << "Lifecycle unavailable      " << capabilities.lifecycle_unavailable_reason << '\n';
-    }
+    if (!capabilities.connection_lifecycle_events) std::cout << "Lifecycle unavailable      " << capabilities.lifecycle_unavailable_reason << '\n';
     return 0;
 }
 #endif
@@ -76,6 +83,20 @@ int windows_capabilities() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::string(argv[1]) == "fleet" && std::string(argv[2]) == "yarax-update") {
+        try {
+            const auto result = neta::update_yarax_runtime_from_coordinator(fleet_state_dir(argc, argv));
+            std::cout << "YARA-X runtime state: " << result.state << '\n'
+                      << "Desired: " << (result.desired_version.empty() ? "-" : result.desired_version) << '\n'
+                      << "Active:  " << (result.active_version.empty() ? "-" : result.active_version) << '\n';
+            if (!result.detail.empty()) std::cout << "Detail:  " << result.detail << '\n';
+            return result.state == "APPLY_FAILED" ? 1 : 0;
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return 1;
+        }
+    }
+
     if (argc >= 2 && std::string(argv[1]) == "fleet") {
         try {
             neta::cli::run_fleet_command(argc, argv);
@@ -87,44 +108,24 @@ int main(int argc, char** argv) {
     }
 
     if (argc >= 2 && std::string(argv[1]) == "process") {
-        try {
-            return neta::cli::run_process_command(argc, argv);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << '\n';
-            return 1;
-        }
+        try { return neta::cli::run_process_command(argc, argv); }
+        catch (const std::exception& e) { std::cerr << "Error: " << e.what() << '\n'; return 1; }
     }
-
     if (argc >= 2 && std::string(argv[1]) == "rules") {
-        try {
-            return neta::cli::run_rules_command(argc, argv);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << '\n';
-            return 1;
-        }
+        try { return neta::cli::run_rules_command(argc, argv); }
+        catch (const std::exception& e) { std::cerr << "Error: " << e.what() << '\n'; return 1; }
     }
-
     if (argc >= 3 && std::string(argv[1]) == "health" && std::string(argv[2]) == "--upgrade") {
-        try {
-            return upgrade_health(argc, argv);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << '\n';
-            return 1;
-        }
+        try { return upgrade_health(argc, argv); }
+        catch (const std::exception& e) { std::cerr << "Error: " << e.what() << '\n'; return 1; }
     }
 
 #ifdef _WIN32
     if (argc >= 2 && std::string(argv[1]) == "service") {
-        try {
-            return neta::platform::run_windows_service(argc, argv);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << '\n';
-            return 1;
-        }
+        try { return neta::platform::run_windows_service(argc, argv); }
+        catch (const std::exception& e) { std::cerr << "Error: " << e.what() << '\n'; return 1; }
     }
-    if (argc >= 2 && std::string(argv[1]) == "capabilities") {
-        return windows_capabilities();
-    }
+    if (argc >= 2 && std::string(argv[1]) == "capabilities") return windows_capabilities();
 #endif
 
     const int result = neta_legacy_main(argc, argv);
@@ -147,15 +148,15 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet heartbeat [--state-dir DIR]\n"
             << "  neta-agent fleet rules-status [--state-dir DIR]\n"
             << "  neta-agent fleet rules-update [--state-dir DIR]\n"
+            << "  neta-agent fleet yarax-update [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-status [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-download [--state-dir DIR]\n"
             << "  neta-agent health --upgrade --state-dir DIR\n"
             << "  neta-agent fleet announce --finding-id ID --host HOST --port PORT [--change CHANGE] [--performance VERDICT] [--trust VERDICT] [--evidence-root HASH] [--state-dir DIR]\n";
 #ifdef _WIN32
-        std::cout
-            << "\nWindows service:\n"
-            << "  neta-agent service [--all|--outbound|--inbound] [filters] [--db FILE] [--state-dir DIR] [--max-db-mb 200]\n"
-            << "  The service command must be launched by the Windows Service Control Manager.\n";
+        std::cout << "\nWindows service:\n"
+                  << "  neta-agent service [--all|--outbound|--inbound] [filters] [--db FILE] [--state-dir DIR] [--max-db-mb 200]\n"
+                  << "  The service command must be launched by the Windows Service Control Manager.\n";
 #endif
     }
     return result;
