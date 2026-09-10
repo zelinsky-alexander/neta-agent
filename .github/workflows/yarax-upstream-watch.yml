@@ -1,0 +1,40 @@
+name: watch-yarax-upstream
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Detect newest stable upstream YARA-X release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE="$(gh api repos/VirusTotal/yara-x/releases/latest)"
+          TAG="$(jq -r '.tag_name' <<<"$RELEASE")"
+          VERSION="${TAG#v}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Ignoring non-stable tag $TAG"; exit 0; }
+          if gh release view "yarax-runtime-v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "NETA runtime for $VERSION already exists"
+            exit 0
+          fi
+          BODY="$(jq -r '.body // ""' <<<"$RELEASE")"
+          PRIORITY=NORMAL
+          if grep -Eiq '(security|vulnerab|CVE-[0-9]{4}-|GHSA-)' <<<"$BODY"; then PRIORITY=EMERGENCY; fi
+          if [[ "$PRIORITY" != EMERGENCY ]]; then
+            ADVISORIES="$(gh api 'repos/VirusTotal/yara-x/security-advisories?state=published&per_page=20' 2>/dev/null || echo '[]')"
+            if jq -e --arg v "$VERSION" '[.[] | .vulnerabilities[]? | .patched_versions? // ""] | any(test($v; "i"))' <<<"$ADVISORIES" >/dev/null 2>&1; then
+              PRIORITY=EMERGENCY
+            fi
+          fi
+          echo "Upstream YARA-X $VERSION detected; priority=$PRIORITY"
+          gh workflow run yarax-runtime.yml --repo "$GITHUB_REPOSITORY" \
+            -f version="$VERSION" -f publish=true -f priority="$PRIORITY"
