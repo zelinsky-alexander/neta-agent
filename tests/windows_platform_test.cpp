@@ -2,6 +2,7 @@
 #include "neta/connection_tracker.hpp"
 #include "neta/history_store.hpp"
 #include "neta/platform.hpp"
+#include "../src/platform/windows/dns_etw_decoder.hpp"
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -26,6 +27,26 @@ neta::ConnectionLifecycleEvent lifecycle_event(neta::ConnectionLifecycleEventTyp
     event.local = neta::NetworkEndpoint{"127.0.0.1", 50000};
     event.remote = neta::NetworkEndpoint{"127.0.0.1", 9443};
     return event;
+}
+
+void verify_dns_decoder_helpers() {
+    using namespace neta;
+    using namespace neta::platform::windows_dns;
+    assert(query_kind(1) == NameResolutionQueryKind::Forward);
+    assert(query_kind(28) == NameResolutionQueryKind::Forward);
+    assert(query_kind(12) == NameResolutionQueryKind::Reverse);
+    assert(query_kind(15) == NameResolutionQueryKind::Unknown);
+
+    const auto addresses = extract_addresses(
+        "type: 1 203.0.113.10; type: 28 2001:db8::1; duplicate=203.0.113.10");
+    assert(addresses.size() == 2);
+    assert(addresses[0].family == NetworkAddressFamily::IPv4);
+    assert(addresses[0].address == "203.0.113.10");
+    assert(addresses[1].family == NetworkAddressFamily::IPv6);
+    assert(addresses[1].address == "2001:db8::1");
+    assert(successful_status(std::nullopt));
+    assert(successful_status(0));
+    assert(!successful_status(9003));
 }
 
 void verify_direction_semantics() {
@@ -138,8 +159,6 @@ void verify_reconciliation_tracker() {
         const auto process = resolver->resolve(socket);
         assert(process.has_value());
 
-        // Snapshot-before-ETW: admit UNKNOWN preexisting, then promote the same object when ETW
-        // arrives. There must not be a second history connection.
         const auto preexisting = tracker.observe_socket(
             socket, neta::ConnectionDirection::Unknown, true,
             neta::ConnectionObservationOrigin::SnapshotPreexisting);
@@ -156,28 +175,24 @@ void verify_reconciliation_tracker() {
         assert(store.status(100'000'000).connection_count == 1);
         assert(store.connection(first_id)->direction == neta::ConnectionDirection::Outbound);
 
-        // Snapshot enrichment after ETW must bind to the exact same connection.
         socket.transport.observed_ns = 1'020'000'000ULL;
         const auto enriched = tracker.observe_socket(
             socket, neta::ConnectionDirection::Unknown, false);
         assert(enriched && enriched->connection_id == first_id);
         assert(store.status(100'000'000).connection_count == 1);
 
-        // With clean ETW, snapshot absence alone never closes the connection.
         for (int i = 0; i < 5; ++i) {
             tracker.begin_snapshot();
             assert(tracker.end_snapshot(false, false).empty());
         }
         assert(tracker.connections().size() == 1);
 
-        // The exact ETW close owns lifecycle termination.
         const auto close = reconciliation_event(
             neta::ConnectionLifecycleEventType::Close, 1001, *process, 1'030'000'000ULL);
         const auto closed = tracker.observe_lifecycle(close, neta::ConnectionDirection::Unknown);
         assert(closed && closed->closed && closed->connection_id == first_id);
         assert(tracker.connections().empty());
 
-        // Immediate tuple reuse with a different ETW connid is a different connection.
         const auto connect_reuse = reconciliation_event(
             neta::ConnectionLifecycleEventType::Connect, 1002, *process, 1'040'000'000ULL);
         const auto reused = tracker.observe_lifecycle(
@@ -188,7 +203,6 @@ void verify_reconciliation_tracker() {
             neta::ConnectionLifecycleEventType::Close, 1002, *process, 1'050'000'000ULL);
         assert(tracker.observe_lifecycle(close_reuse, neta::ConnectionDirection::Unknown)->closed);
 
-        // ETW-only short-lived connection: no TCP table snapshot is required at all.
         const auto connect_short = reconciliation_event(
             neta::ConnectionLifecycleEventType::Connect, 1003, *process, 1'060'000'000ULL);
         const auto short_admission = tracker.observe_lifecycle(
@@ -197,16 +211,12 @@ void verify_reconciliation_tracker() {
         const auto short_id = short_admission->connection_id;
         const auto close_short = reconciliation_event(
             neta::ConnectionLifecycleEventType::Close, 1003, *process, 1'061'000'000ULL);
-        const auto short_close = tracker.observe_lifecycle(
-            close_short, neta::ConnectionDirection::Unknown);
+        const auto short_close = tracker.observe_lifecycle(close_short, neta::ConnectionDirection::Unknown);
         assert(short_close && short_close->closed && short_close->connection_id == short_id);
 
-        // When lifecycle health is degraded, three consecutive snapshot misses repair a missing
-        // close instead of leaving the connection active forever.
         const auto connect_lost = reconciliation_event(
             neta::ConnectionLifecycleEventType::Connect, 1004, *process, 1'070'000'000ULL);
-        const auto lost = tracker.observe_lifecycle(
-            connect_lost, neta::ConnectionDirection::Outbound);
+        const auto lost = tracker.observe_lifecycle(connect_lost, neta::ConnectionDirection::Outbound);
         assert(lost && lost->newly_admitted);
         tracker.begin_snapshot();
         assert(tracker.end_snapshot(false, true).empty());
@@ -244,8 +254,7 @@ void verify_real_etw_lifecycle() {
     listen_address.sin_family = AF_INET;
     listen_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     listen_address.sin_port = 0;
-    assert(bind(listener.value, reinterpret_cast<sockaddr*>(&listen_address),
-                sizeof(listen_address)) == 0);
+    assert(bind(listener.value, reinterpret_cast<sockaddr*>(&listen_address), sizeof(listen_address)) == 0);
     assert(listen(listener.value, 1) == 0);
     const auto server_port = local_port(listener.value);
 
@@ -272,8 +281,7 @@ void verify_real_etw_lifecycle() {
     bool saw_accept = false;
     bool saw_close = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() < deadline &&
-           !(saw_connect && saw_accept && saw_close)) {
+    while (std::chrono::steady_clock::now() < deadline && !(saw_connect && saw_accept && saw_close)) {
         for (const auto& event : lifecycle->poll(std::chrono::milliseconds(250))) {
             if (!event.process.agent_visible.tgid ||
                 *event.process.agent_visible.tgid != static_cast<std::int64_t>(GetCurrentProcessId()) ||
@@ -305,9 +313,26 @@ void verify_real_etw_lifecycle() {
     std::cout << "ETW loopback lifecycle OK; dropped=" << *health.dropped_events << '\n';
 }
 
+void verify_dns_capability() {
+    auto dns = neta::platform::make_name_resolution_observer();
+    const auto& capability = dns->capability();
+    if (!capability.available()) {
+        std::cout << "DNS ETW runtime capability unavailable: " << capability.unavailable_reason << '\n';
+        assert(!capability.unavailable_reason.empty());
+        return;
+    }
+    assert(capability.built_in);
+    assert(capability.system_resolver_events);
+    assert(capability.drop_counter);
+    assert(capability.source == "windows:dns-etw");
+    const auto health = dns->health();
+    assert(health.dropped_events.has_value());
+}
+
 } // namespace
 
 int main() {
+    verify_dns_decoder_helpers();
     verify_direction_semantics();
     verify_reconciliation_tracker();
 
@@ -326,7 +351,13 @@ int main() {
     } else {
         assert(!capabilities.lifecycle_unavailable_reason.empty());
     }
-    assert(!capabilities.application_name_resolution_events);
+    if (capabilities.application_name_resolution_events) {
+        assert(capabilities.name_resolution_source == "windows:dns-etw");
+        assert(capabilities.name_resolution_drop_counter);
+        assert(capabilities.name_resolution_dropped_events.has_value());
+    } else {
+        assert(!capabilities.name_resolution_unavailable_reason.empty());
+    }
     assert(!capabilities.application_tls_session_events);
 
     const auto host = neta::platform::host_environment();
@@ -351,9 +382,11 @@ int main() {
     assert(loopback->interface_index != 0);
 
     verify_real_etw_lifecycle();
+    verify_dns_capability();
 
-    std::cout << "Windows platform W3 reconciliation OK; sockets=" << sockets.size()
+    std::cout << "Windows platform reconciliation OK; sockets=" << sockets.size()
               << ", lifecycle=" << (capabilities.connection_lifecycle_events ? "ETW" : "unavailable")
+              << ", dns=" << (capabilities.application_name_resolution_events ? "ETW" : "unavailable")
               << '\n';
     return 0;
 }
