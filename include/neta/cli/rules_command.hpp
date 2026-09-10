@@ -2,6 +2,7 @@
 
 #include "neta/rules/rule_set_loader.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -78,17 +79,33 @@ inline void print_rule_exclusions(const rules::RuleDefinition& rule) {
     print_named_values("directions", exclusion.directions);
 }
 
+inline void print_platform_profile_hint() {
+#ifdef _WIN32
+    std::cout << "Platform:          windows\nSuggested profile: windows\n";
+#else
+    const bool wsl = (std::getenv("WSL_DISTRO_NAME") != nullptr) || (std::getenv("WSL_INTEROP") != nullptr);
+    std::cout << "Platform:          " << (wsl ? "wsl" : "linux") << "\n"
+              << "Suggested profile: " << (wsl ? "wsl" : "linux-server") << "\n";
+#endif
+    std::cout << "Note: profile selection is coordinator policy; this command is a local hint only.\n";
+}
+
 inline int run_rules_command(int argc, char** argv) {
     if (argc < 3) {
         std::cout << "Usage:\n"
                   << "  neta-agent rules list [--file FILE]\n"
                   << "  neta-agent rules show RULE_ID [--file FILE]\n"
                   << "  neta-agent rules validate FILE\n"
-                  << "  neta-agent rules active\n";
+                  << "  neta-agent rules active\n"
+                  << "  neta-agent rules platform\n";
         return 1;
     }
 
     const std::string action = argv[2];
+    if (action == "platform") {
+        print_platform_profile_hint();
+        return 0;
+    }
     if (action == "validate") {
         if (argc < 4) throw std::runtime_error("rules validate requires a file path");
         const auto set = rules::RuleSetLoader::load_file(argv[3]);
