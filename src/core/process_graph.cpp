@@ -191,22 +191,22 @@ ProcessFindingSeverity severity_from_string(const std::string& severity) {
 
 ProcessFindingConfig config_from_rules(const RuleSet& rules) {
     ProcessFindingConfig config; config.ruleset_version = rules.version;
-    const auto& transient = rules.rule("NETA-PROC-001");
+    const auto& transient = rules.rule("PROC-001");
     config.transient_path_enabled = transient.enabled; config.transient_path_severity = transient.severity;
     config.transient_path_prefixes = normalized_values(transient.string_list("path_prefixes"));
     config.transient_path_substrings = normalized_values(transient.string_list("path_substrings"));
-    const auto& shell = rules.rule("NETA-PROC-002");
+    const auto& shell = rules.rule("PROC-002");
     config.unexpected_shell_enabled = shell.enabled; config.unexpected_shell_severity = shell.severity;
     config.shell_names = normalized_values(shell.string_list("shell_names"));
     config.expected_shell_parent_names = normalized_values(shell.string_list("expected_parent_names"));
-    const auto& elevation = rules.rule("NETA-PROC-003");
+    const auto& elevation = rules.rule("PROC-003");
     config.unexpected_elevation_enabled = elevation.enabled; config.unexpected_elevation_severity = elevation.severity;
     config.expected_elevation_parent_names = normalized_values(elevation.string_list("expected_parent_names"));
-    const auto& fanout = rules.rule("NETA-PROC-004");
+    const auto& fanout = rules.rule("PROC-004");
     config.fanout_enabled = fanout.enabled; config.fanout_severity = fanout.severity;
     config.fanout_count = static_cast<std::size_t>(fanout.numeric("child_count"));
     config.fanout_window_ns = static_cast<std::uint64_t>(fanout.numeric("window_ms")) * kNanosecondsPerMillisecond;
-    const auto& short_lived = rules.rule("NETA-PROC-005");
+    const auto& short_lived = rules.rule("PROC-005");
     config.short_lived_enabled = short_lived.enabled; config.short_lived_severity = short_lived.severity;
     config.short_lived_count = static_cast<std::size_t>(short_lived.numeric("child_count"));
     config.short_lived_max_ns = static_cast<std::uint64_t>(short_lived.numeric("max_lifetime_ms")) * kNanosecondsPerMillisecond;
@@ -244,7 +244,7 @@ const ProcessNode* node_for_event(const ProcessExecEvent& event, const std::vect
 
 bool has_custom_short_lived(const std::vector<rules::RuleDefinition>& rules) {
     return std::any_of(rules.begin(), rules.end(), [](const auto& rule) {
-        return rule.enabled && rule.engine_rule_id == "NETA-PROC-005";
+        return rule.enabled && rule.engine_rule_id == "PROC-005";
     });
 }
 }  // namespace
@@ -280,28 +280,28 @@ std::vector<ProcessFinding> ProcessFindingEngine::evaluate_node(const ProcessNod
     std::vector<ProcessFinding> findings;
     const ProcessNode* parent = node.parent ? find_process_node(nodes, *node.parent) : nullptr;
     if (config_.transient_path_enabled && is_transient_path(node.executable_path, config_))
-        findings.push_back(make_finding(ProcessFindingKind::ExecFromTransientPath, "NETA-PROC-001", severity_from_string(config_.transient_path_severity), config_.ruleset_version, node, parent,
+        findings.push_back(make_finding(ProcessFindingKind::ExecFromTransientPath, "PROC-001", severity_from_string(config_.transient_path_severity), config_.ruleset_version, node, parent,
             "Executable started from a transient filesystem location.", "Execution from a transient location is compatible with staged or temporary tooling; malicious intent is not established."));
     if (config_.unexpected_shell_enabled && contains_name(config_.shell_names, node) && parent != nullptr && !contains_name(config_.expected_shell_parent_names, *parent))
-        findings.push_back(make_finding(ProcessFindingKind::ShellFromUnexpectedParent, "NETA-PROC-002", severity_from_string(config_.unexpected_shell_severity), config_.ruleset_version, node, parent,
+        findings.push_back(make_finding(ProcessFindingKind::ShellFromUnexpectedParent, "PROC-002", severity_from_string(config_.unexpected_shell_severity), config_.ruleset_version, node, parent,
             "A shell was spawned by a process not classified as an expected interactive shell parent.", "This parent-child relationship resembles shell-spawn behavior worth investigation; exploitation is not established."));
     if (config_.unexpected_elevation_enabled && node.elevated == std::optional<bool>{true} && parent != nullptr && parent->elevated == std::optional<bool>{false} && !contains_name(config_.expected_elevation_parent_names, *parent))
-        findings.push_back(make_finding(ProcessFindingKind::UnexpectedElevation, "NETA-PROC-003", severity_from_string(config_.unexpected_elevation_severity), config_.ruleset_version, node, parent,
+        findings.push_back(make_finding(ProcessFindingKind::UnexpectedElevation, "PROC-003", severity_from_string(config_.unexpected_elevation_severity), config_.ruleset_version, node, parent,
             "A child process is elevated while its observed parent is not elevated.", "A privilege-boundary transition was observed. It may be legitimate administrative activity; malicious intent is not established."));
 
     for (const auto& rule : custom_process_rules_) {
         if (!rule.enabled) continue;
-        if (rule.engine_rule_id == "NETA-PROC-001") {
+        if (rule.engine_rule_id == "PROC-001") {
             if (path_matches(node.executable_path, normalized_values(rule.string_list("path_prefixes")), normalized_values(rule.string_list("path_substrings"))))
                 findings.push_back(make_finding(ProcessFindingKind::ExecFromTransientPath, rule.id, severity_from_string(rule.severity), config_.ruleset_version, node, parent,
                     "Executable matched a custom transient-path rule.", "A centrally managed custom transient-path detection matched this process."));
-        } else if (rule.engine_rule_id == "NETA-PROC-002") {
+        } else if (rule.engine_rule_id == "PROC-002") {
             const auto shells = normalized_values(rule.string_list("shell_names"));
             const auto parents = normalized_values(rule.string_list("expected_parent_names"));
             if (contains_name(shells, node) && parent != nullptr && !contains_name(parents, *parent))
                 findings.push_back(make_finding(ProcessFindingKind::ShellFromUnexpectedParent, rule.id, severity_from_string(rule.severity), config_.ruleset_version, node, parent,
                     "A shell matched a custom unexpected-parent rule.", "A centrally managed custom shell parent-child detection matched this process."));
-        } else if (rule.engine_rule_id == "NETA-PROC-003") {
+        } else if (rule.engine_rule_id == "PROC-003") {
             const auto expected = normalized_values(rule.string_list("expected_parent_names"));
             if (node.elevated == std::optional<bool>{true} && parent != nullptr && parent->elevated == std::optional<bool>{false} && !contains_name(expected, *parent))
                 findings.push_back(make_finding(ProcessFindingKind::UnexpectedElevation, rule.id, severity_from_string(rule.severity), config_.ruleset_version, node, parent,
@@ -328,12 +328,12 @@ std::vector<ProcessFinding> ProcessFindingEngine::observe(const ProcessExecEvent
                 auto& starts = child_starts_[*node->parent]; trim_before(starts, event.timestamp_ns, config_.fanout_window_ns); starts.push_back(event.timestamp_ns);
                 if (starts.size() == config_.fanout_count) {
                     const auto* parent = find_process_node(nodes, *node->parent);
-                    if (parent) { auto finding = make_finding(ProcessFindingKind::RapidChildFanout, "NETA-PROC-004", severity_from_string(config_.fanout_severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
+                    if (parent) { auto finding = make_finding(ProcessFindingKind::RapidChildFanout, "PROC-004", severity_from_string(config_.fanout_severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
                         "A process spawned many child processes within a short window.", "Rapid child-process fan-out can resemble scripted or automated execution; malicious intent is not established."); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
                 }
             }
             for (const auto& rule : custom_process_rules_) {
-                if (!rule.enabled || rule.engine_rule_id != "NETA-PROC-004") continue;
+                if (!rule.enabled || rule.engine_rule_id != "PROC-004") continue;
                 const auto window = static_cast<std::uint64_t>(rule.numeric("window_ms")) * kNanosecondsPerMillisecond;
                 const auto count = static_cast<std::size_t>(rule.numeric("child_count"));
                 auto& starts = custom_child_starts_[rule.id][*node->parent]; trim_before(starts, event.timestamp_ns, window); starts.push_back(event.timestamp_ns);
@@ -354,12 +354,12 @@ std::vector<ProcessFinding> ProcessFindingEngine::observe(const ProcessExecEvent
         auto& exits = short_exits_[*node->parent]; trim_before(exits, event.timestamp_ns, config_.short_lived_window_ns); exits.push_back(event.timestamp_ns);
         if (exits.size() == config_.short_lived_count) {
             const auto* parent = find_process_node(nodes, *node->parent);
-            if (parent) { auto finding = make_finding(ProcessFindingKind::ShortLivedProcessBurst, "NETA-PROC-005", severity_from_string(config_.short_lived_severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
+            if (parent) { auto finding = make_finding(ProcessFindingKind::ShortLivedProcessBurst, "PROC-005", severity_from_string(config_.short_lived_severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
                 "A process produced a burst of short-lived child processes.", "A short-lived process burst can resemble scripted execution or repeated helper invocation; malicious intent is not established."); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
         }
     }
     for (const auto& rule : custom_process_rules_) {
-        if (!rule.enabled || rule.engine_rule_id != "NETA-PROC-005") continue;
+        if (!rule.enabled || rule.engine_rule_id != "PROC-005") continue;
         const auto max_lifetime = static_cast<std::uint64_t>(rule.numeric("max_lifetime_ms")) * kNanosecondsPerMillisecond;
         if (duration > max_lifetime) continue;
         const auto window = static_cast<std::uint64_t>(rule.numeric("window_ms")) * kNanosecondsPerMillisecond;
