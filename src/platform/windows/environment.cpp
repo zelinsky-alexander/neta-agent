@@ -29,10 +29,6 @@ private:
 };
 
 std::string native_windows_version() {
-    // GetVersionExW is subject to application-manifest version lying and reported
-    // 6.2.9200 on a real Windows 10 22H2 acceptance host. RtlGetVersion returns the
-    // native kernel version and is dynamically resolved so this platform seam stays
-    // independent of SDK-private headers/import libraries.
     using RtlGetVersionFn = LONG (WINAPI*)(OSVERSIONINFOW*);
     const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (ntdll == nullptr) return {};
@@ -87,8 +83,6 @@ PlatformCapabilities capabilities() {
     c.name_resolution_dropped_events = name_health.dropped_events;
     c.name_resolution_source = name_capability.source;
     c.name_resolution_unavailable_reason = name_capability.unavailable_reason;
-    // DNS Client ETW is native system-resolver evidence and is strongly attributable,
-    // but it is not the same as an in-process resolver hook, so keep this conservative.
     c.exact_dns_observation = false;
 
     c.tls_session_source = "windows:tls";
@@ -101,3 +95,8 @@ std::unique_ptr<TlsSessionObserver> make_tls_session_observer() {
 }
 
 } // namespace neta::platform
+
+// Keep the manifest-provider implementation in its own file while compiling it as part of
+// the existing Windows platform translation unit. This avoids changing non-Windows build
+// graphs and keeps the factory implementation isolated.
+#include "dns_etw_observer.cpp"
