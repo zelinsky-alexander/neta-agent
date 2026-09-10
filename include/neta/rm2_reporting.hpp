@@ -81,27 +81,20 @@ inline std::vector<std::string> domains_for_connection(const HistoryStore& store
     std::vector<std::string> domains;
     for (const auto& evidence : store.name_resolution_evidence_for_connection(id)) {
         if (!evidence.observation.query_name.empty()) domains.push_back(evidence.observation.query_name);
-        if (evidence.observation.canonical_name && !evidence.observation.canonical_name->empty())
-            domains.push_back(*evidence.observation.canonical_name);
+        if (evidence.observation.canonical_name && !evidence.observation.canonical_name->empty()) domains.push_back(*evidence.observation.canonical_name);
     }
     return domains;
 }
-inline bool excluded_for_connection(const HistoryStore& store,
-                                    const rules::RuleDefinition& rule,
-                                    std::int64_t id) {
-    const auto connection = store.connection(id);
-    if (!connection) return false;
+inline bool excluded_for_connection(const HistoryStore& store,const rules::RuleDefinition& rule,std::int64_t id) {
+    const auto connection = store.connection(id); if (!connection) return false;
     return rules::excludes_connection(rule.exclude, *connection, domains_for_connection(store, id));
 }
 inline std::string context_evidence_root(const ConnectionRuleContext& context) {
     std::ostringstream canonical;
-    canonical << "connection=" << context.connection.id
-              << "|direction=" << to_string(context.connection.direction)
+    canonical << "connection=" << context.connection.id << "|direction=" << to_string(context.connection.direction)
               << "|remote=" << context.connection.remote_ip << ':' << context.connection.remote_port
-              << "|host=" << context.connection.target_host
-              << "|rtt=" << context.metrics.observed_rtt_us
-              << "|rttvar=" << context.metrics.observed_rttvar_us
-              << "|retrans=" << context.metrics.retransmission_delta;
+              << "|host=" << context.connection.target_host << "|rtt=" << context.metrics.observed_rtt_us
+              << "|rttvar=" << context.metrics.observed_rttvar_us << "|retrans=" << context.metrics.retransmission_delta;
     if (context.route) canonical << "|route=" << context.route->sha256;
     if (!context.tls_sessions.empty()) canonical << "|tls=" << tls_session_evidence_set_hash(context.tls_sessions);
     if (!context.name_resolution.empty()) canonical << "|dns=" << name_resolution_evidence_set_hash(context.name_resolution);
@@ -109,9 +102,7 @@ inline std::string context_evidence_root(const ConnectionRuleContext& context) {
     if (context.bytes_received) canonical << "|received=" << *context.bytes_received;
     return "sha256:" + sha256_hex(canonical.str());
 }
-inline FindingAnnouncementInput context_announcement(const ContextRuleMatch& match,
-                                                       const ConnectionRuleContext& context,
-                                                       const RuleSet& rules) {
+inline FindingAnnouncementInput context_announcement(const ContextRuleMatch& match,const ConnectionRuleContext& context,const RuleSet& rules) {
     FindingAnnouncementInput finding;
     finding.host = context.connection.direction == ConnectionDirection::Inbound ? context.connection.local_ip : target_host(context.connection);
     finding.port = context.connection.direction == ConnectionDirection::Inbound ? context.connection.local_port : context.connection.remote_port;
@@ -130,14 +121,13 @@ inline FindingAnnouncementInput context_announcement(const ContextRuleMatch& mat
 
 } // namespace rm2_reporting_detail
 
-inline BehaviorReportingResult auto_report_rule_periodic_behavior(
-    HistoryStore& store, std::int64_t trigger_connection_id,
+inline BehaviorReportingResult auto_report_rule_periodic_behavior(HistoryStore& store, std::int64_t trigger_connection_id,
     const FleetReportingPolicy& reporting_policy, const RuleSet& rules = current_rule_set()) {
     BehaviorReportingResult result;
     auto cooldowns = rm2_reporting_detail::load_cooldowns(rm2_reporting_detail::state_path(store));
     const auto now = rm2_reporting_detail::now_epoch(); bool changed = false;
     for (const auto& rule : rules.definitions) {
-        if (!rule.enabled || rule.engine_rule_id != "NETA-BEH-001") continue;
+        if (!rule.enabled || rule.engine_rule_id != "BEH-001") continue;
         if (rm2_reporting_detail::excluded_for_connection(store, rule, trigger_connection_id)) continue;
         ++result.considered;
         try {
@@ -151,29 +141,24 @@ inline BehaviorReportingResult auto_report_rule_periodic_behavior(
             if (!rm2_reporting_detail::cooldown_allows(finding->finding_key, cooldowns, now, reporting_policy)) { ++result.suppressed_cooldown; continue; }
             behavior_reporting_detail::persist_finding(behavior_reporting_detail::append_suffix(store.path(), ".findings.jsonl"), *finding, now);
             ++result.persisted; cooldowns[finding->finding_key] = now; changed = true;
-            if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence ||
-                !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
+            if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
             auto announcement = behavior_reporting_detail::announcement_from_finding(*finding);
             announcement.severity = finding->severity; announcement.rule_id = rule.id; announcement.rule_set_id = rules.id;
             announcement.rule_set_version = rules.version; announcement.interpretation = finding->interpretation;
             FleetClient::send_finding(reporting_policy.state_dir, announcement); ++result.announced;
-        } catch (const std::exception& error) {
-            ++result.failed; std::cerr << "RM2 periodic rule reporting failed for CONN-" << trigger_connection_id << ": " << error.what() << '\n';
-        }
+        } catch (const std::exception& error) { ++result.failed; std::cerr << "RM2 periodic rule reporting failed for CONN-" << trigger_connection_id << ": " << error.what() << '\n'; }
     }
     if (changed) rm2_reporting_detail::save_cooldowns(rm2_reporting_detail::state_path(store), cooldowns);
     return result;
 }
 
-inline TransferReportingResult auto_report_rule_large_ingress(
-    HistoryStore& history, TransferEvidenceStore& transfer_store,
-    std::int64_t connection_id, const FleetReportingPolicy& reporting_policy,
-    const RuleSet& rules = current_rule_set()) {
+inline TransferReportingResult auto_report_rule_large_ingress(HistoryStore& history, TransferEvidenceStore& transfer_store,
+    std::int64_t connection_id, const FleetReportingPolicy& reporting_policy,const RuleSet& rules = current_rule_set()) {
     TransferReportingResult result;
     auto cooldowns = rm2_reporting_detail::load_cooldowns(rm2_reporting_detail::state_path(history));
     const auto now = rm2_reporting_detail::now_epoch(); bool changed = false;
     for (const auto& rule : rules.definitions) {
-        if (!rule.enabled || rule.engine_rule_id != "NETA-NET-001") continue;
+        if (!rule.enabled || rule.engine_rule_id != "NET-001") continue;
         if (rm2_reporting_detail::excluded_for_connection(history, rule, connection_id)) continue;
         ++result.considered;
         try {
@@ -186,24 +171,19 @@ inline TransferReportingResult auto_report_rule_large_ingress(
             if (!rm2_reporting_detail::cooldown_allows(finding->finding_key, cooldowns, now, reporting_policy)) { ++result.suppressed_cooldown; continue; }
             transfer_detail::persist(transfer_detail::suffix(history.path(), ".findings.jsonl"), *finding, now);
             ++result.persisted; cooldowns[finding->finding_key] = now; changed = true;
-            if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence ||
-                !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
+            if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
             auto announcement = transfer_detail::announcement(*finding);
             announcement.severity = finding->severity; announcement.rule_id = rule.id; announcement.rule_set_id = rules.id;
             announcement.rule_set_version = rules.version; announcement.interpretation = finding->interpretation;
             FleetClient::send_finding(reporting_policy.state_dir, announcement); ++result.announced;
-        } catch (const std::exception& error) {
-            ++result.failed; std::cerr << "RM2 transfer rule reporting failed for CONN-" << connection_id << ": " << error.what() << '\n';
-        }
+        } catch (const std::exception& error) { ++result.failed; std::cerr << "RM2 transfer rule reporting failed for CONN-" << connection_id << ": " << error.what() << '\n'; }
     }
     if (changed) rm2_reporting_detail::save_cooldowns(rm2_reporting_detail::state_path(history), cooldowns);
     return result;
 }
 
-inline FleetReportingResult auto_report_context_rules(
-    HistoryStore& store, TransferEvidenceStore& transfer_store,
-    std::int64_t connection_id, const FleetReportingPolicy& reporting_policy,
-    const RuleSet& rules = current_rule_set()) {
+inline FleetReportingResult auto_report_context_rules(HistoryStore& store, TransferEvidenceStore& transfer_store,
+    std::int64_t connection_id, const FleetReportingPolicy& reporting_policy,const RuleSet& rules = current_rule_set()) {
     FleetReportingResult result;
     const auto connection = store.connection(connection_id); if (!connection) return result;
     ConnectionRuleContext context; context.connection = *connection;
@@ -224,9 +204,7 @@ inline FleetReportingResult auto_report_context_rules(
             if (!rm2_reporting_detail::cooldown_allows(finding.finding_key, cooldowns, now, reporting_policy)) { ++result.suppressed_cooldown; continue; }
             if (reporting_policy.mode == FleetReportingMode::Off || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
             FleetClient::send_finding(reporting_policy.state_dir, finding); cooldowns[finding.finding_key] = now; changed = true; ++result.announced;
-        } catch (const std::exception& error) {
-            ++result.failed; std::cerr << "RM2 context rule reporting failed for CONN-" << connection_id << ": " << error.what() << '\n';
-        }
+        } catch (const std::exception& error) { ++result.failed; std::cerr << "RM2 context rule reporting failed for CONN-" << connection_id << ": " << error.what() << '\n'; }
     }
     if (changed) rm2_reporting_detail::save_cooldowns(rm2_reporting_detail::state_path(store), cooldowns);
     return result;
