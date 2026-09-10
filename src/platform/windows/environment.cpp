@@ -4,7 +4,12 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <winsock2.h>
 #include <windows.h>
+
+#ifdef _MSC_VER
+#pragma comment(lib, "ole32.lib")
+#endif
 
 #include <chrono>
 #include <memory>
@@ -96,7 +101,6 @@ std::unique_ptr<TlsSessionObserver> make_tls_session_observer() {
 
 } // namespace neta::platform
 
-// Keep the manifest-provider implementation in its own file while compiling it as part of
-// the existing Windows platform translation unit. This avoids changing non-Windows build
-// graphs and keeps the factory implementation isolated.
+// Keep the manifest-provider implementation isolated while compiling it through the
+// existing Windows platform translation unit. This avoids touching non-Windows builds.
 #include "dns_etw_observer.cpp"
