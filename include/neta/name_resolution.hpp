@@ -66,18 +66,26 @@ struct NameResolutionCorrelationResult {
 struct NameResolutionCapability {
     bool built_in{false};
     bool application_resolver_api{false};
+    // Linux-specific implementation detail retained for the eBPF getaddrinfo collector.
     bool glibc_getaddrinfo{false};
+    // Cross-platform system resolver event source, e.g. Windows DNS Client ETW.
+    bool system_resolver_events{false};
     bool drop_counter{false};
     std::string source;
     std::string unavailable_reason;
 
     [[nodiscard]] bool available() const noexcept {
-        return application_resolver_api && glibc_getaddrinfo;
+        return (application_resolver_api && glibc_getaddrinfo) || system_resolver_events;
     }
 };
 
 struct NameResolutionHealth {
     std::optional<std::uint64_t> dropped_events;
+    std::uint64_t events_received{0};
+    std::uint64_t events_decoded{0};
+    std::uint64_t decode_failures{0};
+    std::uint64_t unmatched_processes{0};
+    std::uint64_t unsupported_event_versions{0};
 
     [[nodiscard]] bool evidence_may_be_incomplete() const noexcept {
         return dropped_events && *dropped_events != 0;
