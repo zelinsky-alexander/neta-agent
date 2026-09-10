@@ -31,6 +31,13 @@ inline void print_rule_set_header(const RuleSet& set) {
               << "Version:  " << set.version << "\n";
 }
 
+inline double rm37_base_confidence(const rules::RuleDefinition& rule) {
+    if (rule.severity == "high") return 0.72;
+    if (rule.severity == "medium") return 0.60;
+    if (rule.severity == "low") return 0.50;
+    return 0.55;
+}
+
 inline void print_rule_parameters(const rules::RuleDefinition& rule) {
     if (rule.numeric_parameters.empty() && rule.boolean_parameters.empty() &&
         rule.string_parameters.empty() && rule.string_list_parameters.empty()) return;
@@ -123,12 +130,13 @@ inline int run_rules_command(int argc, char** argv) {
 
     if (action == "list") {
         print_rule_set_header(set);
-        std::cout << "\nID                 CATEGORY      ENABLED  SEVERITY  NAME\n";
+        std::cout << "\nID                 CATEGORY      ENABLED  SEVERITY  BASE CONF  NAME\n";
         for (const auto& rule : set.definitions) {
             std::cout << std::left << std::setw(19) << rule.id
                       << std::setw(14) << rule.category
                       << std::setw(9) << (rule.enabled ? "YES" : "NO")
                       << std::setw(10) << (rule.severity.empty() ? "-" : rule.severity)
+                      << std::setw(11) << std::fixed << std::setprecision(2) << rm37_base_confidence(rule)
                       << rule.name << '\n';
         }
         return 0;
@@ -139,13 +147,14 @@ inline int run_rules_command(int argc, char** argv) {
         const std::string id = argv[3];
         for (const auto& rule : set.definitions) {
             if (rule.id != id) continue;
-            std::cout << "ID:       " << rule.id << "\n"
-                      << "Name:     " << rule.name << "\n"
-                      << "Category: " << rule.category << "\n"
-                      << "Enabled:  " << (rule.enabled ? "YES" : "NO") << "\n"
-                      << "Severity: " << (rule.severity.empty() ? "-" : rule.severity) << "\n"
-                      << "Rule set: " << set.id << " / " << set.revision << "\n"
-                      << "Version:  " << set.version << "\n";
+            std::cout << "ID:              " << rule.id << "\n"
+                      << "Name:            " << rule.name << "\n"
+                      << "Category:        " << rule.category << "\n"
+                      << "Enabled:         " << (rule.enabled ? "YES" : "NO") << "\n"
+                      << "Severity:        " << (rule.severity.empty() ? "-" : rule.severity) << "\n"
+                      << "Base confidence: " << std::fixed << std::setprecision(2) << rm37_base_confidence(rule) << "\n"
+                      << "Rule set:        " << set.id << " / " << set.revision << "\n"
+                      << "Version:         " << set.version << "\n";
             print_rule_parameters(rule);
             print_rule_exclusions(rule);
             return 0;
