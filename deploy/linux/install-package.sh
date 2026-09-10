@@ -67,7 +67,6 @@ NETA_FLEET_MIN_CONFIDENCE=0.80
 NETA_FLEET_REPORTING_COOLDOWN_SECONDS=1800
 NETA_FLEET_HEARTBEAT_SECONDS=300
 NETA_FLEET_HEARTBEAT_JITTER_PERCENT=20
-NETA_YARAX_RUNTIME_POLL_SECONDS=60
 NETA_TLS_CONTEXT_SOCKET=@neta-agent-tls-service
 EOF
   chmod 0600 /etc/neta/neta-agent.env
@@ -94,9 +93,36 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/neta-yarax-runtime-update.service <<EOF
+[Unit]
+Description=NETA YARA-X runtime desired-state update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/neta/neta-agent.env
+ExecStart=/usr/local/bin/neta-agent fleet yarax-update --state-dir $STATE_DIR
+EOF
+
+cat >/etc/systemd/system/neta-yarax-runtime-update.timer <<'EOF'
+[Unit]
+Description=Poll NETA coordinator for YARA-X runtime updates
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+RandomizedDelaySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
-systemctl enable neta-agent.service
+systemctl enable neta-agent.service neta-yarax-runtime-update.timer
 systemctl restart neta-agent.service
+systemctl restart neta-yarax-runtime-update.timer
 
 echo "Installed prebuilt NETA package"
 echo "  build_id=$BUILD_ID"
