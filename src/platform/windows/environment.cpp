@@ -6,6 +6,7 @@
 #endif
 #include <winsock2.h>
 #include <windows.h>
+#include <objbase.h>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "ole32.lib")
