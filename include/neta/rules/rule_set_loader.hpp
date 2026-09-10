@@ -22,203 +22,235 @@ public:
     static RuleSet load_file(const std::filesystem::path& path) {
         std::ifstream input(path);
         if (!input) throw std::runtime_error("cannot open rule set file: " + path.string());
-        std::ostringstream buffer;
-        buffer << input.rdbuf();
+        std::ostringstream buffer; buffer << input.rdbuf();
         return load_text(buffer.str(), path.string());
     }
-
     static RuleSet load_text(const std::string& text, const std::string& source = "<memory>") {
-        try {
-            const JsonValue root = JsonParser(text).parse();
-            return parse_root(root);
-        } catch (const std::exception& error) {
+        try { return parse_root(JsonParser(text).parse()); }
+        catch (const std::exception& error) {
             throw std::runtime_error("rule set validation failed for " + source + ": " + error.what());
         }
     }
+    static RuleSet built_in() { return load_text(default_document(), "built-in RM2 default rules"); }
+    static RuleSet rm1_built_in() { return load_text(rm1_document(), "built-in RM1 default rules"); }
 
-    static RuleSet built_in() { return load_text(default_document(), "built-in default rules"); }
-
+    static std::filesystem::path centrally_managed_path() {
+        if (const char* configured = std::getenv("NETA_RULE_STATE_DIR"); configured && *configured)
+            return std::filesystem::path(configured) / "rules" / "active.json";
+#ifdef _WIN32
+        if (const char* program_data = std::getenv("ProgramData"); program_data && *program_data)
+            return std::filesystem::path(program_data) / "NETA" / "identity" / "rules" / "active.json";
+        return std::filesystem::path("C:/ProgramData/NETA/identity/rules/active.json");
+#else
+        return std::filesystem::path("/var/lib/neta/identity/rules/active.json");
+#endif
+    }
     static RuleSet active() {
-        if (const char* configured = std::getenv("NETA_RULE_SET_FILE"); configured && *configured) {
+        if (const char* configured = std::getenv("NETA_RULE_SET_FILE"); configured && *configured)
             return load_file(configured);
-        }
+        const auto managed = centrally_managed_path();
+        if (std::filesystem::exists(managed)) return load_file(managed);
         return built_in();
     }
 
 private:
-    static const std::string& require_string(const JsonValue& object, const std::string& key) {
-        return object.at(key).as_string();
+    static const std::set<std::string>& rm1_default_ids() {
+        static const std::set<std::string> ids{
+            "NETA-PERF-001","NETA-TRUST-001","NETA-TRUST-002","NETA-PROC-001",
+            "NETA-PROC-002","NETA-PROC-003","NETA-PROC-004","NETA-PROC-005"};
+        return ids;
     }
-
+    static bool is_supported_custom_engine(const std::string& id) {
+        static const std::set<std::string> engines{
+            "NETA-PERF-001","NETA-TRUST-001","NETA-TRUST-002",
+            "NETA-PROC-001","NETA-PROC-002","NETA-PROC-003","NETA-PROC-004","NETA-PROC-005",
+            "NETA-BEH-001","NETA-NET-001","NETA-NET-002","NETA-NET-003","NETA-NET-004",
+            "NETA-DNS-001","NETA-DNS-002","NETA-DNS-003","NETA-TLS-001","NETA-TLS-002","NETA-ROUTE-001"};
+        return engines.contains(id);
+    }
+    static const std::string& require_string(const JsonValue& object, const std::string& key) { return object.at(key).as_string(); }
     static std::uint64_t require_u64(const JsonValue& object, const std::string& key) {
         const double value = object.at(key).as_number();
-        if (!std::isfinite(value) || value < 0.0 || std::floor(value) != value ||
-            value > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
+        if (!std::isfinite(value) || value < 0 || std::floor(value) != value ||
+            value > static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
             throw std::runtime_error(key + " must be a non-negative integer");
-        }
         return static_cast<std::uint64_t>(value);
     }
-
     static bool optional_bool(const JsonValue& object, const std::string& key, bool fallback) {
-        const auto* value = object.find(key);
-        return value ? value->as_boolean() : fallback;
+        const auto* value = object.find(key); return value ? value->as_boolean() : fallback;
     }
-
     static std::string optional_string(const JsonValue& object, const std::string& key) {
-        const auto* value = object.find(key);
-        return value ? value->as_string() : std::string{};
+        const auto* value = object.find(key); return value ? value->as_string() : std::string{};
     }
-
-    static void ensure_keys(const JsonValue& object, std::initializer_list<const char*> allowed,
-                            const std::string& context) {
-        std::set<std::string> valid;
-        for (const char* key : allowed) valid.emplace(key);
+    static void ensure_keys(const JsonValue& object, std::initializer_list<const char*> allowed, const std::string& context) {
+        std::set<std::string> valid; for (const char* key : allowed) valid.emplace(key);
         for (const auto& [key, unused] : object.as_object()) {
-            (void)unused;
-            if (!valid.contains(key)) throw std::runtime_error(context + " contains unsupported field: " + key);
+            (void)unused; if (!valid.contains(key)) throw std::runtime_error(context + " contains unsupported field: " + key);
         }
     }
-
-    static double require_parameter(const JsonValue& parameters, const std::string& key) {
-        const double value = parameters.at(key).as_number();
-        if (!std::isfinite(value)) throw std::runtime_error("parameter " + key + " must be finite");
-        return value;
+    static void ensure_parameter_keys(const RuleDefinition& definition, std::initializer_list<const char*> allowed) {
+        std::set<std::string> valid; for (const char* key : allowed) valid.emplace(key);
+        const auto check = [&](const auto& parameters) {
+            for (const auto& [key, unused] : parameters) { (void)unused;
+                if (!valid.contains(key)) throw std::runtime_error(definition.id + " contains unsupported parameter: " + key);
+            }
+        };
+        check(definition.numeric_parameters); check(definition.boolean_parameters);
+        check(definition.string_parameters); check(definition.string_list_parameters);
     }
-
-    static RuleDefinition parse_definition(const JsonValue& value) {
-        ensure_keys(value, {"id", "name", "category", "severity", "enabled", "parameters"}, "rule");
-        RuleDefinition definition;
-        definition.id = require_string(value, "id");
-        definition.name = require_string(value, "name");
-        definition.category = require_string(value, "category");
-        definition.severity = optional_string(value, "severity");
-        definition.enabled = optional_bool(value, "enabled", true);
-        if (definition.id.empty() || definition.name.empty() || definition.category.empty()) {
-            throw std::runtime_error("rule id, name, and category must be non-empty");
+    static std::vector<std::string> string_array(const JsonValue& value) {
+        std::vector<std::string> result;
+        for (const auto& item : value.as_array()) {
+            const auto& text = item.as_string();
+            if (text.empty()) throw std::runtime_error("string-list values may not be empty");
+            result.push_back(text);
         }
-        if (const auto* parameters = value.find("parameters")) {
-            for (const auto& [key, parameter] : parameters->as_object()) {
-                definition.numeric_parameters.emplace(key, parameter.as_number());
+        return result;
+    }
+    static RuleExclusion parse_exclusion(const JsonValue& value) {
+        ensure_keys(value,{"process_names","executable_paths","process_path_prefixes","parent_process_names","users",
+                           "remote_hosts","remote_ips","remote_ports","local_ports","domains","directions"},"rule exclusion");
+        RuleExclusion out;
+        const auto read = [&](const char* key, std::vector<std::string>& target) {
+            if (const auto* item = value.find(key)) target = string_array(*item);
+        };
+        read("process_names",out.process_names); read("executable_paths",out.executable_paths);
+        read("process_path_prefixes",out.process_path_prefixes); read("parent_process_names",out.parent_process_names);
+        read("users",out.users); read("remote_hosts",out.remote_hosts); read("remote_ips",out.remote_ips);
+        read("remote_ports",out.remote_ports); read("local_ports",out.local_ports); read("domains",out.domains);
+        read("directions",out.directions);
+        for (const auto& direction : out.directions) {
+            const auto normalized = exclusion_normalized(direction);
+            if (normalized != "inbound" && normalized != "outbound" && normalized != "unknown")
+                throw std::runtime_error("exclude.directions accepts inbound, outbound, or unknown");
+        }
+        return out;
+    }
+    static RuleDefinition parse_definition(const JsonValue& value, std::uint64_t schema_version) {
+        if (schema_version == 1)
+            ensure_keys(value,{"id","name","category","severity","enabled","parameters"},"rule");
+        else
+            ensure_keys(value,{"id","engine_rule_id","name","category","severity","enabled","parameters","exclude"},"rule");
+        RuleDefinition d;
+        d.id=require_string(value,"id"); d.engine_rule_id=optional_string(value,"engine_rule_id");
+        if (d.engine_rule_id.empty()) d.engine_rule_id=d.id;
+        d.name=require_string(value,"name"); d.category=require_string(value,"category");
+        d.severity=optional_string(value,"severity"); d.enabled=optional_bool(value,"enabled",true);
+        if (d.id.empty()||d.engine_rule_id.empty()||d.name.empty()||d.category.empty())
+            throw std::runtime_error("rule id, engine_rule_id, name, and category must be non-empty");
+        if (const auto* parameters=value.find("parameters")) {
+            for (const auto& [key,p] : parameters->as_object()) {
+                if (p.is_number()) d.numeric_parameters.emplace(key,p.as_number());
+                else if (p.is_boolean()) d.boolean_parameters.emplace(key,p.as_boolean());
+                else if (p.is_string()) d.string_parameters.emplace(key,p.as_string());
+                else if (p.is_array()) d.string_list_parameters.emplace(key,string_array(p));
+                else throw std::runtime_error("unsupported parameter type for " + key);
             }
         }
-        return definition;
+        if (schema_version >= 2) if (const auto* exclusion=value.find("exclude")) d.exclude=parse_exclusion(*exclusion);
+        return d;
     }
-
+    static void require_category(const RuleDefinition& d,const char* expected) {
+        if (d.category!=expected) throw std::runtime_error(d.id + " must use " + expected + " category");
+    }
+    static std::uint64_t positive_integer(const RuleDefinition& d,const std::string& name) {
+        const double value=d.numeric(name);
+        if (!std::isfinite(value)||value<=0||std::floor(value)!=value||value>static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
+            throw std::runtime_error(d.id + " parameter " + name + " must be a positive integer");
+        return static_cast<std::uint64_t>(value);
+    }
+    static void fraction(const RuleDefinition& d,const std::string& name) {
+        const auto value=d.numeric(name); if (!std::isfinite(value)||value<0||value>1)
+            throw std::runtime_error(d.id + " parameter " + name + " must be between 0 and 1");
+    }
+    static void validate_severity(const RuleDefinition& d) {
+        if (d.severity!="low"&&d.severity!="medium"&&d.severity!="high")
+            throw std::runtime_error(d.id + " severity must be low, medium, or high");
+    }
+    static void validate_engine(RuleDefinition& d,RuleSet& set) {
+        const auto& e=d.engine_rule_id;
+        if (e=="NETA-PERF-001") {
+            require_category(d,"performance"); ensure_parameter_keys(d,{"rtt_ratio","rttvar_ratio","retransmission_threshold","rtt_weight","rttvar_weight","retransmission_weight","degraded_threshold"});
+            (void)positive_integer(d,"retransmission_threshold");
+            if (d.numeric("rtt_ratio")<=0||d.numeric("rttvar_ratio")<=0||d.numeric("rtt_weight")<0||d.numeric("rttvar_weight")<0||d.numeric("retransmission_weight")<0||d.numeric("degraded_threshold")<=0)
+                throw std::runtime_error(d.id + " has invalid performance ratios/weights/threshold");
+            if (d.id==e) { set.performance_enabled=d.enabled; set.rtt_ratio=d.numeric("rtt_ratio"); set.rttvar_ratio=d.numeric("rttvar_ratio"); set.retransmission_threshold=positive_integer(d,"retransmission_threshold"); set.rtt_weight=d.numeric("rtt_weight"); set.rttvar_weight=d.numeric("rttvar_weight"); set.retransmission_weight=d.numeric("retransmission_weight"); set.degraded_threshold=d.numeric("degraded_threshold"); }
+        } else if (e=="NETA-TRUST-001") {
+            require_category(d,"trust"); ensure_parameter_keys(d,{"require_chain_valid","require_hostname_valid","compare_spki"});
+            (void)d.boolean("require_chain_valid"); (void)d.boolean("require_hostname_valid"); (void)d.boolean("compare_spki");
+            if (d.id==e) { set.outbound_tls_identity=d.enabled; set.outbound_require_chain_valid=d.boolean("require_chain_valid"); set.outbound_require_hostname_valid=d.boolean("require_hostname_valid"); set.outbound_compare_spki=d.boolean("compare_spki"); }
+        } else if (e=="NETA-TRUST-002") {
+            require_category(d,"trust"); ensure_parameter_keys(d,{"require_exact_evidence","require_peer_certificate","require_peer_authentication","verification_failure_suspicious","compare_spki","compare_issuer"});
+            (void)d.boolean("require_exact_evidence"); (void)d.boolean("require_peer_certificate"); (void)d.boolean("require_peer_authentication"); (void)d.boolean("verification_failure_suspicious"); (void)d.boolean("compare_spki"); (void)d.boolean("compare_issuer");
+            if (d.id==e) { set.inbound_authenticated_identity=d.enabled; set.inbound_require_exact_evidence=d.boolean("require_exact_evidence"); set.inbound_require_peer_certificate=d.boolean("require_peer_certificate"); set.inbound_require_peer_authentication=d.boolean("require_peer_authentication"); set.inbound_verification_failure_suspicious=d.boolean("verification_failure_suspicious"); set.inbound_compare_spki=d.boolean("compare_spki"); set.inbound_compare_issuer=d.boolean("compare_issuer"); }
+        } else if (e=="NETA-PROC-001") { require_category(d,"process"); ensure_parameter_keys(d,{"path_prefixes","path_substrings"}); (void)d.string_list("path_prefixes"); (void)d.string_list("path_substrings"); }
+        else if (e=="NETA-PROC-002") { require_category(d,"process"); ensure_parameter_keys(d,{"shell_names","expected_parent_names"}); (void)d.string_list("shell_names"); (void)d.string_list("expected_parent_names"); }
+        else if (e=="NETA-PROC-003") { require_category(d,"process"); ensure_parameter_keys(d,{"expected_parent_names"}); (void)d.string_list("expected_parent_names"); }
+        else if (e=="NETA-PROC-004") { require_category(d,"process"); ensure_parameter_keys(d,{"child_count","window_ms"}); (void)positive_integer(d,"child_count"); (void)positive_integer(d,"window_ms"); }
+        else if (e=="NETA-PROC-005") { require_category(d,"process"); ensure_parameter_keys(d,{"child_count","max_lifetime_ms","window_ms"}); (void)positive_integer(d,"child_count"); (void)positive_integer(d,"max_lifetime_ms"); (void)positive_integer(d,"window_ms"); }
+        else if (e=="NETA-BEH-001") { require_category(d,"behavior"); ensure_parameter_keys(d,{"minimum_connections","window_ms","minimum_interval_ms","maximum_interval_ms","interval_tolerance_ratio","minimum_regular_fraction","recent_connection_limit"}); (void)positive_integer(d,"minimum_connections"); (void)positive_integer(d,"window_ms"); (void)positive_integer(d,"minimum_interval_ms"); (void)positive_integer(d,"maximum_interval_ms"); (void)positive_integer(d,"recent_connection_limit"); fraction(d,"interval_tolerance_ratio"); fraction(d,"minimum_regular_fraction"); }
+        else if (e=="NETA-NET-001") { require_category(d,"network"); ensure_parameter_keys(d,{"minimum_bytes_received"}); (void)positive_integer(d,"minimum_bytes_received"); }
+        else if (e=="NETA-NET-002") { require_category(d,"network"); ensure_parameter_keys(d,{"retransmission_threshold"}); (void)positive_integer(d,"retransmission_threshold"); }
+        else if (e=="NETA-NET-003") { require_category(d,"network"); ensure_parameter_keys(d,{"allowed_ports"}); (void)d.string_list("allowed_ports"); }
+        else if (e=="NETA-NET-004") { require_category(d,"network"); ensure_parameter_keys(d,{"maximum_prevalence"}); (void)positive_integer(d,"maximum_prevalence"); }
+        else if (e=="NETA-DNS-001") { require_category(d,"dns"); ensure_parameter_keys(d,{"minimum_failures"}); (void)positive_integer(d,"minimum_failures"); }
+        else if (e=="NETA-DNS-002") { require_category(d,"dns"); ensure_parameter_keys(d,{"require_remote_ip_match"}); (void)d.boolean("require_remote_ip_match"); }
+        else if (e=="NETA-DNS-003") { require_category(d,"dns"); ensure_parameter_keys(d,{"maximum_distinct_answers"}); (void)positive_integer(d,"maximum_distinct_answers"); }
+        else if (e=="NETA-TLS-001") { require_category(d,"tls"); ensure_parameter_keys(d,{"require_peer_authentication","verification_failure_match"}); (void)d.boolean("require_peer_authentication"); (void)d.boolean("verification_failure_match"); }
+        else if (e=="NETA-TLS-002") { require_category(d,"tls"); ensure_parameter_keys(d,{"compare_spki","compare_issuer"}); (void)d.boolean("compare_spki"); (void)d.boolean("compare_issuer"); }
+        else if (e=="NETA-ROUTE-001") { require_category(d,"route"); ensure_parameter_keys(d,{"allowed_gateways","allowed_interfaces"}); (void)d.string_list("allowed_gateways"); (void)d.string_list("allowed_interfaces"); }
+        else throw std::runtime_error("unsupported engine_rule_id: " + e);
+    }
     static RuleSet parse_root(const JsonValue& root) {
-        ensure_keys(root, {"schema_version", "id", "revision", "version", "rules"}, "rule set");
-        RuleSet set;
-        set.schema_version = require_u64(root, "schema_version");
-        set.id = require_string(root, "id");
-        set.revision = require_u64(root, "revision");
-        set.version = require_string(root, "version");
-        if (set.schema_version != 1) throw std::runtime_error("unsupported rule schema version");
-        if (set.id.empty() || set.revision == 0 || set.version.empty()) {
-            throw std::runtime_error("rule set id/version must be non-empty and revision must be positive");
-        }
-
-        bool performance_seen = false;
-        bool outbound_trust_seen = false;
-        bool inbound_trust_seen = false;
+        ensure_keys(root,{"schema_version","id","revision","version","rules"},"rule set");
+        RuleSet set; set.schema_version=require_u64(root,"schema_version"); set.id=require_string(root,"id"); set.revision=require_u64(root,"revision"); set.version=require_string(root,"version");
+        if (set.schema_version!=1&&set.schema_version!=2) throw std::runtime_error("unsupported rule schema version");
+        if (set.id.empty()||set.revision==0||set.version.empty()) throw std::runtime_error("rule set id/version must be non-empty and revision must be positive");
         std::set<std::string> ids;
-
         for (const auto& item : root.at("rules").as_array()) {
-            RuleDefinition definition = parse_definition(item);
-            if (!ids.insert(definition.id).second) throw std::runtime_error("duplicate rule id: " + definition.id);
-
-            if (definition.id == "NETA-PERF-001") {
-                if (!definition.enabled) throw std::runtime_error("NETA-PERF-001 cannot be disabled in schema v1");
-                if (definition.category != "performance") throw std::runtime_error("NETA-PERF-001 must use performance category");
-                const auto& parameters = item.at("parameters");
-                ensure_keys(parameters,
-                            {"rtt_ratio", "rttvar_ratio", "retransmission_threshold", "rtt_weight",
-                             "rttvar_weight", "retransmission_weight", "degraded_threshold"},
-                            "NETA-PERF-001 parameters");
-                set.rtt_ratio = require_parameter(parameters, "rtt_ratio");
-                set.rttvar_ratio = require_parameter(parameters, "rttvar_ratio");
-                const double retransmissions = require_parameter(parameters, "retransmission_threshold");
-                if (retransmissions < 0.0 || std::floor(retransmissions) != retransmissions ||
-                    retransmissions > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
-                    throw std::runtime_error("retransmission_threshold must be a non-negative integer");
-                }
-                set.retransmission_threshold = static_cast<std::uint64_t>(retransmissions);
-                set.rtt_weight = require_parameter(parameters, "rtt_weight");
-                set.rttvar_weight = require_parameter(parameters, "rttvar_weight");
-                set.retransmission_weight = require_parameter(parameters, "retransmission_weight");
-                set.degraded_threshold = require_parameter(parameters, "degraded_threshold");
-                if (set.rtt_ratio <= 0.0 || set.rttvar_ratio <= 0.0 || set.rtt_weight < 0.0 ||
-                    set.rttvar_weight < 0.0 || set.retransmission_weight < 0.0 ||
-                    set.degraded_threshold <= 0.0) {
-                    throw std::runtime_error("performance ratios/weights/thresholds must be non-negative and thresholds positive");
-                }
-                performance_seen = true;
-            } else if (definition.id == "NETA-TRUST-001") {
-                if (definition.category != "trust") throw std::runtime_error("NETA-TRUST-001 must use trust category");
-                if (!definition.enabled) throw std::runtime_error("NETA-TRUST-001 cannot be disabled in schema v1");
-                if (const auto* parameters = item.find("parameters"); parameters && !parameters->as_object().empty()) {
-                    throw std::runtime_error("NETA-TRUST-001 does not accept parameters in schema v1");
-                }
-                outbound_trust_seen = true;
-            } else if (definition.id == "NETA-TRUST-002") {
-                if (definition.category != "trust") throw std::runtime_error("NETA-TRUST-002 must use trust category");
-                if (const auto* parameters = item.find("parameters"); parameters && !parameters->as_object().empty()) {
-                    throw std::runtime_error("NETA-TRUST-002 does not accept parameters in schema v1");
-                }
-                set.inbound_authenticated_identity = definition.enabled;
-                inbound_trust_seen = true;
-            } else {
-                throw std::runtime_error("unsupported rule id in schema v1: " + definition.id);
-            }
-            set.definitions.push_back(std::move(definition));
+            RuleDefinition d=parse_definition(item,set.schema_version);
+            if (!ids.insert(d.id).second) throw std::runtime_error("duplicate rule id: " + d.id);
+            validate_severity(d);
+            if (set.schema_version==1&&d.engine_rule_id!=d.id) throw std::runtime_error("schema v1 does not support a distinct engine_rule_id");
+            if (d.id!=d.engine_rule_id&&!is_supported_custom_engine(d.engine_rule_id)) throw std::runtime_error("unsupported custom trusted engine: " + d.engine_rule_id);
+            if (d.id!=d.engine_rule_id&&!d.id.starts_with("CUS-")) throw std::runtime_error("custom centrally managed rule ids must start with CUS-");
+            validate_engine(d,set); set.definitions.push_back(std::move(d));
         }
-
-        if (!performance_seen || !outbound_trust_seen || !inbound_trust_seen) {
-            throw std::runtime_error("schema v1 requires NETA-PERF-001, NETA-TRUST-001, and NETA-TRUST-002");
-        }
+        for (const auto& required : rm1_default_ids()) if (!ids.contains(required)) throw std::runtime_error("rule set is missing required default rule: " + required);
+        if (set.schema_version==1&&ids!=rm1_default_ids()) throw std::runtime_error("schema v1 permits only the RM1 default rule catalog");
         return set;
     }
 
-    static const char* default_document() {
-        return R"JSON({
-  "schema_version": 1,
-  "id": "neta-default",
-  "revision": 1,
-  "version": "neta-rules/0.2.0",
-  "rules": [
-    {
-      "id": "NETA-PERF-001",
-      "name": "Network path degradation",
-      "category": "performance",
-      "severity": "medium",
-      "enabled": true,
-      "parameters": {
-        "rtt_ratio": 2.0,
-        "rttvar_ratio": 2.0,
-        "retransmission_threshold": 2,
-        "rtt_weight": 0.50,
-        "rttvar_weight": 0.20,
-        "retransmission_weight": 0.30,
-        "degraded_threshold": 0.50
-      }
-    },
-    {
-      "id": "NETA-TRUST-001",
-      "name": "Outbound TLS identity",
-      "category": "trust",
-      "severity": "high",
-      "enabled": true,
-      "parameters": {}
-    },
-    {
-      "id": "NETA-TRUST-002",
-      "name": "Inbound authenticated TLS identity",
-      "category": "trust",
-      "severity": "high",
-      "enabled": true,
-      "parameters": {}
-    }
-  ]
-})JSON";
-    }
+    static const char* rm1_document() { return R"JSON({"schema_version":1,"id":"neta-default","revision":2,"version":"neta-rules/0.3.0","rules":[
+{"id":"NETA-PERF-001","name":"Network path degradation","category":"performance","severity":"medium","enabled":true,"parameters":{"rtt_ratio":2.0,"rttvar_ratio":2.0,"retransmission_threshold":2,"rtt_weight":0.5,"rttvar_weight":0.2,"retransmission_weight":0.3,"degraded_threshold":0.5}},
+{"id":"NETA-TRUST-001","name":"Outbound TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_chain_valid":true,"require_hostname_valid":true,"compare_spki":true}},
+{"id":"NETA-TRUST-002","name":"Inbound authenticated TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_exact_evidence":true,"require_peer_certificate":true,"require_peer_authentication":true,"verification_failure_suspicious":true,"compare_spki":true,"compare_issuer":true}},
+{"id":"NETA-PROC-001","name":"Execution from transient path","category":"process","severity":"medium","enabled":true,"parameters":{"path_prefixes":["/tmp/","/var/tmp/","/dev/shm/"],"path_substrings":["/appdata/local/temp/","/windows/temp/"]}},
+{"id":"NETA-PROC-002","name":"Shell from unexpected parent","category":"process","severity":"medium","enabled":true,"parameters":{"shell_names":["sh","bash","dash","zsh","ksh","fish","powershell","powershell.exe","pwsh","pwsh.exe","cmd","cmd.exe"],"expected_parent_names":["sh","bash","dash","zsh","ksh","fish","powershell","powershell.exe","pwsh","pwsh.exe","cmd","cmd.exe","sshd","sudo","su","login","systemd","init","tmux","screen","gnome-terminal-server","konsole","windowsterminal.exe","wt.exe","conhost.exe","explorer.exe","winlogon.exe"]}},
+{"id":"NETA-PROC-003","name":"Unexpected elevation","category":"process","severity":"medium","enabled":true,"parameters":{"expected_parent_names":["sudo","su","pkexec","doas","consent.exe"]}},
+{"id":"NETA-PROC-004","name":"Rapid child process fanout","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"window_ms":10000}},
+{"id":"NETA-PROC-005","name":"Short-lived process burst","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"max_lifetime_ms":2000,"window_ms":15000}}]})JSON"; }
+
+    static const char* default_document() { return R"JSON({"schema_version":2,"id":"neta-default","revision":4,"version":"neta-rules/0.4.1","rules":[
+{"id":"NETA-PERF-001","engine_rule_id":"NETA-PERF-001","name":"Network path degradation","category":"performance","severity":"medium","enabled":true,"parameters":{"rtt_ratio":2.0,"rttvar_ratio":2.0,"retransmission_threshold":2,"rtt_weight":0.5,"rttvar_weight":0.2,"retransmission_weight":0.3,"degraded_threshold":0.5}},
+{"id":"NETA-TRUST-001","engine_rule_id":"NETA-TRUST-001","name":"Outbound TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_chain_valid":true,"require_hostname_valid":true,"compare_spki":true}},
+{"id":"NETA-TRUST-002","engine_rule_id":"NETA-TRUST-002","name":"Inbound authenticated TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_exact_evidence":true,"require_peer_certificate":true,"require_peer_authentication":true,"verification_failure_suspicious":true,"compare_spki":true,"compare_issuer":true}},
+{"id":"NETA-PROC-001","engine_rule_id":"NETA-PROC-001","name":"Execution from transient path","category":"process","severity":"medium","enabled":true,"parameters":{"path_prefixes":["/tmp/","/var/tmp/","/dev/shm/"],"path_substrings":["/appdata/local/temp/","/windows/temp/"]}},
+{"id":"NETA-PROC-002","engine_rule_id":"NETA-PROC-002","name":"Shell from unexpected parent","category":"process","severity":"medium","enabled":true,"parameters":{"shell_names":["sh","bash","dash","zsh","ksh","fish","powershell","powershell.exe","pwsh","pwsh.exe","cmd","cmd.exe"],"expected_parent_names":["sh","bash","dash","zsh","ksh","fish","powershell","powershell.exe","pwsh","pwsh.exe","cmd","cmd.exe","sshd","sudo","su","login","systemd","init","tmux","screen","gnome-terminal-server","konsole","windowsterminal.exe","wt.exe","conhost.exe","explorer.exe","winlogon.exe"]}},
+{"id":"NETA-PROC-003","engine_rule_id":"NETA-PROC-003","name":"Unexpected elevation","category":"process","severity":"medium","enabled":true,"parameters":{"expected_parent_names":["sudo","su","pkexec","doas","consent.exe"]}},
+{"id":"NETA-PROC-004","engine_rule_id":"NETA-PROC-004","name":"Rapid child process fanout","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"window_ms":10000}},
+{"id":"NETA-PROC-005","engine_rule_id":"NETA-PROC-005","name":"Short-lived process burst","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"max_lifetime_ms":2000,"window_ms":15000}},
+{"id":"NETA-BEH-001","engine_rule_id":"NETA-BEH-001","name":"Periodic outbound connection pattern","category":"behavior","severity":"medium","enabled":true,"parameters":{"minimum_connections":8,"window_ms":90000,"minimum_interval_ms":3000,"maximum_interval_ms":15000,"interval_tolerance_ratio":0.2,"minimum_regular_fraction":0.8,"recent_connection_limit":512}},
+{"id":"NETA-NET-001","engine_rule_id":"NETA-NET-001","name":"Large ingress transfer","category":"network","severity":"low","enabled":true,"parameters":{"minimum_bytes_received":268435456}},
+{"id":"NETA-NET-002","engine_rule_id":"NETA-NET-002","name":"TCP retransmission spike","category":"network","severity":"medium","enabled":true,"parameters":{"retransmission_threshold":5}},
+{"id":"NETA-NET-003","engine_rule_id":"NETA-NET-003","name":"Unusual outbound destination port","category":"network","severity":"low","enabled":false,"parameters":{"allowed_ports":["22","25","53","80","110","123","143","443","465","587","853","993","995","3389"]}},
+{"id":"NETA-NET-004","engine_rule_id":"NETA-NET-004","name":"Rare outbound destination","category":"network","severity":"medium","enabled":false,"parameters":{"maximum_prevalence":2}},
+{"id":"NETA-DNS-001","engine_rule_id":"NETA-DNS-001","name":"Repeated DNS resolution failures","category":"dns","severity":"medium","enabled":true,"parameters":{"minimum_failures":3}},
+{"id":"NETA-DNS-002","engine_rule_id":"NETA-DNS-002","name":"DNS answer and connection mismatch","category":"dns","severity":"medium","enabled":true,"parameters":{"require_remote_ip_match":true}},
+{"id":"NETA-DNS-003","engine_rule_id":"NETA-DNS-003","name":"DNS answer churn","category":"dns","severity":"low","enabled":false,"parameters":{"maximum_distinct_answers":12}},
+{"id":"NETA-TLS-001","engine_rule_id":"NETA-TLS-001","name":"Application TLS validation failure","category":"tls","severity":"high","enabled":true,"parameters":{"require_peer_authentication":true,"verification_failure_match":true}},
+{"id":"NETA-TLS-002","engine_rule_id":"NETA-TLS-002","name":"TLS peer identity change","category":"tls","severity":"high","enabled":true,"parameters":{"compare_spki":true,"compare_issuer":true}},
+{"id":"NETA-ROUTE-001","engine_rule_id":"NETA-ROUTE-001","name":"Unexpected route gateway or interface","category":"route","severity":"medium","enabled":false,"parameters":{"allowed_gateways":[],"allowed_interfaces":[]}}]})JSON"; }
 };
 
 } // namespace neta::rules

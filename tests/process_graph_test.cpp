@@ -1,6 +1,8 @@
+#include "neta/context_rule_engine.hpp"
 #include "neta/process_finding_store.hpp"
 #include "neta/process_graph.hpp"
 #include "neta/process_findings.hpp"
+#include "neta/rules/rule_set_loader.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -81,8 +83,6 @@ int main() {
     const auto initial_findings = snapshot_engine.evaluate_snapshot(graph);
     assert(has_finding(initial_findings, ProcessFindingKind::ExecFromTransientPath));
 
-    // MS5.2 persistence: durable process identity, deduplicated finding key,
-    // occurrence count, and retry/report state all survive beyond the graph.
     {
         const auto db = std::filesystem::temp_directory_path() / "neta-process-findings-ms52-test.sqlite";
         std::error_code ec;
@@ -97,9 +97,11 @@ int main() {
                 return finding.kind == ProcessFindingKind::ExecFromTransientPath;
             });
             assert(transient != initial_findings.end());
+            assert(transient->rule_id == "NETA-PROC-001");
+            assert(transient->ruleset_version == kRuleSetVersion);
             const auto first = store.upsert_finding(*transient);
             assert(first.finding_id.starts_with("FINDING-PROC-"));
-            assert(first.finding_key.find("PROCESS_EXEC_FROM_TRANSIENT_PATH") != std::string::npos);
+            assert(first.finding_key.find("NETA-PROC-001") != std::string::npos);
             assert(first.report_state == "PENDING");
             assert(first.occurrence_count == 1);
             const auto second = store.upsert_finding(*transient);
@@ -174,7 +176,6 @@ int main() {
     const auto nodes = graph.snapshot();
     assert(nodes.size() == 5);
 
-    // Cross-platform transient path normalization.
     {
         ProcessGraph windows_graph;
         auto win = start_event(300, 9'000, 9'000);
@@ -187,7 +188,6 @@ int main() {
         assert(has_finding(findings, ProcessFindingKind::ExecFromTransientPath));
     }
 
-    // Parent/child semantic findings.
     {
         ProcessGraph finding_graph;
         auto service = start_event(400, 10'000, 10'000);
@@ -208,11 +208,35 @@ int main() {
         assert(has_finding(findings, ProcessFindingKind::UnexpectedElevation));
     }
 
-    // Event-time fan-out and short-lived burst rules.
+    // Known privilege brokers are configured in NETA-PROC-003 and do not emit
+    // an unexpected-elevation finding.
+    {
+        ProcessGraph finding_graph;
+        auto sudo = start_event(450, 11'000, 11'000);
+        sudo.executable_path = "/usr/bin/sudo";
+        sudo.comm = "sudo";
+        sudo.elevated = false;
+        assert(finding_graph.observe(sudo));
+        auto elevated = start_event(451, 11'100, 11'100);
+        elevated.parent_tgid = 450;
+        elevated.parent_process_start_time_ns = 11'000;
+        elevated.executable_path = "/usr/bin/id";
+        elevated.comm = "id";
+        elevated.elevated = true;
+        assert(finding_graph.observe(elevated));
+        const auto findings = snapshot_engine.evaluate_snapshot(finding_graph);
+        assert(!has_finding(findings, ProcessFindingKind::UnexpectedElevation));
+    }
+
     {
         ProcessFindingConfig config;
+        config.ruleset_version = "test-rules";
+        config.fanout_enabled = true;
+        config.fanout_severity = "medium";
         config.fanout_count = 3;
         config.fanout_window_ns = 1'000;
+        config.short_lived_enabled = true;
+        config.short_lived_severity = "medium";
         config.short_lived_count = 3;
         config.short_lived_max_ns = 100;
         config.short_lived_window_ns = 1'000;
@@ -244,8 +268,46 @@ int main() {
         }
         assert(has_finding(start_findings, ProcessFindingKind::RapidChildFanout));
         assert(has_finding(exit_findings, ProcessFindingKind::ShortLivedProcessBurst));
+        assert(start_findings.back().rule_id == "NETA-PROC-004");
+        assert(exit_findings.back().rule_id == "NETA-PROC-005");
     }
 
-    std::cout << "process graph, MS5.1 findings, and MS5.2 persistence tests passed\n";
+    // RM2 keeps the RM1 snapshot replayable while expanding the built-in catalog.
+    {
+        const auto rm1 = rules::RuleSetLoader::rm1_built_in();
+        const auto rm2 = rules::RuleSetLoader::built_in();
+        assert(rm1.version == kRm1RuleSetVersion);
+        assert(rm1.definitions.size() == 8);
+        assert(rm2.version == kRuleSetVersion);
+        assert(rm2.definitions.size() == 19);
+    }
+
+    // A custom network rule is an independent instance of a trusted evaluator.
+    // It can match even when the default engine instance does not.
+    {
+        RuleSet rm2 = rules::RuleSetLoader::built_in();
+        auto custom = rm2.rule("NETA-NET-002");
+        custom.id = "CUS-RETRANS-STRICT";
+        custom.name = "Strict retransmission spike";
+        custom.severity = "high";
+        custom.numeric_parameters["retransmission_threshold"] = 1.0;
+        rm2.definitions.push_back(custom);
+
+        ConnectionRuleContext context;
+        context.connection.direction = ConnectionDirection::Outbound;
+        context.connection.remote_ip = "203.0.113.8";
+        context.connection.remote_port = 443;
+        context.metrics.retransmission_delta = 2;
+        const auto matches = ContextRuleEngine(rm2).evaluate(context);
+        assert(std::none_of(matches.begin(), matches.end(), [](const ContextRuleMatch& match) {
+            return match.rule_id == "NETA-NET-002";
+        }));
+        assert(std::any_of(matches.begin(), matches.end(), [](const ContextRuleMatch& match) {
+            return match.rule_id == "CUS-RETRANS-STRICT" && match.engine_rule_id == "NETA-NET-002" &&
+                   match.severity == "high";
+        }));
+    }
+
+    std::cout << "process graph, unified RM2 rules, and MS5.2 persistence tests passed\n";
     return 0;
 }

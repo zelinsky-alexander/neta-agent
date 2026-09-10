@@ -145,6 +145,8 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet status [--state-dir DIR]\n"
             << "  neta-agent fleet hello [--state-dir DIR]\n"
             << "  neta-agent fleet heartbeat [--state-dir DIR]\n"
+            << "  neta-agent fleet rules-status [--state-dir DIR]\n"
+            << "  neta-agent fleet rules-update [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-status [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-download [--state-dir DIR]\n"
             << "  neta-agent health --upgrade --state-dir DIR\n"

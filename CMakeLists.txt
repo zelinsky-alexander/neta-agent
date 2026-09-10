@@ -275,6 +275,7 @@ add_library(neta_core
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     ${NETA_FLEET_CLIENT_SOURCE}
+    src/core/rule_fleet_client.cpp
     src/core/history_store.cpp
     src/core/history_reconciliation.cpp
     src/core/history_environment.cpp

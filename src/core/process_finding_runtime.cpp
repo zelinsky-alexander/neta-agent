@@ -1,10 +1,9 @@
 #include "neta/process_finding_runtime.hpp"
 
 #include "neta/fleet_client.hpp"
+#include "neta/rules/rule_set_loader.hpp"
 
-#include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -30,33 +29,40 @@ const ProcessNode* node_for_event(const ProcessExecEvent& event,
     return nullptr;
 }
 
-std::string image_leaf(std::string path) {
-    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
-        return ch == '\\' ? '/' : static_cast<char>(std::tolower(ch));
-    });
-    const auto slash = path.find_last_of('/');
-    return slash == std::string::npos ? path : path.substr(slash + 1);
+std::string image_name(const std::string& image) {
+    const auto normalized = rules::exclusion_normalized(image);
+    const auto slash = normalized.find_last_of('/');
+    return slash == std::string::npos ? normalized : normalized.substr(slash + 1);
 }
 
-bool expected_privilege_broker_transition(const StoredProcessFinding& finding) {
-    if (finding.rule_id != "PROCESS_UNEXPECTED_ELEVATION") return false;
-    const auto parent = image_leaf(finding.parent_image);
-    return parent == "sudo" || parent == "su" || parent == "pkexec" ||
-           parent == "doas" || parent == "consent.exe";
+bool excluded_process_finding(const ProcessFinding& finding, const ProcessGraph& graph) {
+    const auto ruleset = rules::RuleSetLoader::active();
+    const rules::RuleDefinition* rule = nullptr;
+    for (const auto& candidate : ruleset.definitions) {
+        if (candidate.id == finding.rule_id) { rule = &candidate; break; }
+    }
+    if (rule == nullptr || rule->exclude.empty()) return false;
+    const auto& exclusion = rule->exclude;
+    if (rules::exclusion_contains(exclusion.process_names, image_name(finding.process_image)) ||
+        rules::exclusion_contains(exclusion.executable_paths, finding.process_image) ||
+        rules::exclusion_prefix(exclusion.process_path_prefixes, finding.process_image) ||
+        rules::exclusion_contains(exclusion.parent_process_names, image_name(finding.parent_image))) return true;
+    if (const auto node = graph.find(finding.process)) {
+        if (node->uid && rules::exclusion_contains(exclusion.users, std::to_string(*node->uid))) return true;
+        if (rules::exclusion_contains(exclusion.process_names, node->comm) ||
+            rules::exclusion_contains(exclusion.executable_paths, node->executable_path) ||
+            rules::exclusion_prefix(exclusion.process_path_prefixes, node->executable_path)) return true;
+    }
+    return false;
 }
 
 FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
     FindingAnnouncementInput input;
     input.finding_id = finding.finding_id;
     input.finding_key = finding.finding_key;
-
-    // Backward-compatible NAP/1 transport: old coordinators still see a valid
-    // target object, while MS5.2 coordinators normalize transport=process into
-    // a generic PROCESS subject and clear the network target columns.
     input.host = "process:" + finding.process_key;
     input.port = 1;
     input.transport = "process";
-
     input.subject_type = "PROCESS";
     input.subject_id = finding.process_key;
     input.subject_pid = finding.pid;
@@ -66,14 +72,9 @@ FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
     input.subject_command_line = finding.command_line;
     input.severity = finding.severity;
     input.rule_id = finding.rule_id;
-    input.rule_set_id = "neta-process-rules";
+    input.rule_set_id = "neta-default";
     input.rule_set_version = finding.ruleset_version;
     input.interpretation = finding.interpretation;
-
-    // Existing FindingAnnouncement serializers only emit the legacy fields.
-    // Carry the structured MS5.2 semantics in changes as well, so both old and
-    // new coordinators preserve the evidence. New coordinators normalize these
-    // into dedicated columns during ingestion.
     input.changes.push_back("Rule: " + finding.rule_id);
     input.changes.push_back("Severity: " + finding.severity);
     input.changes.push_back("Ruleset: " + finding.ruleset_version);
@@ -96,9 +97,7 @@ ProcessFindingRuntime::ProcessFindingRuntime(const std::filesystem::path& databa
     : store_(database) {}
 
 void ProcessFindingRuntime::bootstrap(const std::vector<ProcessExecEvent>& snapshot) {
-    for (const auto& event : snapshot) {
-        static_cast<void>(graph_.observe(event));
-    }
+    for (const auto& event : snapshot) static_cast<void>(graph_.observe(event));
     for (const auto& node : graph_.snapshot()) store_.upsert_process(node);
     persist_findings(engine_.evaluate_snapshot(graph_));
 }
@@ -110,6 +109,7 @@ void ProcessFindingRuntime::persist_current_node(const ProcessExecEvent& event) 
 
 void ProcessFindingRuntime::persist_findings(const std::vector<ProcessFinding>& findings) {
     for (const auto& finding : findings) {
+        if (excluded_process_finding(finding, graph_)) continue;
         static_cast<void>(store_.upsert_finding(finding));
     }
 }
@@ -126,15 +126,10 @@ ProcessFindingReportResult ProcessFindingRuntime::report_pending(
     const FleetReportingPolicy& policy, bool fleet_identity_available) {
     ProcessFindingReportResult result;
     if (!fleet_identity_available || policy.mode == FleetReportingMode::Off) return result;
-
     constexpr std::uint64_t retry_after_ns = 60'000'000'000ULL;
     const auto current_ns = now_ns();
     for (const auto& finding : store_.pending_for_report(32, current_ns, retry_after_ns)) {
         ++result.considered;
-        if (expected_privilege_broker_transition(finding)) {
-            store_.mark_suppressed(finding.finding_id, current_ns);
-            continue;
-        }
         store_.mark_report_attempt(finding.finding_id, current_ns);
         try {
             static_cast<void>(FleetClient::send_finding(policy.state_dir, announcement(finding)));
