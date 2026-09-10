@@ -4,7 +4,10 @@ set -euo pipefail
 # Enroll this Linux endpoint into a NETA fleet.
 # Usage:
 #   sudo ./deploy/linux/enroll.sh <coordinator-https-url> <fleet-ca.crt> <display-name> [fleet-id]
-# The enrollment token is read without echo and is not placed in shell history.
+#
+# Interactive use prompts for the enrollment token without echo. Automation may
+# instead pass NETA_ENROLLMENT_TOKEN in the environment. The variable is consumed
+# only for this process and is unset before exit.
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run this script with sudo" >&2
@@ -20,7 +23,8 @@ COORDINATOR="$1"
 FLEET_CA="$2"
 DISPLAY_NAME="$3"
 FLEET_ID="${4:-fleet-dev}"
-STATE_DIR="/var/lib/neta/identity"
+STATE_DIR="${NETA_FLEET_STATE_DIR:-/var/lib/neta/identity}"
+TOKEN="${NETA_ENROLLMENT_TOKEN:-}"
 
 if [[ "$COORDINATOR" != https://* ]]; then
   echo "ERROR: coordinator URL must use https://" >&2
@@ -41,13 +45,19 @@ if [[ -e "$STATE_DIR/agent.key" ]]; then
   exit 1
 fi
 
-read -r -s -p "Enrollment token: " TOKEN
-echo
+if [[ -z "$TOKEN" ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: non-interactive enrollment requires NETA_ENROLLMENT_TOKEN" >&2
+    exit 1
+  fi
+  read -r -s -p "Enrollment token: " TOKEN
+  echo
+fi
 if [[ -z "$TOKEN" ]]; then
   echo "ERROR: enrollment token cannot be empty" >&2
   exit 1
 fi
-trap 'unset TOKEN' EXIT
+trap 'unset TOKEN NETA_ENROLLMENT_TOKEN' EXIT
 
 mkdir -p "$STATE_DIR"
 chmod 0700 "$STATE_DIR"
@@ -64,7 +74,7 @@ chmod 0700 "$STATE_DIR"
 chmod 0600 "$STATE_DIR/agent.key" "$STATE_DIR/identity.conf" "$STATE_DIR/sequence"
 chmod 0644 "$STATE_DIR/agent.crt" "$STATE_DIR/fleet-ca.crt"
 
-unset TOKEN
+unset TOKEN NETA_ENROLLMENT_TOKEN
 trap - EXIT
 
 echo "==> Verifying identity"
