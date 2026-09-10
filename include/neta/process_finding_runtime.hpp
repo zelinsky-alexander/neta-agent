@@ -38,6 +38,8 @@ private:
     void persist_current_node(const ProcessExecEvent& event);
     void persist_findings(const std::vector<ProcessFinding>& findings);
     void scan_executed_artifact(const ProcessExecEvent& event);
+    bool report_artifact_evidence(const FleetReportingPolicy& policy,
+                                  bool fleet_identity_available);
 
     ProcessGraph graph_;
     ProcessFindingEngine engine_;
@@ -45,6 +47,7 @@ private:
     ArtifactEvidenceStore artifact_store_;
     AntimalwareProviderSet artifact_providers_;
     std::unordered_map<std::string, std::vector<AntimalwareEvidence>> artifact_scan_cache_;
+    std::unordered_map<std::string, std::uint64_t> artifact_reported_counts_;
 };
 
 }  // namespace neta
