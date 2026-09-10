@@ -48,7 +48,8 @@ TrustState trust_state_from_string(const std::string& value) {
 
 } // namespace neta
 
-// MS5.2 implementation units are included here so all existing supported build
-// manifests pick them up without perturbing platform source lists or linker ABI.
+// MS5.2/RM4 implementation units are included here so all existing supported
+// build manifests pick them up without perturbing platform source lists or linker ABI.
 #include "process_finding_store.cpp"
 #include "process_finding_runtime.cpp"
+#include "artifact_evidence_transport.cpp"
