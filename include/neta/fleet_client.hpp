@@ -60,6 +60,8 @@ public:
     static std::string send_heartbeat(const std::filesystem::path& state_dir);
     static std::string send_finding(const std::filesystem::path& state_dir,
                                     const FindingAnnouncementInput& finding);
+    static std::string send_evidence_summary(const std::filesystem::path& state_dir,
+                                             const std::string& summary_json);
 
     // RM1 central detection-policy plane. Both calls use the enrolled agent mTLS identity.
     static std::string fetch_rule_bundle(const std::filesystem::path& state_dir);
