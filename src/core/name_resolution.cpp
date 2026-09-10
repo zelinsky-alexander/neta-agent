@@ -63,10 +63,10 @@ EvidenceFidelity correlation_fidelity(const ConnectionSummary& connection,
     const bool durable_process = observation.process.start_ticks &&
                                  connection.process.start_ticks &&
                                  *observation.process.start_ticks == *connection.process.start_ticks;
-    const bool same_network_namespace = observation.network_namespace_inode &&
-                                        connection.network_namespace_inode &&
-                                        *observation.network_namespace_inode ==
-                                            *connection.network_namespace_inode;
+    const bool same_network_namespace =
+        (!observation.network_namespace_inode && !connection.network_namespace_inode) ||
+        (observation.network_namespace_inode && connection.network_namespace_inode &&
+         *observation.network_namespace_inode == *connection.network_namespace_inode);
     return durable_process && same_network_namespace
         ? EvidenceFidelity::StronglyCorrelated
         : EvidenceFidelity::Supporting;
