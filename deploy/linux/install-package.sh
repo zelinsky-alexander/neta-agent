@@ -32,7 +32,7 @@ file "$WORK/neta-agent" | grep -Eq "$EXPECTED" || { echo "ERROR: package archite
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates openssl libbpf1 libsqlite3-0
+apt-get install -y ca-certificates openssl libbpf1 libsqlite3-0 curl file
 
 BUILD_ID="$(sed -n 's/^Build ID:[[:space:]]*//p' "$WORK/BUILD_INFO.txt" | head -n1)"
 COMMIT="$(sed -n 's/^Commit:[[:space:]]*//p' "$WORK/BUILD_INFO.txt" | head -n1)"
@@ -45,6 +45,9 @@ install -m 0755 "$WORK/neta-agent-updater" "$VERSION_DIR/neta-agent-updater"
 install -m 0644 "$WORK/BUILD_INFO.txt" "$VERSION_DIR/BUILD_INFO.txt"
 [[ -f "$WORK/LICENSE" ]] && install -m 0644 "$WORK/LICENSE" "$VERSION_DIR/LICENSE"
 [[ -f "$WORK/THIRD_PARTY_NOTICES.md" ]] && install -m 0644 "$WORK/THIRD_PARTY_NOTICES.md" "$VERSION_DIR/THIRD_PARTY_NOTICES.md"
+if [[ -f "$WORK/install-yarax-runtime.sh" ]]; then
+  install -m 0755 "$WORK/install-yarax-runtime.sh" /usr/local/libexec/neta-install-yarax-runtime
+fi
 if [[ -f "$WORK/libneta_tls_context.so" ]]; then
   install -m 0755 "$WORK/libneta_tls_context.so" "$VERSION_DIR/libneta_tls_context.so"
   install -m 0755 "$WORK/libneta_tls_context.so" /usr/local/lib/neta/libneta_tls_context.so
@@ -64,6 +67,7 @@ NETA_FLEET_MIN_CONFIDENCE=0.80
 NETA_FLEET_REPORTING_COOLDOWN_SECONDS=1800
 NETA_FLEET_HEARTBEAT_SECONDS=300
 NETA_FLEET_HEARTBEAT_JITTER_PERCENT=20
+NETA_YARAX_RUNTIME_POLL_SECONDS=60
 NETA_TLS_CONTEXT_SOCKET=@neta-agent-tls-service
 EOF
   chmod 0600 /etc/neta/neta-agent.env
