@@ -17,7 +17,10 @@ on:
         required: true
         default: NORMAL
         type: choice
-        options: [NORMAL, HIGH, EMERGENCY]
+        options:
+          - NORMAL
+          - HIGH
+          - EMERGENCY
 
 permissions:
   contents: write
@@ -89,6 +92,9 @@ jobs:
     if: ${{ inputs.publish }}
     needs: build
     runs-on: ubuntu-24.04
+    env:
+      NETA_COORDINATOR_RUNTIME_URL: ${{ secrets.NETA_COORDINATOR_RUNTIME_URL }}
+      NETA_COORDINATOR_ADMIN_TOKEN: ${{ secrets.NETA_COORDINATOR_ADMIN_TOKEN }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -110,10 +116,8 @@ jobs:
               --notes "Prebuilt YARA-X C API runtime for NETA Linux endpoints. Built from VirusTotal/yara-x v${VERSION}."
           fi
       - name: Register desired runtime with coordinator
-        if: ${{ secrets.NETA_COORDINATOR_RUNTIME_URL != '' && secrets.NETA_COORDINATOR_ADMIN_TOKEN != '' }}
+        if: ${{ env.NETA_COORDINATOR_RUNTIME_URL != '' && env.NETA_COORDINATOR_ADMIN_TOKEN != '' }}
         env:
-          URL: ${{ secrets.NETA_COORDINATOR_RUNTIME_URL }}
-          TOKEN: ${{ secrets.NETA_COORDINATOR_ADMIN_TOKEN }}
           VERSION: ${{ env.YARAX_VERSION }}
           PRIORITY: ${{ inputs.priority }}
         run: |
@@ -127,5 +131,5 @@ jobs:
             --arg priority "$PRIORITY" --arg x86 "$X86" --arg arm "$ARM" --argjson rollout "$ROLLOUT" \
             '{version:$version,sourceRef:$source,releaseBaseUrl:$base,priority:$priority,x86_64Sha256:$x86,arm64Sha256:$arm,rolloutPercent:$rollout}' > payload.json
           curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
-            -H "X-NETA-Admin-Token: $TOKEN" -H 'X-NETA-Actor: github-yarax-release' -H 'Content-Type: application/json' \
-            --data @payload.json "$URL/api/v1/operator/yarax/runtime/publish"
+            -H "X-NETA-Admin-Token: $NETA_COORDINATOR_ADMIN_TOKEN" -H 'X-NETA-Actor: github-yarax-release' -H 'Content-Type: application/json' \
+            --data @payload.json "$NETA_COORDINATOR_RUNTIME_URL/api/v1/operator/yarax/runtime/publish"
