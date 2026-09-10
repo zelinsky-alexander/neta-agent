@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cwchar>
 #include <deque>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <mutex>
@@ -33,10 +34,11 @@ namespace neta::platform {
 namespace {
 
 constexpr wchar_t kProviderName[] = L"Microsoft-Windows-DNS-Client";
+constexpr USHORT kQueryStartEventId = 3006;
+constexpr USHORT kQueryCompletedEventId = 3008;
 constexpr std::size_t kMaxQueuedEvents = 8192;
 constexpr std::size_t kMaxPendingQueries = 4096;
 constexpr std::uint64_t kPendingMaxAgeNs = 30'000'000'000ULL;
-constexpr std::uint64_t kFiletimeUnixEpochTicks = 116'444'736'000'000'000ULL;
 
 bool same_guid(const GUID& left, const GUID& right) noexcept {
     return std::memcmp(&left, &right, sizeof(GUID)) == 0;
@@ -57,6 +59,14 @@ GUID make_session_guid() noexcept {
     return guid;
 }
 
+std::uint64_t qpc_to_ns(LONGLONG ticks, LONGLONG frequency) noexcept {
+    if (ticks <= 0 || frequency <= 0) return 0;
+    constexpr std::uint64_t billion = 1'000'000'000ULL;
+    const auto value = static_cast<std::uint64_t>(ticks);
+    const auto freq = static_cast<std::uint64_t>(frequency);
+    return (value / freq) * billion + ((value % freq) * billion) / freq;
+}
+
 std::optional<GUID> provider_guid_by_name(const wchar_t* provider_name) {
     ULONG bytes = 0;
     ULONG rc = TdhEnumerateProviders(nullptr, &bytes);
@@ -74,16 +84,17 @@ std::optional<GUID> provider_guid_by_name(const wchar_t* provider_name) {
     return std::nullopt;
 }
 
-std::vector<std::byte> trace_properties_buffer(const std::wstring& name, const GUID& session_guid) {
+std::vector<std::byte> trace_properties_buffer(const std::wstring& name,
+                                                const GUID& session_guid) {
     const auto bytes = sizeof(EVENT_TRACE_PROPERTIES) + (name.size() + 1U) * sizeof(wchar_t);
     std::vector<std::byte> buffer(bytes);
     auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
     properties->Wnode.BufferSize = static_cast<ULONG>(bytes);
     properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+    // Use QPC to match the timestamp domain used by the Windows TCP lifecycle collector
+    // and std::chrono::steady_clock based socket observations.
+    properties->Wnode.ClientContext = 1;
     properties->Wnode.Guid = session_guid;
-    // System time produces FILETIME-compatible EVENT_HEADER timestamps, matching the
-    // existing Windows process/lifecycle collectors.
-    properties->Wnode.ClientContext = 2;
     properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
     properties->FlushTimer = 1;
     properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
@@ -183,18 +194,6 @@ std::optional<std::uint64_t> first_unsigned_property(
     return std::nullopt;
 }
 
-std::optional<std::uint64_t> filetime_to_ns(std::uint64_t value) noexcept {
-    if (value < kFiletimeUnixEpochTicks) return std::nullopt;
-    const auto unix_ticks = value - kFiletimeUnixEpochTicks;
-    if (unix_ticks > std::numeric_limits<std::uint64_t>::max() / 100ULL) return std::nullopt;
-    return unix_ticks * 100ULL;
-}
-
-std::uint64_t event_timestamp_ns(const EVENT_RECORD& record) noexcept {
-    if (record.EventHeader.TimeStamp.QuadPart <= 0) return 0;
-    return filetime_to_ns(static_cast<std::uint64_t>(record.EventHeader.TimeStamp.QuadPart)).value_or(0);
-}
-
 std::optional<std::uint64_t> process_creation_key(DWORD pid) {
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (process == nullptr) return std::nullopt;
@@ -225,7 +224,8 @@ std::string leaf_name(const std::string& path) {
 }
 
 DWORD client_pid(const EVENT_RECORD& record) {
-    const auto property = first_unsigned_property(record, {L"ClientPID", L"ClientPid", L"ProcessId", L"PID"});
+    const auto property = first_unsigned_property(
+        record, {L"ClientPID", L"ClientPid", L"ProcessId", L"PID"});
     if (property && *property > 0 && *property <= MAXDWORD) return static_cast<DWORD>(*property);
     return record.EventHeader.ProcessId;
 }
@@ -258,6 +258,13 @@ public:
         capability_.drop_counter = true;
         capability_.source = "windows:dns-etw";
 
+        LARGE_INTEGER frequency{};
+        if (QueryPerformanceFrequency(&frequency) == FALSE || frequency.QuadPart <= 0) {
+            capability_.unavailable_reason = "QueryPerformanceFrequency failed for DNS ETW";
+            return;
+        }
+        qpc_frequency_ = frequency.QuadPart;
+
         const auto provider = provider_guid_by_name(kProviderName);
         if (!provider) {
             capability_.unavailable_reason = "Microsoft-Windows-DNS-Client ETW provider is not registered";
@@ -281,15 +288,18 @@ public:
                                             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
                                             TRACE_LEVEL_VERBOSE, ~0ULL, 0, 0, nullptr);
         if (enable != ERROR_SUCCESS) {
-            capability_.unavailable_reason = "EnableTraceEx2 for Microsoft-Windows-DNS-Client failed with Windows error " +
-                                             std::to_string(enable);
+            capability_.unavailable_reason =
+                "EnableTraceEx2 for Microsoft-Windows-DNS-Client failed with Windows error " +
+                std::to_string(enable);
             stop_session();
             return;
         }
 
         EVENT_TRACE_LOGFILEW logfile{};
         logfile.LoggerName = const_cast<LPWSTR>(session_name_.c_str());
-        logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+        logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME |
+                                   PROCESS_TRACE_MODE_EVENT_RECORD |
+                                   PROCESS_TRACE_MODE_RAW_TIMESTAMP;
         logfile.EventRecordCallback = &WindowsDnsEtwObserver::callback;
         logfile.Context = this;
         trace_handle_ = OpenTraceW(&logfile);
@@ -378,7 +388,6 @@ private:
     }
 
     void trim_pending(std::uint64_t now_ns) {
-        if (pending_.empty()) return;
         for (auto it = pending_.begin(); it != pending_.end();) {
             if (now_ns != 0 && it->second.started_ns != 0 && now_ns >= it->second.started_ns &&
                 now_ns - it->second.started_ns > kPendingMaxAgeNs) {
@@ -392,35 +401,34 @@ private:
 
     void consume(const EVENT_RECORD& record) {
         if (!same_guid(record.EventHeader.ProviderId, provider_guid_)) return;
+        const USHORT event_id = record.EventHeader.EventDescriptor.Id;
+        if (event_id != kQueryStartEventId && event_id != kQueryCompletedEventId) return;
         events_received_.fetch_add(1, std::memory_order_relaxed);
 
-        const auto timestamp = event_timestamp_ns(record);
+        const std::uint64_t timestamp = qpc_to_ns(record.EventHeader.TimeStamp.QuadPart, qpc_frequency_);
         DWORD pid = client_pid(record);
-        std::string query_name = first_text_property(record, {L"QueryName", L"Name", L"HostName", L"Hostname"});
+        std::string query_name = first_text_property(
+            record, {L"QueryName", L"Name", L"HostName", L"Hostname"});
         const auto query_type_value = first_unsigned_property(record, {L"QueryType", L"Type"});
-        std::uint32_t query_type = query_type_value ? static_cast<std::uint32_t>(*query_type_value) : 0U;
-        const auto status_value = first_unsigned_property(record, {L"QueryStatus", L"Status", L"ErrorCode", L"ResultCode"});
-        const std::string result_text = first_text_property(record, {L"QueryResults", L"Results", L"Addresses", L"Address"});
-        const std::string canonical_name = first_text_property(record, {L"CanonicalName", L"CName", L"CNAME"});
-        auto addresses = windows_dns::extract_addresses(result_text);
-
+        std::uint32_t query_type = query_type_value
+            ? static_cast<std::uint32_t>(*query_type_value) : 0U;
         const auto key = pending_key(record, pid, query_name);
-        const bool completion_evidence = status_value.has_value() || !result_text.empty() || !addresses.empty();
 
-        if (!completion_evidence) {
-            if (!query_name.empty() && !key.empty()) {
-                PendingQuery pending;
-                pending.started_ns = timestamp;
-                pending.pid = pid;
-                pending.query_name = std::move(query_name);
-                pending.query_type = query_type;
-                pending_[key] = std::move(pending);
+        if (event_id == kQueryStartEventId) {
+            if (!query_name.empty() && pid != 0 && !key.empty()) {
+                pending_[key] = PendingQuery{timestamp, pid, std::move(query_name), query_type};
                 trim_pending(timestamp);
-            } else {
-                unsupported_event_versions_.fetch_add(1, std::memory_order_relaxed);
             }
             return;
         }
+
+        const auto status_value = first_unsigned_property(
+            record, {L"QueryStatus", L"Status", L"ErrorCode", L"ResultCode"});
+        const std::string result_text = first_text_property(
+            record, {L"QueryResults", L"Results", L"Addresses", L"Address"});
+        const std::string canonical_name = first_text_property(
+            record, {L"CanonicalName", L"CName", L"CNAME"});
+        auto addresses = windows_dns::extract_addresses(result_text);
 
         std::uint64_t started_ns = timestamp;
         if (!key.empty()) {
@@ -435,7 +443,7 @@ private:
         }
         trim_pending(timestamp);
 
-        if (query_name.empty() || pid == 0) {
+        if (query_name.empty() || pid == 0 || !status_value) {
             decode_failures_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -448,7 +456,8 @@ private:
         observation.query_name = std::move(query_name);
         if (!canonical_name.empty()) observation.canonical_name = canonical_name;
         observation.addresses = std::move(addresses);
-        if (status_value) observation.result_code = static_cast<int>(static_cast<std::uint32_t>(*status_value));
+        observation.result_code = static_cast<int>(
+            static_cast<std::int32_t>(static_cast<std::uint32_t>(*status_value)));
         observation.source = "windows:dns-etw";
 
         observation.process.agent_visible.pid = static_cast<std::int64_t>(pid);
@@ -468,8 +477,8 @@ private:
             unmatched_processes_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // Successful forward queries without any usable A/AAAA answer are not useful for
-        // DNS-to-connection matching, but failures still need to be emitted for DNS-001.
+        // Keep failed lookups even without addresses so DNS-001 can consume them.
+        // Successful forward lookups require a usable A/AAAA result for DNS-to-TCP correlation.
         if (windows_dns::successful_status(observation.result_code) &&
             observation.query_kind == NameResolutionQueryKind::Forward &&
             observation.addresses.empty()) {
@@ -496,6 +505,7 @@ private:
     std::vector<std::byte> properties_buffer_;
     TRACEHANDLE session_handle_{0};
     TRACEHANDLE trace_handle_{INVALID_PROCESSTRACE_HANDLE};
+    LONGLONG qpc_frequency_{0};
     std::thread worker_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
