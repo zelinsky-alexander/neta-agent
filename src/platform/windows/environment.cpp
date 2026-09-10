@@ -66,6 +66,12 @@ PlatformCapabilities capabilities() {
     PlatformCapabilities c;
     c.connection_discovery = true;
     c.process_attribution = true;
+    // Windows TCP Extended Statistics provide the shared performance inputs.
+    // Collection is enabled per connection by the elevated NETA service/CLI.
+    c.tcp_rtt = true;
+    c.tcp_rtt_variance = true;
+    c.tcp_retransmissions = true;
+    c.tcp_cwnd = true;
     c.route_observation = true;
 
     const auto lifecycle = make_lifecycle_observer();
