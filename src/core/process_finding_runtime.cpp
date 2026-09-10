@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 
 namespace neta {
@@ -20,6 +21,27 @@ namespace {
 std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+std::string json_escape_artifact(const std::string& value) {
+    std::ostringstream out;
+    for (unsigned char c : value) {
+        switch (c) {
+            case '\\': out << "\\\\"; break;
+            case '"': out << "\\\""; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (c < 0x20) out << ' ';
+                else out << static_cast<char>(c);
+        }
+    }
+    return out.str();
+}
+
+std::string artifact_report_key(const StoredArtifactEvidence& row) {
+    return row.artifact_sha256 + "|" + row.provider_name + "|" + row.ruleset_sha256;
 }
 
 const ProcessNode* node_for_event(const ProcessExecEvent& event,
@@ -142,11 +164,7 @@ void ProcessFindingRuntime::scan_executed_artifact(const ProcessExecEvent& event
 
     try {
         artifact.sha256 = sha256_file_hex(artifact.path);
-    } catch (const std::exception& error) {
-        AntimalwareEvidence failure;
-        failure.provider_name = "neta-artifact";
-        failure.state = AntimalwareScanState::ScanError;
-        failure.detail = error.what();
+    } catch (const std::exception&) {
         return;
     }
 
@@ -169,6 +187,57 @@ void ProcessFindingRuntime::observe(const std::vector<ProcessExecEvent>& events)
     }
 }
 
+bool ProcessFindingRuntime::report_artifact_evidence(const FleetReportingPolicy& policy,
+                                                     bool fleet_identity_available) {
+    if (!fleet_identity_available || policy.mode == FleetReportingMode::Off) return false;
+    const auto recent = artifact_store_.recent(64);
+    std::vector<StoredArtifactEvidence> changed;
+    for (const auto& row : recent) {
+        const auto key = artifact_report_key(row);
+        const auto previous = artifact_reported_counts_.find(key);
+        if (previous == artifact_reported_counts_.end() || previous->second < row.observation_count)
+            changed.push_back(row);
+    }
+    if (changed.empty()) return false;
+
+    std::ostringstream body;
+    body << "{\"artifact_evidence\":[";
+    for (std::size_t i = 0; i < changed.size(); ++i) {
+        const auto& row = changed[i];
+        if (i != 0) body << ',';
+        body << "{\"artifact_sha256\":\"" << json_escape_artifact(row.artifact_sha256) << "\""
+             << ",\"artifact_path\":\"" << json_escape_artifact(row.artifact_path) << "\""
+             << ",\"artifact_size\":" << row.artifact_size
+             << ",\"provider_name\":\"" << json_escape_artifact(row.provider_name) << "\""
+             << ",\"provider_version\":\"" << json_escape_artifact(row.provider_version) << "\""
+             << ",\"ruleset_id\":\"" << json_escape_artifact(row.ruleset_id) << "\""
+             << ",\"ruleset_sha256\":\"" << json_escape_artifact(row.ruleset_sha256) << "\""
+             << ",\"scan_state\":\"" << json_escape_artifact(row.state) << "\""
+             << ",\"detail\":\"" << json_escape_artifact(row.detail) << "\""
+             << ",\"observation_count\":" << row.observation_count
+             << ",\"matches\":[";
+        for (std::size_t match_index = 0; match_index < row.matches.size(); ++match_index) {
+            const auto& match = row.matches[match_index];
+            if (match_index != 0) body << ',';
+            body << "{\"rule_name\":\"" << json_escape_artifact(match.rule_name)
+                 << "\",\"rule_namespace\":\"" << json_escape_artifact(match.rule_namespace)
+                 << "\",\"tags\":[";
+            for (std::size_t tag_index = 0; tag_index < match.tags.size(); ++tag_index) {
+                if (tag_index != 0) body << ',';
+                body << '"' << json_escape_artifact(match.tags[tag_index]) << '"';
+            }
+            body << "]}";
+        }
+        body << "]}";
+    }
+    body << "]}";
+
+    static_cast<void>(FleetClient::send_evidence_summary(policy.state_dir, body.str()));
+    for (const auto& row : changed)
+        artifact_reported_counts_[artifact_report_key(row)] = row.observation_count;
+    return true;
+}
+
 ProcessFindingReportResult ProcessFindingRuntime::report_pending(
     const FleetReportingPolicy& policy, bool fleet_identity_available) {
     ProcessFindingReportResult result;
@@ -187,6 +256,13 @@ ProcessFindingReportResult ProcessFindingRuntime::report_pending(
             std::cerr << "Process finding announcement failed for " << finding.finding_id
                       << "; retained for retry: " << error.what() << std::endl;
         }
+    }
+    try {
+        static_cast<void>(report_artifact_evidence(policy, fleet_identity_available));
+    } catch (const std::exception& error) {
+        ++result.failed;
+        std::cerr << "RM4 artifact evidence upload failed; retained locally for retry: "
+                  << error.what() << std::endl;
     }
     return result;
 }
