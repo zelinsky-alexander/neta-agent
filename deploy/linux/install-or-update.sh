@@ -8,6 +8,9 @@ set -euo pipefail
 # This remains the manual/developer bootstrap path. Runtime coordinator-managed
 # upgrades use immutable release artifacts and neta-agent-updater; they never run
 # Git, CMake, apt, or this script remotely.
+#
+# Integration/CI automation may set NETA_SKIP_GIT_UPDATE=1 after checking out an
+# exact branch/tag/commit. The default interactive behavior remains unchanged.
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run this script with sudo" >&2
@@ -19,6 +22,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 JOBS="${NETA_BUILD_JOBS:-$(nproc)}"
 UPDATE_BRANCH="${NETA_UPDATE_BRANCH:-main}"
+SKIP_GIT_UPDATE="${NETA_SKIP_GIT_UPDATE:-0}"
 INSTALL_ROOT="${NETA_INSTALL_ROOT:-/opt/neta-agent}"
 STATE_DIR="${NETA_FLEET_STATE_DIR:-/var/lib/neta/identity}"
 
@@ -32,6 +36,10 @@ run_as_caller() {
 
 if [[ ! "$UPDATE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$UPDATE_BRANCH" == -* ]]; then
   echo "ERROR: invalid NETA_UPDATE_BRANCH: $UPDATE_BRANCH" >&2
+  exit 1
+fi
+if [[ "$SKIP_GIT_UPDATE" != "0" && "$SKIP_GIT_UPDATE" != "1" ]]; then
+  echo "ERROR: NETA_SKIP_GIT_UPDATE must be 0 or 1" >&2
   exit 1
 fi
 
@@ -66,7 +74,11 @@ echo "    kernel: $(uname -sr)"
 echo "    machine: $KERNEL_ARCH"
 echo "    package architecture: ${DEB_ARCH:-unknown}"
 echo "    NETA native build architecture: $NETA_ARCH"
-echo "    update branch: $UPDATE_BRANCH"
+if [[ "$SKIP_GIT_UPDATE" == "1" ]]; then
+  echo "    repository update: skipped (exact checked-out ref)"
+else
+  echo "    update branch: $UPDATE_BRANCH"
+fi
 if [[ -r /sys/kernel/btf/vmlinux ]]; then
   echo "    kernel BTF: available"
 else
@@ -76,24 +88,33 @@ fi
 echo "==> Installing build dependencies"
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  git build-essential cmake clang pkg-config \
+  git build-essential cmake clang pkg-config file \
   libbpf-dev libsqlite3-dev libssl-dev
 
-echo "==> Updating repository branch $UPDATE_BRANCH"
 cd "$REPO_DIR"
-if ! run_as_caller git diff --quiet || ! run_as_caller git diff --cached --quiet; then
-  echo "ERROR: repository has local changes; commit/stash them before updating" >&2
-  exit 1
+if [[ "$SKIP_GIT_UPDATE" == "1" ]]; then
+  if ! run_as_caller git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "ERROR: NETA_SKIP_GIT_UPDATE=1 requires a Git checkout" >&2
+    exit 1
+  fi
+  echo "==> Using exact checked-out repository ref"
+else
+  echo "==> Updating repository branch $UPDATE_BRANCH"
+  if ! run_as_caller git diff --quiet || ! run_as_caller git diff --cached --quiet; then
+    echo "ERROR: repository has local changes; commit/stash them before updating" >&2
+    exit 1
+  fi
+  run_as_caller git fetch origin "$UPDATE_BRANCH"
+  run_as_caller git checkout "$UPDATE_BRANCH"
+  run_as_caller git pull --ff-only origin "$UPDATE_BRANCH"
 fi
-run_as_caller git fetch origin "$UPDATE_BRANCH"
-run_as_caller git checkout "$UPDATE_BRANCH"
-run_as_caller git pull --ff-only origin "$UPDATE_BRANCH"
 
 COMMIT="$(run_as_caller git rev-parse HEAD)"
 SHORT_COMMIT="${COMMIT:0:12}"
 BOOTSTRAP_BUILD="bootstrap-$SHORT_COMMIT"
 VERSION_DIR="$INSTALL_ROOT/versions/$BOOTSTRAP_BUILD"
 
+echo "==> Source commit: $COMMIT"
 echo "==> Configuring $NETA_ARCH validation build with eBPF and runtime-loaded YARA-X provider"
 run_as_caller cmake -S "$REPO_DIR" -B "$TEST_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -147,9 +168,6 @@ fi
 ln -sfn "versions/$BOOTSTRAP_BUILD" "$INSTALL_ROOT/current.new"
 mv -Tf "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
 ln -sfn "$INSTALL_ROOT/current/neta-agent" /usr/local/bin/neta-agent
-# Keep the updater coupled to the active immutable version. A running updater
-# continues executing its opened inode while an activation switches `current`;
-# every subsequent launch resolves to the updater shipped with the active agent.
 ln -sfn "$INSTALL_ROOT/current/neta-agent-updater" /usr/local/libexec/neta-agent-updater
 
 mkdir -p "$STATE_DIR" /etc/neta
