@@ -49,6 +49,22 @@ void unique_exact_lookup_is_strongly_correlated() {
            neta::EvidenceFidelity::StronglyCorrelated);
 }
 
+void windows_style_lookup_without_namespace_is_strongly_correlated() {
+    auto connection = outbound_connection();
+    connection.network_namespace_inode.reset();
+    auto observation = exact_lookup(9'500'000'000ULL);
+    observation.network_namespace_inode.reset();
+    observation.mechanism = neta::NameResolutionMechanism::SystemResolverEvent;
+    observation.source = "windows:dns-etw";
+
+    const auto result = neta::correlate_name_resolution(connection, {observation});
+    assert(result.status == neta::NameResolutionCorrelationStatus::Matched);
+    assert(result.candidate_count == 1);
+    assert(result.evidence);
+    assert(result.evidence->correlation_fidelity ==
+           neta::EvidenceFidelity::StronglyCorrelated);
+}
+
 void ambiguous_lookup_is_not_guessed() {
     const auto connection = outbound_connection();
     const auto result = neta::correlate_name_resolution(
@@ -100,6 +116,7 @@ void stale_or_wrong_process_lookup_is_rejected() {
 
 int main() {
     unique_exact_lookup_is_strongly_correlated();
+    windows_style_lookup_without_namespace_is_strongly_correlated();
     ambiguous_lookup_is_not_guessed();
     missing_durable_identity_downgrades_fidelity();
     inbound_and_reverse_lookups_do_not_cross_correlate();
