@@ -1,9 +1,15 @@
 #include "neta/process_finding_runtime.hpp"
 
+#include "neta/crypto.hpp"
 #include "neta/fleet_client.hpp"
 #include "neta/rules/rule_set_loader.hpp"
+#ifndef _WIN32
+#include "neta/yara_x_provider.hpp"
+#endif
 
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -94,7 +100,18 @@ FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
 }  // namespace
 
 ProcessFindingRuntime::ProcessFindingRuntime(const std::filesystem::path& database)
-    : store_(database) {}
+    : store_(database), artifact_store_(database) {
+#ifndef _WIN32
+    const char* rules_path = std::getenv("NETA_YARAX_RULES");
+    if (rules_path != nullptr && *rules_path != '\0') {
+        YaraXProviderConfig config;
+        config.rules_path = rules_path;
+        if (const char* ruleset = std::getenv("NETA_YARAX_RULESET_ID"); ruleset != nullptr && *ruleset != '\0')
+            config.ruleset_id = ruleset;
+        artifact_providers_.add(std::make_unique<YaraXProvider>(std::move(config)));
+    }
+#endif
+}
 
 void ProcessFindingRuntime::bootstrap(const std::vector<ProcessExecEvent>& snapshot) {
     for (const auto& event : snapshot) static_cast<void>(graph_.observe(event));
@@ -114,10 +131,40 @@ void ProcessFindingRuntime::persist_findings(const std::vector<ProcessFinding>& 
     }
 }
 
+void ProcessFindingRuntime::scan_executed_artifact(const ProcessExecEvent& event) {
+    if (event.type != ProcessExecEventType::Start || event.executable_path.empty() || artifact_providers_.size() == 0) return;
+
+    ArtifactIdentity artifact;
+    artifact.path = event.executable_path;
+    std::error_code size_error;
+    const auto size = std::filesystem::file_size(artifact.path, size_error);
+    if (!size_error) artifact.size = size;
+
+    try {
+        artifact.sha256 = sha256_file_hex(artifact.path);
+    } catch (const std::exception& error) {
+        AntimalwareEvidence failure;
+        failure.provider_name = "neta-artifact";
+        failure.state = AntimalwareScanState::ScanError;
+        failure.detail = error.what();
+        return;
+    }
+
+    auto found = artifact_scan_cache_.find(*artifact.sha256);
+    if (found == artifact_scan_cache_.end()) {
+        auto evidence = artifact_providers_.scan_all(artifact);
+        found = artifact_scan_cache_.emplace(*artifact.sha256, std::move(evidence)).first;
+    }
+    for (const auto& evidence : found->second) {
+        artifact_store_.record(artifact, evidence, event.timestamp_ns);
+    }
+}
+
 void ProcessFindingRuntime::observe(const std::vector<ProcessExecEvent>& events) {
     for (const auto& event : events) {
         if (!graph_.observe(event)) continue;
         persist_current_node(event);
+        scan_executed_artifact(event);
         persist_findings(engine_.observe(event, graph_));
     }
 }
