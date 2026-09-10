@@ -35,7 +35,7 @@ inline NetworkAddressFamily address_family(std::string_view value) noexcept {
 }
 
 inline std::string trim_token(std::string value) {
-    auto removable = [](unsigned char ch) {
+    const auto removable = [](unsigned char ch) {
         return std::isspace(ch) != 0 || ch == ',' || ch == ';' || ch == '[' || ch == ']' ||
                ch == '(' || ch == ')' || ch == '"' || ch == '\'';
     };
@@ -47,13 +47,11 @@ inline std::string trim_token(std::string value) {
 inline std::vector<NameResolutionAddress> extract_addresses(const std::string& text) {
     std::vector<NameResolutionAddress> result;
     std::string token;
-    const auto flush = [&]() mutable {
+    const auto flush = [&]() {
         if (token.empty()) return;
-        auto candidate = trim_token(std::move(token));
+        auto candidate = trim_token(token);
         token.clear();
         if (candidate.empty()) return;
-        // Accept common provider representations such as "A:1.2.3.4" while not
-        // stripping the colons inside a real IPv6 literal.
         const auto last_equal = candidate.find_last_of('=');
         if (last_equal != std::string::npos && last_equal + 1U < candidate.size()) {
             candidate = trim_token(candidate.substr(last_equal + 1U));
