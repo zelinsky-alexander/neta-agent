@@ -145,17 +145,21 @@ ProcessFindingRuntime::ProcessFindingRuntime(const std::filesystem::path& databa
 #ifndef _WIN32
     std::filesystem::path selected_rules;
     std::string selected_ruleset;
-    if (const char* rules_path = std::getenv("NETA_YARAX_RULES"); rules_path != nullptr && *rules_path != '\0') {
+
+    const auto managed_dir = fleet_state_dir() / "yarax-content";
+    const auto managed_rules = managed_dir / "active.yar";
+    if (std::filesystem::is_regular_file(managed_rules)) {
+        selected_rules = managed_rules;
+        selected_ruleset = managed_yara_bundle_id(managed_dir / "active.meta");
+    } else if (const char* rules_path = std::getenv("NETA_YARAX_RULES");
+               rules_path != nullptr && *rules_path != '\0') {
         selected_rules = rules_path;
-        if (const char* ruleset = std::getenv("NETA_YARAX_RULESET_ID"); ruleset != nullptr && *ruleset != '\0') selected_ruleset = ruleset;
-    } else {
-        const auto dir = fleet_state_dir() / "yarax-content";
-        const auto managed = dir / "active.yar";
-        if (std::filesystem::is_regular_file(managed)) {
-            selected_rules = managed;
-            selected_ruleset = managed_yara_bundle_id(dir / "active.meta");
+        if (const char* ruleset = std::getenv("NETA_YARAX_RULESET_ID");
+            ruleset != nullptr && *ruleset != '\0') {
+            selected_ruleset = ruleset;
         }
     }
+
     if (!selected_rules.empty()) {
         YaraXProviderConfig config;
         config.rules_path = selected_rules;
