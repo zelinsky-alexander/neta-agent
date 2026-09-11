@@ -3,6 +3,7 @@
 #include "neta/rule_update.hpp"
 #include "neta/rules/rule_set_loader.hpp"
 #include "neta/verdict.hpp"
+#include "neta/yarax_content_update.hpp"
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -34,6 +35,7 @@ namespace {
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free_all)>;
 using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
 struct ParsedUrl { std::string host; std::string port; };
+struct ParsedYaraContent { std::string bundle_id; std::uint64_t revision{0}; std::string sha256; std::string content; };
 
 [[noreturn]] void ssl_error(const std::string& what) {
     const unsigned long code = ERR_get_error(); char buffer[256]{};
@@ -133,7 +135,7 @@ std::string authenticated_post(const std::filesystem::path& state_dir, const std
     if (SSL_get_verify_result(ssl) != X509_V_OK) throw std::runtime_error("coordinator certificate verification failed");
 
     std::ostringstream request; request << "POST " << path << " HTTP/1.1\r\nHost: " << url.host
-        << "\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
+        << "\r\nContent-Type: application/json\r\nAccept: application/json, text/plain\r\nConnection: close\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
     const std::string wire = request.str(); std::size_t offset = 0;
     while (offset < wire.size()) {
         const int chunk = static_cast<int>(std::min<std::size_t>(wire.size() - offset, 1U << 20)); const int written = BIO_write(bio.get(), wire.data() + offset, chunk);
@@ -145,6 +147,7 @@ std::string authenticated_post(const std::filesystem::path& state_dir, const std
     std::istringstream status_line(response.substr(0, response.find("\r\n"))); std::string http; int status = 0; status_line >> http >> status;
     const std::string headers = response.substr(0, header_end + 2); std::string response_body = response.substr(header_end + 4);
     if (lower(header_value(headers, "Transfer-Encoding")).find("chunked") != std::string::npos) response_body = decode_chunked(response_body);
+    if (status == 204) return {};
     if (status < 200 || status >= 300) throw std::runtime_error("coordinator rule request failed with HTTP " + std::to_string(status) + ": " + response_body);
     return response_body;
 }
@@ -171,6 +174,50 @@ ActiveRuleBundleState state_from_text(const std::filesystem::path& path, const s
     const auto loaded = rules::RuleSetLoader::load_text(text, path.string());
     ActiveRuleBundleState state; state.path = path; state.revision = loaded.revision; state.version = loaded.version;
     state.sha256 = sha256_hex(text); state.rule_count = loaded.definitions.size(); state.centrally_managed = centrally_managed; return state;
+}
+
+ParsedYaraContent parse_yarax_content(const std::string& envelope) {
+    constexpr std::string_view magic = "NETA-YARAX-CONTENT/1\n";
+    if (!envelope.starts_with(magic)) throw std::runtime_error("invalid central YARA content envelope");
+    const auto split = envelope.find("\n\n", magic.size());
+    if (split == std::string::npos) throw std::runtime_error("central YARA content envelope has no content separator");
+    ParsedYaraContent out;
+    std::istringstream headers(envelope.substr(magic.size(), split - magic.size()));
+    std::string line;
+    while (std::getline(headers, line)) {
+        const auto colon = line.find(':'); if (colon == std::string::npos) continue;
+        const auto key = line.substr(0, colon); const auto value = line.substr(colon + 1);
+        if (key == "bundle-id") out.bundle_id = value;
+        else if (key == "revision") out.revision = static_cast<std::uint64_t>(std::stoull(value));
+        else if (key == "sha256") out.sha256 = lower(value);
+    }
+    out.content = envelope.substr(split + 2);
+    if (out.bundle_id.empty() || out.revision == 0 || out.sha256.size() != 64 ||
+        !std::all_of(out.sha256.begin(), out.sha256.end(), [](unsigned char c){ return std::isxdigit(c) != 0; }))
+        throw std::runtime_error("central YARA content metadata is incomplete or invalid");
+    if (sha256_hex(out.content) != out.sha256)
+        throw std::runtime_error("central YARA content SHA-256 mismatch");
+    return out;
+}
+
+std::string yarax_meta(const ParsedYaraContent& content) {
+    return "bundle-id:" + content.bundle_id + "\nrevision:" + std::to_string(content.revision) + "\nsha256:" + content.sha256 + "\n";
+}
+
+YaraXContentState yarax_state_from_meta(const std::filesystem::path& state_dir, const std::string& meta) {
+    YaraXContentState state; state.path = state_dir / "yarax-content" / "active.yar"; state.centrally_managed = true;
+    std::istringstream input(meta); std::string line;
+    while (std::getline(input,line)) {
+        const auto colon=line.find(':'); if(colon==std::string::npos) continue;
+        const auto key=line.substr(0,colon); const auto value=line.substr(colon+1);
+        if(key=="bundle-id") state.bundle_id=value;
+        else if(key=="revision") state.revision=static_cast<std::uint64_t>(std::stoull(value));
+        else if(key=="sha256") state.sha256=lower(value);
+    }
+    if(state.bundle_id.empty()||state.revision==0||state.sha256.size()!=64) throw std::runtime_error("invalid active YARA content metadata");
+    if(!std::filesystem::is_regular_file(state.path)) throw std::runtime_error("active YARA content file is missing");
+    if(sha256_hex(read_file(state.path))!=state.sha256) throw std::runtime_error("active YARA content SHA-256 mismatch");
+    return state;
 }
 
 #ifdef _WIN32
@@ -239,6 +286,23 @@ std::string FleetClient::acknowledge_rule_bundle(const std::filesystem::path& st
     return authenticated_post(state_dir, "/api/v1/agent/rules/ack", body.str());
 }
 
+std::string FleetClient::fetch_yarax_content_bundle(const std::filesystem::path& state_dir) {
+    return authenticated_post(state_dir, "/api/v1/agent/yarax/content/fetch", "{}");
+}
+
+std::string FleetClient::acknowledge_yarax_content_bundle(const std::filesystem::path& state_dir,
+                                                          const std::string& bundle_id,
+                                                          std::uint64_t revision,
+                                                          const std::string& sha256,
+                                                          const std::string& status,
+                                                          const std::string& error) {
+    std::ostringstream body;
+    body << "{\"bundleId\":\"" << json_escape(bundle_id) << "\",\"revision\":" << revision
+         << ",\"sha256\":\"" << json_escape(sha256) << "\",\"state\":\"" << json_escape(status)
+         << "\",\"error\":\"" << json_escape(error) << "\"}";
+    return authenticated_post(state_dir, "/api/v1/agent/yarax/content/ack", body.str());
+}
+
 ActiveRuleBundleState update_rules_from_coordinator(const std::filesystem::path& state_dir) {
     const std::string bundle = FleetClient::fetch_rule_bundle(state_dir);
     const auto parsed = rules::RuleSetLoader::load_text(bundle, "coordinator rule bundle");
@@ -249,8 +313,6 @@ ActiveRuleBundleState update_rules_from_coordinator(const std::filesystem::path&
     if (std::filesystem::is_regular_file(path)) previous = read_file(path);
     atomic_write(path, bundle);
     try {
-        // Coordinator validates revision/hash on this acknowledgement; a mismatch
-        // rolls the local file back before the running detector is touched.
         FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "INSTALLED");
     } catch (...) {
         restore_previous(path, previous);
@@ -267,10 +329,7 @@ ActiveRuleBundleState update_rules_from_coordinator(const std::filesystem::path&
         throw;
     }
 
-    if (reloaded) {
-        // Only now is the long-running detector executing the new rule file.
-        FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "ACTIVE");
-    }
+    if (reloaded) FleetClient::acknowledge_rule_bundle(state_dir, parsed.revision, hash, "ACTIVE");
     return state_from_text(path, bundle, true);
 }
 
@@ -281,6 +340,53 @@ ActiveRuleBundleState active_rule_bundle_state(const std::filesystem::path& stat
     ActiveRuleBundleState state; state.path.clear(); state.revision = built_in.revision; state.version = built_in.version;
     state.sha256 = rule_set_hash(built_in); state.rule_count = built_in.definitions.size(); state.centrally_managed = false;
     return state;
+}
+
+YaraXContentState update_yarax_content_from_coordinator(const std::filesystem::path& state_dir) {
+#ifdef _WIN32
+    throw std::runtime_error("centrally managed YARA-X content is unsupported on Windows until RM4.7 execution-trigger scanning is enabled");
+#else
+    const std::string envelope = FleetClient::fetch_yarax_content_bundle(state_dir);
+    if (envelope.empty()) {
+        const auto meta_path = state_dir / "yarax-content" / "active.meta";
+        if (std::filesystem::is_regular_file(meta_path)) return yarax_state_from_meta(state_dir, read_file(meta_path));
+        throw std::runtime_error("no centrally managed YARA content is assigned to this endpoint");
+    }
+    const auto parsed = parse_yarax_content(envelope);
+    const auto dir = state_dir / "yarax-content";
+    const auto path = dir / "active.yar";
+    const auto meta_path = dir / "active.meta";
+    std::optional<std::string> previous_content;
+    std::optional<std::string> previous_meta;
+    if (std::filesystem::is_regular_file(path)) previous_content = read_file(path);
+    if (std::filesystem::is_regular_file(meta_path)) previous_meta = read_file(meta_path);
+
+    atomic_write(path, parsed.content);
+    atomic_write(meta_path, yarax_meta(parsed));
+    try {
+        FleetClient::acknowledge_yarax_content_bundle(state_dir, parsed.bundle_id, parsed.revision, parsed.sha256, "INSTALLED");
+    } catch (...) {
+        restore_previous(path, previous_content); restore_previous(meta_path, previous_meta); throw;
+    }
+
+    bool reloaded = false;
+    try {
+        reloaded = reload_service_if_running();
+    } catch (const std::exception& error) {
+        restore_previous(path, previous_content); restore_previous(meta_path, previous_meta);
+        try { static_cast<void>(reload_service_if_running()); } catch (...) {}
+        try { FleetClient::acknowledge_yarax_content_bundle(state_dir, parsed.bundle_id, parsed.revision, parsed.sha256, "APPLY_FAILED", error.what()); } catch (...) {}
+        throw;
+    }
+    if (reloaded) FleetClient::acknowledge_yarax_content_bundle(state_dir, parsed.bundle_id, parsed.revision, parsed.sha256, "ACTIVE");
+    return yarax_state_from_meta(state_dir, read_file(meta_path));
+#endif
+}
+
+YaraXContentState active_yarax_content_state(const std::filesystem::path& state_dir) {
+    const auto meta_path = state_dir / "yarax-content" / "active.meta";
+    if (!std::filesystem::is_regular_file(meta_path)) return {};
+    return yarax_state_from_meta(state_dir, read_file(meta_path));
 }
 
 } // namespace neta
