@@ -228,13 +228,17 @@ std::string FleetClient::send_heartbeat(const std::filesystem::path& state_dir) 
 std::string FleetClient::send_finding(const std::filesystem::path& state_dir, const FindingAnnouncementInput& finding) {
     if (finding.finding_id.empty()) throw std::runtime_error("finding_id is required"); if (finding.host.empty() || finding.port == 0) throw std::runtime_error("finding target is required"); if (finding.evidence_root.empty()) throw std::runtime_error("evidence_root is required");
     const auto rule_state = active_rule_bundle_state(state_dir);
-    const std::string rule_set_id = rule_state.centrally_managed ? "neta-production" : "neta-default";
+    const std::string rule_set_id = finding.rule_set_id.empty() ? (rule_state.centrally_managed ? "neta-production" : "neta-default") : finding.rule_set_id;
+    const std::string rule_set_version = finding.rule_set_version.empty() ? rule_state.version : finding.rule_set_version;
     const std::string rule_hash = rule_state.sha256.starts_with("sha256:") ? rule_state.sha256 : "sha256:" + rule_state.sha256;
     std::ostringstream changes; changes << '['; for (std::size_t i = 0; i < finding.changes.size(); ++i) { if (i) changes << ','; changes << '"' << json_escape(finding.changes[i]) << '"'; } changes << ']';
     std::ostringstream payload; payload << "{" << "\"finding_id\":\"" << json_escape(finding.finding_id) << "\","; if (!finding.finding_key.empty()) payload << "\"finding_key\":\"" << json_escape(finding.finding_key) << "\",";
+    if (!finding.severity.empty()) payload << "\"severity\":\"" << json_escape(finding.severity) << "\",";
+    if (!finding.rule_id.empty()) payload << "\"rule_id\":\"" << json_escape(finding.rule_id) << "\",";
+    if (!finding.interpretation.empty()) payload << "\"interpretation\":\"" << json_escape(finding.interpretation) << "\",";
     payload << "\"target\":{" << "\"host\":\"" << json_escape(finding.host) << "\"," << "\"port\":" << finding.port << ',' << "\"transport\":\"" << json_escape(finding.transport) << "\"},"
             << "\"changes\":" << changes.str() << ',' << "\"performance_verdict\":\"" << json_escape(finding.performance_verdict) << "\"," << "\"trust_verdict\":\"" << json_escape(finding.trust_verdict) << "\","
-            << "\"rule_set\":{\"id\":\"" << json_escape(rule_set_id) << "\",\"version\":\"" << json_escape(rule_state.version) << "\",\"revision\":" << rule_state.revision << ",\"hash\":\"" << json_escape(rule_hash) << "\"},"
+            << "\"rule_set\":{\"id\":\"" << json_escape(rule_set_id) << "\",\"version\":\"" << json_escape(rule_set_version) << "\",\"revision\":" << rule_state.revision << ",\"hash\":\"" << json_escape(rule_hash) << "\"},"
             << "\"evidence_root\":\"" << json_escape(finding.evidence_root) << "\"}";
     return send_payload(state_dir, "FindingAnnouncement", payload.str());
 }
