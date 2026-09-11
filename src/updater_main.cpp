@@ -1,6 +1,7 @@
 #include "neta/upgrade_runtime.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -62,14 +63,100 @@ void restore_metadata_after_rollback(const std::filesystem::path& state_dir) {
     }
 }
 
+#ifndef _WIN32
+void write_systemd_unit(const std::filesystem::path& path, const std::string& content) {
+    const auto temporary = path.string() + ".neta-new";
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        if (!output) throw std::runtime_error("cannot write systemd unit: " + temporary);
+        output << content;
+        if (!output) throw std::runtime_error("failed writing systemd unit: " + temporary);
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error("cannot activate systemd unit " + path.string() + ": " + ec.message());
+    }
+}
+
+void require_command_ok(const std::string& command, const std::string& what) {
+    const int rc = std::system(command.c_str());
+    if (rc != 0) throw std::runtime_error(what + " failed with exit code " + std::to_string(rc));
+}
+
+void reconcile_linux_systemd_units(const std::filesystem::path& state_dir) {
+    if (state_dir.empty()) throw std::runtime_error("systemd reconciliation requires state_dir");
+    const std::string state = state_dir.string();
+    const std::filesystem::path unit_root = "/etc/systemd/system";
+
+    write_systemd_unit(unit_root / "neta-yarax-runtime-update.service",
+        "[Unit]\n"
+        "Description=NETA YARA-X runtime desired-state update\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "EnvironmentFile=/etc/neta/neta-agent.env\n"
+        "ExecStart=/usr/local/bin/neta-agent fleet yarax-update --state-dir " + state + "\n");
+
+    write_systemd_unit(unit_root / "neta-yarax-runtime-update.timer",
+        "[Unit]\n"
+        "Description=Poll NETA coordinator for YARA-X runtime updates\n\n"
+        "[Timer]\n"
+        "OnBootSec=45s\n"
+        "OnUnitActiveSec=60s\n"
+        "RandomizedDelaySec=15s\n"
+        "Persistent=true\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n");
+
+    write_systemd_unit(unit_root / "neta-yarax-content-update.service",
+        "[Unit]\n"
+        "Description=NETA centrally managed YARA content desired-state update\n"
+        "After=network-online.target neta-yarax-runtime-update.service\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "EnvironmentFile=/etc/neta/neta-agent.env\n"
+        "ExecStart=/usr/local/bin/neta-agent fleet yarax-content-update --state-dir " + state + "\n");
+
+    write_systemd_unit(unit_root / "neta-yarax-content-update.timer",
+        "[Unit]\n"
+        "Description=Poll NETA coordinator for centrally managed YARA content\n\n"
+        "[Timer]\n"
+        "OnBootSec=60s\n"
+        "OnUnitActiveSec=60s\n"
+        "RandomizedDelaySec=15s\n"
+        "Persistent=true\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n");
+
+    require_command_ok("/usr/bin/systemctl daemon-reload", "systemd daemon-reload");
+    require_command_ok("/usr/bin/systemctl enable --now neta-yarax-runtime-update.timer neta-yarax-content-update.timer",
+                       "enabling NETA managed update timers");
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv) {
     std::filesystem::path state_dir;
     try {
+#ifndef _WIN32
+        if (argc >= 2 && std::string(argv[1]) == "reconcile-systemd") {
+            state_dir = arg_value(argc, argv, "--state-dir", "/var/lib/neta/identity");
+            reconcile_linux_systemd_units(state_dir);
+            std::cout << "NETA managed systemd units reconciled.\n";
+            return 0;
+        }
+#endif
         if (argc < 2 || std::string(argv[1]) != "apply") {
             std::cerr << "Usage: neta-agent-updater apply --state-dir DIR --install-root DIR "
                          "[--service NAME] [--health-timeout SECONDS]\n";
+#ifndef _WIN32
+            std::cerr << "       neta-agent-updater reconcile-systemd [--state-dir DIR]\n";
+#endif
             return 2;
         }
 
@@ -81,6 +168,10 @@ int main(int argc, char** argv) {
         options.service_name = arg_value(argc, argv, "--service", "NETAAgent");
 #else
         options.service_name = arg_value(argc, argv, "--service", "neta-agent.service");
+        // Managed upgrades switch immutable binaries directly and therefore do not
+        // execute deploy/linux/install-package.sh. Reconcile NETA-owned auxiliary
+        // units here so new updater capabilities do not depend on a manual reinstall.
+        reconcile_linux_systemd_units(options.state_dir);
 #endif
         const auto timeout = std::stoll(arg_value(argc, argv, "--health-timeout", "45"));
         if (timeout < 5 || timeout > 300)
