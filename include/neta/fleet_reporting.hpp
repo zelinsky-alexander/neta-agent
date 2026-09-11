@@ -98,6 +98,22 @@ inline std::string stable_finding_key(const ExportData& data,
     return "sha256:" + sha256_hex(canonical.str());
 }
 
+inline void attribute_connection_finding(const ExportData& data,
+                                         FindingAnnouncementInput& finding) {
+    if (!data.verdict) return;
+
+    const bool degraded_performance =
+        data.verdict->performance == PerformanceState::Degraded ||
+        data.verdict->performance == PerformanceState::Failed;
+    if (degraded_performance &&
+        data.verdict->performance_hypothesis == "NETWORK_PATH_DEGRADATION") {
+        finding.rule_id = "PERF-001";
+        finding.severity = "MEDIUM";
+        finding.interpretation = "Network path degradation";
+        finding.changes.emplace_back("Attributed rule: PERF-001");
+    }
+}
+
 } // namespace fleet_reporting_detail
 
 inline FleetReportingPolicy fleet_reporting_policy_from_environment() {
@@ -177,6 +193,8 @@ inline FindingAnnouncementInput finding_from_connection(HistoryStore& store,
         finding.changes.emplace_back("Performance hypothesis: " + data.verdict->performance_hypothesis);
     if (!data.verdict->trust_hypothesis.empty())
         finding.changes.emplace_back("Trust hypothesis: " + data.verdict->trust_hypothesis);
+
+    fleet_reporting_detail::attribute_connection_finding(data, finding);
 
     if (preferred_tls != nullptr && inbound &&
         preferred_tls->relation == TlsSessionRelation::InboundClientIdentity &&
