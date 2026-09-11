@@ -119,10 +119,37 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+cat >/etc/systemd/system/neta-yarax-content-update.service <<EOF
+[Unit]
+Description=NETA centrally managed YARA content desired-state update
+After=network-online.target neta-yarax-runtime-update.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/neta/neta-agent.env
+ExecStart=/usr/local/bin/neta-agent fleet yarax-content-update --state-dir $STATE_DIR
+EOF
+
+cat >/etc/systemd/system/neta-yarax-content-update.timer <<'EOF'
+[Unit]
+Description=Poll NETA coordinator for centrally managed YARA content
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=60s
+RandomizedDelaySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
-systemctl enable neta-agent.service neta-yarax-runtime-update.timer
+systemctl enable neta-agent.service neta-yarax-runtime-update.timer neta-yarax-content-update.timer
 systemctl restart neta-agent.service
 systemctl restart neta-yarax-runtime-update.timer
+systemctl restart neta-yarax-content-update.timer
 
 echo "Installed prebuilt NETA package"
 echo "  build_id=$BUILD_ID"
