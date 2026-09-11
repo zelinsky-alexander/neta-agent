@@ -150,6 +150,8 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet rules-status [--state-dir DIR]\n"
             << "  neta-agent fleet rules-update [--state-dir DIR]\n"
             << "  neta-agent fleet yarax-update [--state-dir DIR]\n"
+            << "  neta-agent fleet yarax-content-status [--state-dir DIR]\n"
+            << "  neta-agent fleet yarax-content-update [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-status [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-download [--state-dir DIR]\n"
             << "  neta-agent health --upgrade --state-dir DIR\n"
