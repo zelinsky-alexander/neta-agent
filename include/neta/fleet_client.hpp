@@ -70,6 +70,17 @@ public:
                                                const std::string& sha256,
                                                const std::string& status,
                                                const std::string& error = {});
+
+    // RM4.4 centrally managed YARA content plane. Content is data for the trusted
+    // YARA-X evaluator, never executable code. Transport is endpoint mTLS and the
+    // coordinator-pinned SHA-256 is verified before activation.
+    static std::string fetch_yarax_content_bundle(const std::filesystem::path& state_dir);
+    static std::string acknowledge_yarax_content_bundle(const std::filesystem::path& state_dir,
+                                                         const std::string& bundle_id,
+                                                         std::uint64_t revision,
+                                                         const std::string& sha256,
+                                                         const std::string& status,
+                                                         const std::string& error = {});
 };
 
 } // namespace neta
