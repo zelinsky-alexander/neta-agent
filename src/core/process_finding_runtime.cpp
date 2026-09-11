@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -119,17 +120,46 @@ FindingAnnouncementInput announcement(const StoredProcessFinding& finding) {
     return input;
 }
 
+#ifndef _WIN32
+std::filesystem::path fleet_state_dir() {
+    if (const char* value = std::getenv("NETA_FLEET_STATE_DIR"); value != nullptr && *value != '\0') return value;
+    return "/var/lib/neta/identity";
+}
+
+std::string managed_yara_bundle_id(const std::filesystem::path& meta_path) {
+    std::ifstream input(meta_path);
+    if (!input) return {};
+    std::string line;
+    while (std::getline(input,line)) {
+        constexpr std::string_view prefix = "bundle-id:";
+        if (line.starts_with(prefix)) return line.substr(prefix.size());
+    }
+    return {};
+}
+#endif
+
 }  // namespace
 
 ProcessFindingRuntime::ProcessFindingRuntime(const std::filesystem::path& database)
     : store_(database), artifact_store_(database) {
 #ifndef _WIN32
-    const char* rules_path = std::getenv("NETA_YARAX_RULES");
-    if (rules_path != nullptr && *rules_path != '\0') {
+    std::filesystem::path selected_rules;
+    std::string selected_ruleset;
+    if (const char* rules_path = std::getenv("NETA_YARAX_RULES"); rules_path != nullptr && *rules_path != '\0') {
+        selected_rules = rules_path;
+        if (const char* ruleset = std::getenv("NETA_YARAX_RULESET_ID"); ruleset != nullptr && *ruleset != '\0') selected_ruleset = ruleset;
+    } else {
+        const auto dir = fleet_state_dir() / "yarax-content";
+        const auto managed = dir / "active.yar";
+        if (std::filesystem::is_regular_file(managed)) {
+            selected_rules = managed;
+            selected_ruleset = managed_yara_bundle_id(dir / "active.meta");
+        }
+    }
+    if (!selected_rules.empty()) {
         YaraXProviderConfig config;
-        config.rules_path = rules_path;
-        if (const char* ruleset = std::getenv("NETA_YARAX_RULESET_ID"); ruleset != nullptr && *ruleset != '\0')
-            config.ruleset_id = ruleset;
+        config.rules_path = selected_rules;
+        if (!selected_ruleset.empty()) config.ruleset_id = selected_ruleset;
         artifact_providers_.add(std::make_unique<YaraXProvider>(std::move(config)));
     }
 #endif
