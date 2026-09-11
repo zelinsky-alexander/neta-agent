@@ -6,6 +6,7 @@
 #include "neta/tls_session.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
+#include "neta/yarax_content_update.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -50,6 +51,18 @@ void print_rule_state(const ActiveRuleBundleState& state) {
               << "Rules:            " << state.rule_count << '\n'
               << "SHA-256:          " << state.sha256 << '\n'
               << "Active file:      " << (state.path.empty() ? "-" : state.path.string()) << '\n';
+}
+
+void print_yarax_content_state(const YaraXContentState& state) {
+    if (!state.centrally_managed) {
+        std::cout << "YARA content source: LOCAL_OR_NONE\nCentral bundle:      -\nRevision:            -\nSHA-256:             -\nActive file:         -\n";
+        return;
+    }
+    std::cout << "YARA content source: CENTRAL\n"
+              << "Central bundle:      " << state.bundle_id << '\n'
+              << "Revision:            " << state.revision << '\n'
+              << "SHA-256:             " << state.sha256 << '\n'
+              << "Active file:         " << state.path.string() << '\n';
 }
 
 void print_upgrade_state(const UpgradeState& state) {
@@ -126,7 +139,7 @@ FindingAnnouncementInput finding_from_connection(const std::filesystem::path& db
 } // namespace
 
 void run_fleet_command(int argc, char** argv) {
-    if (argc < 3) throw std::runtime_error("fleet requires enroll, status, hello, heartbeat, rules-status, rules-update, upgrade-status, upgrade-download, upgrade-run, upgrade-report, announce, or announce-connection");
+    if (argc < 3) throw std::runtime_error("fleet requires enroll, status, hello, heartbeat, rules-status, rules-update, yarax-content-status, yarax-content-update, upgrade-status, upgrade-download, upgrade-run, upgrade-report, announce, or announce-connection");
     const std::string action = argv[2];
 
     if (action == "enroll") {
@@ -147,6 +160,17 @@ void run_fleet_command(int argc, char** argv) {
         const auto state = update_rules_from_coordinator(dir);
         std::cout << "Central rule set downloaded, validated, activated, and acknowledged.\n";
         print_rule_state(state);
+        return;
+    }
+    if (action == "yarax-content-status") {
+        print_yarax_content_state(active_yarax_content_state(state_dir(argc, argv)));
+        return;
+    }
+    if (action == "yarax-content-update") {
+        const auto dir = state_dir(argc, argv);
+        const auto state = update_yarax_content_from_coordinator(dir);
+        std::cout << "Central YARA content downloaded, SHA-256 verified, activated, and acknowledged.\n";
+        print_yarax_content_state(state);
         return;
     }
 
