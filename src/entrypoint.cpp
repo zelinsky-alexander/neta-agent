@@ -4,6 +4,7 @@
 #include "neta/platform.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
+#include "neta/yarax_content_update.hpp"
 #include "neta/yarax_runtime_update.hpp"
 
 #ifdef _WIN32
@@ -93,6 +94,25 @@ int main(int argc, char** argv) {
             if (!result.detail.empty()) std::cout << "Detail:  " << result.detail << '\n';
             return result.state == "APPLY_FAILED" ? 1 : 0;
         } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return 1;
+        }
+    }
+
+    if (argc >= 3 && std::string(argv[1]) == "fleet" && std::string(argv[2]) == "yarax-content-update") {
+        try {
+            const auto dir = fleet_state_dir(argc, argv);
+            const auto state = neta::update_yarax_content_from_coordinator(dir);
+            std::cout << "Central YARA content downloaded, SHA-256 verified, activated, and acknowledged.\n"
+                      << "Bundle:   " << (state.bundle_id.empty() ? "-" : state.bundle_id) << '\n'
+                      << "Revision: " << state.revision << '\n'
+                      << "SHA-256:  " << (state.sha256.empty() ? "-" : state.sha256) << '\n';
+            return 0;
+        } catch (const std::exception& e) {
+            if (std::string(e.what()) == "no centrally managed YARA content is assigned to this endpoint") {
+                std::cout << "No centrally managed YARA content is assigned to this endpoint.\n";
+                return 0;
+            }
             std::cerr << "Error: " << e.what() << '\n';
             return 1;
         }
