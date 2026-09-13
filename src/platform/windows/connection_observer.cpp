@@ -88,6 +88,16 @@ bool ensure_estats_enabled_ipv6(Row& row, TCP_ESTATS_TYPE type, Rw& rw) {
     return false;
 }
 
+void collect_syn_options(MIB_TCPROW& row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_SYN_OPTS_ROS_v0 syn{};
+    const auto rc = GetPerTcpConnectionEStats(
+        &row, TcpConnectionEstatsSynOpts,
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&syn), 0, sizeof(syn),
+        nullptr, 0, 0);
+    if (rc == NO_ERROR) windows_tcp_estats::apply_syn_options(snapshot, syn);
+}
+
 void collect_data(MIB_TCPROW& row, TcpSnapshot& snapshot) {
     TCP_ESTATS_DATA_RW_v0 rw{};
     if (!ensure_estats_enabled_ipv4(row, TcpConnectionEstatsData, rw)) return;
@@ -100,10 +110,7 @@ void collect_data(MIB_TCPROW& row, TcpSnapshot& snapshot) {
         reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
     if (rc != NO_ERROR || rw.EnableCollection != TRUE || !plausible_estats(data)) return;
 
-    snapshot.bytes_sent = static_cast<std::uint64_t>(data.DataBytesOut);
-    snapshot.bytes_received = static_cast<std::uint64_t>(data.DataBytesIn);
-    snapshot.transfer_source = "windows:tcp-estats:data";
-    snapshot.transfer_fidelity = EvidenceFidelity::StronglyCorrelated;
+    windows_tcp_estats::apply_data(snapshot, data);
 }
 
 void collect_path(MIB_TCPROW& row, TcpSnapshot& snapshot) {
@@ -151,11 +158,56 @@ void collect_sender_congestion(MIB_TCPROW& row, TcpSnapshot& snapshot) {
     }
 }
 
+void collect_send_buffer(MIB_TCPROW& row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_SEND_BUFF_RW_v0 rw{};
+    if (!ensure_estats_enabled_ipv4(row, TcpConnectionEstatsSendBuff, rw)) return;
+
+    TCP_ESTATS_SEND_BUFF_ROD_v0 send_buffer{};
+    const auto rc = GetPerTcpConnectionEStats(
+        &row, TcpConnectionEstatsSendBuff,
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&send_buffer), 0, sizeof(send_buffer));
+    if (rc == NO_ERROR && rw.EnableCollection == TRUE) {
+        windows_tcp_estats::apply_send_buffer(snapshot, send_buffer);
+    }
+}
+
+void collect_receiver(MIB_TCPROW& row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_REC_RW_v0 rw{};
+    if (!ensure_estats_enabled_ipv4(row, TcpConnectionEstatsRec, rw)) return;
+
+    TCP_ESTATS_REC_ROD_v0 receiver{};
+    const auto rc = GetPerTcpConnectionEStats(
+        &row, TcpConnectionEstatsRec,
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&receiver), 0, sizeof(receiver));
+    if (rc == NO_ERROR && rw.EnableCollection == TRUE) {
+        windows_tcp_estats::apply_receiver(snapshot, receiver);
+    }
+}
+
 void collect_estats(MIB_TCPROW row, TcpSnapshot& snapshot) {
-    collect_data(row, snapshot);
+    // Static SYN options are immediately available and establish MSS units before
+    // sender congestion/send-buffer values are normalized to the Linux model.
+    collect_syn_options(row, snapshot);
     collect_path(row, snapshot);
     collect_fine_rtt(row, snapshot);
     collect_sender_congestion(row, snapshot);
+    collect_send_buffer(row, snapshot);
+    collect_receiver(row, snapshot);
+    collect_data(row, snapshot);
+}
+
+void collect_syn_options(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_SYN_OPTS_ROS_v0 syn{};
+    const auto rc = GetPerTcp6ConnectionEStats(
+        &row, TcpConnectionEstatsSynOpts,
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&syn), 0, sizeof(syn),
+        nullptr, 0, 0);
+    if (rc == NO_ERROR) windows_tcp_estats::apply_syn_options(snapshot, syn);
 }
 
 void collect_data(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
@@ -170,10 +222,7 @@ void collect_data(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
         reinterpret_cast<PUCHAR>(&data), 0, sizeof(data));
     if (rc != NO_ERROR || rw.EnableCollection != TRUE || !plausible_estats(data)) return;
 
-    snapshot.bytes_sent = static_cast<std::uint64_t>(data.DataBytesOut);
-    snapshot.bytes_received = static_cast<std::uint64_t>(data.DataBytesIn);
-    snapshot.transfer_source = "windows:tcp-estats:data";
-    snapshot.transfer_fidelity = EvidenceFidelity::StronglyCorrelated;
+    windows_tcp_estats::apply_data(snapshot, data);
 }
 
 void collect_path(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
@@ -221,11 +270,44 @@ void collect_sender_congestion(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
     }
 }
 
+void collect_send_buffer(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_SEND_BUFF_RW_v0 rw{};
+    if (!ensure_estats_enabled_ipv6(row, TcpConnectionEstatsSendBuff, rw)) return;
+
+    TCP_ESTATS_SEND_BUFF_ROD_v0 send_buffer{};
+    const auto rc = GetPerTcp6ConnectionEStats(
+        &row, TcpConnectionEstatsSendBuff,
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&send_buffer), 0, sizeof(send_buffer));
+    if (rc == NO_ERROR && rw.EnableCollection == TRUE) {
+        windows_tcp_estats::apply_send_buffer(snapshot, send_buffer);
+    }
+}
+
+void collect_receiver(MIB_TCP6ROW& row, TcpSnapshot& snapshot) {
+    TCP_ESTATS_REC_RW_v0 rw{};
+    if (!ensure_estats_enabled_ipv6(row, TcpConnectionEstatsRec, rw)) return;
+
+    TCP_ESTATS_REC_ROD_v0 receiver{};
+    const auto rc = GetPerTcp6ConnectionEStats(
+        &row, TcpConnectionEstatsRec,
+        reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw),
+        nullptr, 0, 0,
+        reinterpret_cast<PUCHAR>(&receiver), 0, sizeof(receiver));
+    if (rc == NO_ERROR && rw.EnableCollection == TRUE) {
+        windows_tcp_estats::apply_receiver(snapshot, receiver);
+    }
+}
+
 void collect_estats(MIB_TCP6ROW row, TcpSnapshot& snapshot) {
-    collect_data(row, snapshot);
+    collect_syn_options(row, snapshot);
     collect_path(row, snapshot);
     collect_fine_rtt(row, snapshot);
     collect_sender_congestion(row, snapshot);
+    collect_send_buffer(row, snapshot);
+    collect_receiver(row, snapshot);
+    collect_data(row, snapshot);
 }
 
 void collect_ipv4(std::vector<SocketObservation>& out) {
