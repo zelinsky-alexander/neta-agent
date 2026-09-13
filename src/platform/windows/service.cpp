@@ -175,3 +175,7 @@ int run_windows_service(int argc, char** argv) {
 }
 
 } // namespace neta::platform
+
+// Keep the DNS Client manifest-provider implementation isolated from the Schannel
+// observer translation unit. Both use generic ETW helper names in anonymous namespaces.
+#include "dns_etw_observer.cpp"
