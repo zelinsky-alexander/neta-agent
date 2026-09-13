@@ -17,22 +17,10 @@
 #include <string>
 
 namespace neta::platform {
+
+std::unique_ptr<TlsSessionObserver> make_windows_tls_session_observer();
+
 namespace {
-
-class UnavailableTlsSessionObserver final : public TlsSessionObserver {
-public:
-    UnavailableTlsSessionObserver() {
-        capability_.source = "windows:tls";
-        capability_.unavailable_reason = "Windows application TLS collector is not implemented yet";
-    }
-
-    const TlsSessionCapability& capability() const noexcept override { return capability_; }
-    TlsSessionHealth health() const override { return {}; }
-    std::vector<TlsSessionObservation> poll(std::chrono::milliseconds) override { return {}; }
-
-private:
-    TlsSessionCapability capability_;
-};
 
 std::string native_windows_version() {
     using RtlGetVersionFn = LONG (WINAPI*)(OSVERSIONINFOW*);
@@ -97,17 +85,31 @@ PlatformCapabilities capabilities() {
     c.name_resolution_unavailable_reason = name_capability.unavailable_reason;
     c.exact_dns_observation = false;
 
-    c.tls_session_source = "windows:tls";
-    c.tls_session_unavailable_reason = "Windows application TLS collector is not implemented yet";
+    const auto tls = make_windows_tls_session_observer();
+    const auto& tls_capability = tls->capability();
+    const auto tls_health = tls->health();
+    c.application_tls_session_events = tls_capability.available();
+    c.tls_session_sender_credentials_verified = tls_capability.sender_credentials_verified;
+    c.tls_session_drop_counter = tls_capability.receive_drop_counter;
+    c.tls_session_dropped_events = tls_health.dropped_events;
+    c.tls_session_rejected_events = tls_health.rejected_events;
+    c.tls_session_source = tls_capability.source;
+    c.tls_session_endpoint = tls_capability.endpoint;
+    c.tls_session_unavailable_reason = tls_capability.unavailable_reason;
+    // Schannel ETW identifies the process, but the current implementation attaches
+    // a TCP tuple only when it can do so unambiguously at observation time. That is
+    // strong correlation, not Linux socket-cookie-level exactness.
+    c.exact_tls_observation = false;
     return c;
 }
 
 std::unique_ptr<TlsSessionObserver> make_tls_session_observer() {
-    return std::make_unique<UnavailableTlsSessionObserver>();
+    return make_windows_tls_session_observer();
 }
 
 } // namespace neta::platform
 
-// Keep the manifest-provider implementation isolated while compiling it through the
+// Keep manifest-provider implementations isolated while compiling them through the
 // existing Windows platform translation unit. This avoids touching non-Windows builds.
 #include "dns_etw_observer.cpp"
+#include "tls_schannel_etw_observer.cpp"
