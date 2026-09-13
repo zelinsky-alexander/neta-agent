@@ -109,7 +109,6 @@ std::unique_ptr<TlsSessionObserver> make_tls_session_observer() {
 
 } // namespace neta::platform
 
-// Keep manifest-provider implementations isolated while compiling them through the
-// existing Windows platform translation unit. This avoids touching non-Windows builds.
-#include "dns_etw_observer.cpp"
+// Keep the Schannel manifest-provider implementation isolated from the DNS ETW
+// translation unit (compiled via service.cpp) because both use generic ETW helpers.
 #include "tls_schannel_etw_observer.cpp"
