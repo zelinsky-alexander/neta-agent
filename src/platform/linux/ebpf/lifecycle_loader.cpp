@@ -1,4 +1,5 @@
 #include "neta/platform.hpp"
+#include "neta/sensor_broker.hpp"
 
 #include "lifecycle_bpf_bytes.inc"
 #include "lifecycle_decoder.hpp"
@@ -9,9 +10,9 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
-#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -147,6 +148,7 @@ private:
         capability_.connect_events = ipv4_connect_attached && ipv6_connect_attached;
         capability_.accept_events = accept_attached;
         capability_.close_events = close_attached;
+        capability_.source = "linux:ebpf-core-lifecycle";
         capability_.unavailable_reason = std::move(attach_errors);
         if (links_.empty()) {
             throw std::runtime_error("no lifecycle eBPF hook could be attached: " +
@@ -161,7 +163,6 @@ private:
             ring_ = nullptr;
             throw std::runtime_error(libbpf_error("creating lifecycle ring buffer failed", ring_error));
         }
-
     }
 
     void cleanup() noexcept {
@@ -197,6 +198,7 @@ public:
     explicit UnavailableLifecycleObserver(std::string reason) {
         capability_.built_in = true;
         capability_.btf_core_runtime = std::filesystem::exists("/sys/kernel/btf/vmlinux");
+        capability_.source = "linux:ebpf-core-lifecycle";
         capability_.unavailable_reason = std::move(reason);
     }
     const LifecycleCapability& capability() const noexcept override { return capability_; }
@@ -209,6 +211,9 @@ private:
 } // namespace
 
 std::unique_ptr<LifecycleObserver> make_lifecycle_observer() {
+    if (sensor_broker::sensor_mode_from_environment() == sensor_broker::SensorMode::Broker) {
+        return sensor_broker::make_broker_lifecycle_observer();
+    }
     try {
         return std::make_unique<LinuxLifecycleObserver>();
     } catch (const std::exception& error) {

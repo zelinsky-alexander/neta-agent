@@ -32,6 +32,9 @@ struct ProcessExecEvent {
     std::string integrity_level;
     std::optional<bool> elevated;
     std::optional<std::int32_t> exit_code;
+    // Host attribution identity used by the large-scale sensor broker. Linux populates
+    // this with bpf_get_current_cgroup_id(); other platforms may leave it unavailable.
+    std::optional<std::uint64_t> cgroup_id;
     std::string comm;
     std::string executable_path;
     std::string command_line;

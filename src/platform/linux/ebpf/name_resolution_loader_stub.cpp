@@ -1,4 +1,5 @@
 #include "neta/platform.hpp"
+#include "neta/sensor_broker.hpp"
 
 #include <memory>
 #include <string>
@@ -26,6 +27,9 @@ private:
 } // namespace
 
 std::unique_ptr<NameResolutionObserver> make_name_resolution_observer() {
+    if (sensor_broker::sensor_mode_from_environment() == sensor_broker::SensorMode::Broker) {
+        return sensor_broker::make_broker_name_resolution_observer();
+    }
     return std::make_unique<UnavailableNameResolutionObserver>();
 }
 
