@@ -411,8 +411,14 @@ std::uint64_t next_windows_sequence(const std::filesystem::path& state_dir,
         throw std::runtime_error("NAP sequence state is exhausted");
     }
     const auto next = current + 1;
-    const bool write_slot0 = slot0.value <= slot1.value;
-    write_slot(write_slot0 ? slot0_path : slot1_path, next);
+    const bool first_is_slot0 = slot0.value <= slot1.value;
+    const auto& first_path = first_is_slot0 ? slot0_path : slot1_path;
+    const auto& second_path = first_is_slot0 ? slot1_path : slot0_path;
+    write_slot(first_path, next);
+    // Do not expose N+1 to the caller until both durable copies contain it. If the
+    // process or machine dies between these writes, the first copy advances and a
+    // later allocation safely skips N+1 rather than ever reusing a sent sequence.
+    write_slot(second_path, next);
     best_effort_write_legacy(state_dir, next);
     lock.release();
     return next;
@@ -446,7 +452,9 @@ NapSequenceStatus inspect_windows_sequence(const std::filesystem::path& state_di
         status.health = NapSequenceHealth::Healthy;
         status.has_sequence = true;
         status.sequence = std::max(slot0.value, slot1.value);
-        status.detail = "both redundant sequence slots are valid";
+        status.detail = slot0.value == slot1.value
+            ? "both redundant sequence slots are valid and synchronized"
+            : "both redundant sequence slots are valid; highest durable sequence selected";
     } else if (slot0.valid || slot1.valid) {
         status.health = NapSequenceHealth::Recovered;
         status.has_sequence = true;

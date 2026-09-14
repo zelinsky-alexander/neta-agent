@@ -2,6 +2,7 @@
 #include "neta/crypto.hpp"
 #include "neta/fleet_client.hpp"
 #include "neta/history_store.hpp"
+#include "neta/nap_sequence.hpp"
 #include "neta/rule_update.hpp"
 #include "neta/tls_session.hpp"
 #include "neta/upgrade.hpp"
@@ -43,6 +44,18 @@ void print_identity(const FleetIdentity& identity) {
               << "Certificate fingerprint: " << identity.certificate_sha256 << '\n'
               << "Identity directory:      " << identity.state_dir << '\n';
 }
+
+#ifdef _WIN32
+void print_nap_sequence_status(const std::filesystem::path& dir) {
+    const auto status = inspect_nap_sequence_state(dir);
+    std::cout << "NAP sequence:             "
+              << (status.has_sequence ? std::to_string(status.sequence) : "-") << '\n'
+              << "Sequence state:          " << to_string(status.health) << '\n'
+              << "Sequence detail:         " << (status.detail.empty() ? "-" : status.detail) << '\n'
+              << "Sequence recovery:       "
+              << (status.recovery_detail.empty() ? "-" : status.recovery_detail) << '\n';
+}
+#endif
 
 void print_rule_state(const ActiveRuleBundleState& state) {
     std::cout << "Rule source:      " << (state.centrally_managed ? "CENTRAL" : "BUILT_IN") << '\n'
@@ -147,7 +160,14 @@ void run_fleet_command(int argc, char** argv) {
         options.fleet_ca = arg_value(argc, argv, "--fleet-ca"); options.token = arg_value(argc, argv, "--token"); options.display_name = arg_value(argc, argv, "--display-name"); options.state_dir = state_dir(argc, argv);
         auto identity = FleetClient::enroll(options); std::cout << "Enrollment succeeded.\n"; print_identity(identity); return;
     }
-    if (action == "status") { print_identity(FleetClient::load_identity(state_dir(argc, argv))); return; }
+    if (action == "status") {
+        const auto dir = state_dir(argc, argv);
+        print_identity(FleetClient::load_identity(dir));
+#ifdef _WIN32
+        print_nap_sequence_status(dir);
+#endif
+        return;
+    }
     if (action == "hello") { print_response(FleetClient::send_agent_hello(state_dir(argc, argv))); return; }
     if (action == "heartbeat") { print_response(FleetClient::send_heartbeat(state_dir(argc, argv))); return; }
 
