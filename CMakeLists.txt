@@ -267,6 +267,7 @@ add_library(neta_core
     src/core/tcp_state.cpp
     src/core/lifecycle.cpp
     src/core/crypto.cpp
+    src/core/nap_sequence.cpp
     src/core/upgrade.cpp
     src/core/upgrade_runtime.cpp
     src/core/antimalware.cpp

@@ -2,6 +2,7 @@
 
 #include "neta/crypto.hpp"
 #include "neta/fleet_client.hpp"
+#include "neta/nap_sequence.hpp"
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -525,24 +526,20 @@ ParsedCoordinatorUrl parse_coordinator_url(const std::string& base) {
 
 std::uint64_t next_sequence(const std::filesystem::path& state_dir) {
 #ifdef _WIN32
-    const auto lock_path = state_dir / "sequence.lock";
-    HANDLE handle = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) throw std::runtime_error("cannot lock NAP sequence state");
-    struct Guard { HANDLE h; ~Guard() { CloseHandle(h); } } guard{handle};
+    return next_nap_sequence(state_dir);
 #else
     const auto lock_path = state_dir / "sequence.lock";
     const int fd = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) throw std::runtime_error("cannot open NAP sequence lock");
     struct Guard { int fd; ~Guard() { flock(fd, LOCK_UN); close(fd); } } guard{fd};
     if (flock(fd, LOCK_EX) != 0) throw std::runtime_error("cannot lock NAP sequence state");
-#endif
     const auto sequence_path = state_dir / "sequence";
     std::uint64_t value = 0;
     if (std::filesystem::exists(sequence_path)) value = std::stoull(read_file(sequence_path));
     ++value;
     atomic_write(sequence_path, std::to_string(value) + "\n");
     return value;
+#endif
 }
 
 std::string random_uuid() {
