@@ -7,6 +7,7 @@
 #include "neta/platform.hpp"
 #include "neta/process_finding_runtime.hpp"
 #include "neta/rm2_reporting.hpp"
+#include "neta/rule_convergence.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/transfer_assurance.hpp"
@@ -100,6 +101,17 @@ void maybe_launch_upgrade(const std::filesystem::path& state_dir) {
         }
     } catch (const std::exception& error) {
         std::cerr << "Fleet service upgrade launch failed; observation continues: "
+                  << error.what() << std::endl;
+    }
+}
+
+void accept_rule_control(const std::filesystem::path& state_dir, const std::string& response) {
+    try {
+        if (accept_rule_control_from_coordinator_response(state_dir, response)) {
+            std::cout << "Fleet service: detached rule-update worker launched" << std::endl;
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "Fleet service rule convergence failed; observation continues: "
                   << error.what() << std::endl;
     }
 }
@@ -298,8 +310,9 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         }
         if (service_mode && fleet_identity_available) {
             try {
-                static_cast<void>(FleetClient::send_agent_hello(reporting_policy.state_dir));
+                const auto response = FleetClient::send_agent_hello(reporting_policy.state_dir);
                 std::cout << "Fleet service: AgentHello accepted" << std::endl;
+                accept_rule_control(reporting_policy.state_dir, response);
                 maybe_launch_upgrade(reporting_policy.state_dir);
             } catch (const std::exception& error) {
                 std::cerr << "Fleet service AgentHello failed; observation continues: "
@@ -323,8 +336,9 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         const auto now = std::chrono::steady_clock::now();
         if (now < next_heartbeat) return;
         try {
-            static_cast<void>(FleetClient::send_heartbeat(reporting_policy.state_dir));
+            const auto response = FleetClient::send_heartbeat(reporting_policy.state_dir);
             std::cout << "Fleet service: heartbeat accepted" << std::endl;
+            accept_rule_control(reporting_policy.state_dir, response);
             maybe_launch_upgrade(reporting_policy.state_dir);
         } catch (const std::exception& error) {
             std::cerr << "Fleet service heartbeat failed; observation continues: "
