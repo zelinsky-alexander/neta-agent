@@ -106,3 +106,62 @@ jobs:
             sc.exe stop $serviceName 2>$null | Out-Null
             sc.exe delete $serviceName | Out-Null
           }
+      - name: Windows service failure diagnostics smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $serviceName = 'NETAAgent'
+          $exe = (Resolve-Path '.\build-windows\Debug\neta-agent.exe').Path
+          $logPath = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'NETA\logs\neta-agent-service.log'
+          Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+          $started = Get-Date
+          $binaryPath = "`"$exe`" service --state-dir"
+
+          sc.exe delete $serviceName 2>$null | Out-Null
+          sc.exe create $serviceName binPath= $binaryPath start= demand | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed with exit $LASTEXITCODE" }
+          try {
+            sc.exe start $serviceName | Write-Host
+            $deadline = (Get-Date).AddSeconds(15)
+            do {
+              Start-Sleep -Milliseconds 500
+              $service = Get-Service -Name $serviceName
+            } while ($service.Status -ne 'Stopped' -and (Get-Date) -lt $deadline)
+            if ($service.Status -ne 'Stopped') {
+              throw "expected diagnostic service instance to stop; current=$($service.Status)"
+            }
+
+            if (-not (Test-Path $logPath)) {
+              throw "NETAAgent did not create the documented service log at $logPath"
+            }
+            $log = Get-Content $logPath -Raw
+            if ($log -notmatch [regex]::Escape('--state-dir needs a value')) {
+              throw "service log did not contain the real exception text: $log"
+            }
+            if ($log -match 'service_error=2(?:\D|$)') {
+              throw "service log still exposes the old ambiguous service-specific error 2"
+            }
+
+            $eventDeadline = (Get-Date).AddSeconds(10)
+            $matchingEvent = $null
+            do {
+              Start-Sleep -Milliseconds 500
+              $events = Get-WinEvent -FilterHashtable @{
+                LogName = 'Application'
+                Id = 1001
+                StartTime = $started.AddSeconds(-2)
+              } -ErrorAction SilentlyContinue
+              $matchingEvent = $events | Where-Object {
+                $_.ProviderName -eq 'NETAAgent' -and
+                $_.ToXml() -match [regex]::Escape('--state-dir needs a value')
+              } | Select-Object -First 1
+            } while (-not $matchingEvent -and (Get-Date) -lt $eventDeadline)
+
+            if (-not $matchingEvent) {
+              throw 'NETAAgent Application event 1001 did not contain the real exception text'
+            }
+            Write-Host "Observed NETAAgent failure event record $($matchingEvent.RecordId)"
+          } finally {
+            sc.exe stop $serviceName 2>$null | Out-Null
+            sc.exe delete $serviceName | Out-Null
+          }
