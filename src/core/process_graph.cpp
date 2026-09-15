@@ -92,7 +92,9 @@ bool ProcessGraph::observe(const ProcessExecEvent& event) {
 
     evict_if_needed();
     ProcessNode node;
-    node.key = *key; node.parent_pid = event.parent_tgid; node.uid = event.uid; node.gid = event.gid;
+    node.key = *key;
+    node.parent_pid = event.parent_pid ? event.parent_pid : event.parent_tgid;
+    node.uid = event.uid; node.gid = event.gid;
     node.session_id = event.session_id; node.user_identity = event.user_identity;
     node.integrity_level = event.integrity_level; node.elevated = event.elevated; node.comm = event.comm;
     node.executable_path = event.executable_path; node.command_line = event.command_line;
@@ -100,14 +102,37 @@ bool ProcessGraph::observe(const ProcessExecEvent& event) {
 
     if (event.parent_tgid && *event.parent_tgid > 0) {
         ProcessInstanceKey parent_key;
-        parent_key.pid = *event.parent_tgid; parent_key.platform_key = event.parent_platform_process_key;
+        parent_key.pid = *event.parent_tgid;
+        parent_key.platform_key = event.parent_platform_process_key;
         if (!parent_key.platform_key) parent_key.start_time_ns = event.parent_process_start_time_ns;
-        if (parent_key.durable()) node.parent = parent_key;
-        else {
-            node.parent = unique_active_key_for_pid(*event.parent_tgid);
-            if (!node.parent) {
+
+        std::optional<ProcessInstanceKey> resolved_parent;
+        if (parent_key.durable()) {
+            resolved_parent = parent_key;
+        } else {
+            resolved_parent = unique_active_key_for_pid(*event.parent_tgid);
+            if (!resolved_parent) {
                 const auto [begin, end] = active_by_pid_.equal_range(*event.parent_tgid);
                 if (begin != end) ++health_.ambiguous_parent_links;
+            }
+        }
+
+        if (resolved_parent) {
+            std::optional<std::uint64_t> parent_start = event.parent_process_start_time_ns;
+            if (!parent_start) {
+                const auto found_parent = nodes_.find(*resolved_parent);
+                if (found_parent != nodes_.end() && found_parent->second.started_at_ns != 0) {
+                    parent_start = found_parent->second.started_at_ns;
+                }
+            }
+
+            std::optional<std::uint64_t> child_start = event.process_start_time_ns;
+            if (!child_start && event.timestamp_ns != 0) child_start = event.timestamp_ns;
+
+            if (child_start && parent_start && *parent_start > *child_start) {
+                ++health_.rejected_invalid_parent_links;
+            } else {
+                node.parent = *resolved_parent;
             }
         }
     }
@@ -340,7 +365,7 @@ std::vector<ProcessFinding> ProcessFindingEngine::observe(const ProcessExecEvent
                 if (starts.size() == count) {
                     const auto* parent = find_process_node(nodes, *node->parent);
                     if (parent) { auto finding = make_finding(ProcessFindingKind::RapidChildFanout, rule.id, severity_from_string(rule.severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
-                        "A process matched a custom rapid child fan-out rule.", "A centrally managed custom fan-out detection matched this process."); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
+                        "A process matched a custom rapid child fan-out rule.", "A centrally managed custom fan-out detection matched this process.")); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
                 }
             }
         }
@@ -368,7 +393,7 @@ std::vector<ProcessFinding> ProcessFindingEngine::observe(const ProcessExecEvent
         if (exits.size() == count) {
             const auto* parent = find_process_node(nodes, *node->parent);
             if (parent) { auto finding = make_finding(ProcessFindingKind::ShortLivedProcessBurst, rule.id, severity_from_string(rule.severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
-                "A process matched a custom short-lived child burst rule.", "A centrally managed custom short-lived-process detection matched this process."); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
+                "A process matched a custom short-lived child burst rule.", "A centrally managed custom short-lived-process detection matched this process.")); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
         }
     }
     return findings;
