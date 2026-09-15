@@ -365,7 +365,7 @@ std::vector<ProcessFinding> ProcessFindingEngine::observe(const ProcessExecEvent
                 if (starts.size() == count) {
                     const auto* parent = find_process_node(nodes, *node->parent);
                     if (parent) { auto finding = make_finding(ProcessFindingKind::RapidChildFanout, rule.id, severity_from_string(rule.severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
-                        "A process matched a custom rapid child fan-out rule.", "A centrally managed custom fan-out detection matched this process.")); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
+                        "A process matched a custom rapid child fan-out rule.", "A centrally managed custom fan-out detection matched this process."); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
                 }
             }
         }
@@ -393,7 +393,7 @@ std::vector<ProcessFinding> ProcessFindingEngine::observe(const ProcessExecEvent
         if (exits.size() == count) {
             const auto* parent = find_process_node(nodes, *node->parent);
             if (parent) { auto finding = make_finding(ProcessFindingKind::ShortLivedProcessBurst, rule.id, severity_from_string(rule.severity), config_.ruleset_version, *parent, parent->parent ? find_process_node(nodes, *parent->parent) : nullptr,
-                "A process matched a custom short-lived child burst rule.", "A centrally managed custom short-lived-process detection matched this process.")); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
+                "A process matched a custom short-lived child burst rule.", "A centrally managed custom short-lived-process detection matched this process."); finding.observed_at_ns = event.timestamp_ns; findings.push_back(std::move(finding)); }
         }
     }
     return findings;
