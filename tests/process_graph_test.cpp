@@ -124,6 +124,53 @@ int main() {
         assert(has_finding(findings, ProcessFindingKind::UnexpectedElevation));
     }
 
+    // A raw PPID may point at a newer process instance after PID reuse. Keep the PPID as
+    // evidence, but reject the impossible parent edge so parent-dependent rules do not fire.
+    {
+        ProcessGraph reused_parent_graph;
+        auto reused_parent = start_event(1088, 20'000, 20'000);
+        reused_parent.executable_path = "C:\\Windows\\System32\\svchost.exe";
+        reused_parent.comm = "svchost.exe";
+        reused_parent.elevated = false;
+        assert(reused_parent_graph.observe(reused_parent));
+
+        auto early_child = start_event(1204, 10'000, 21'000);
+        early_child.parent_pid = 1088;
+        early_child.parent_tgid = 1088;
+        early_child.parent_process_start_time_ns = 20'000;
+        early_child.executable_path = "C:\\Windows\\System32\\csrss.exe";
+        early_child.comm = "csrss.exe";
+        early_child.elevated = true;
+        assert(reused_parent_graph.observe(early_child));
+
+        const ProcessInstanceKey early_child_key{1204, 10'000, std::nullopt};
+        const auto early_child_node = reused_parent_graph.find(early_child_key);
+        assert(early_child_node);
+        assert(early_child_node->parent_pid == 1088);
+        assert(!early_child_node->parent);
+        assert(reused_parent_graph.health().rejected_invalid_parent_links == 1);
+
+        const auto findings = snapshot_engine.evaluate_snapshot(reused_parent_graph);
+        assert(!has_finding(findings, ProcessFindingKind::UnexpectedElevation));
+    }
+
+    // Collectors can preserve a raw PPID while intentionally withholding a process-level
+    // parent identity when they cannot resolve the historical parent instance safely.
+    {
+        ProcessGraph unresolved_parent_graph;
+        auto child_only = start_event(1292, 30'000, 30'000);
+        child_only.parent_pid = 1088;
+        child_only.executable_path = "C:\\Windows\\System32\\wininit.exe";
+        child_only.comm = "wininit.exe";
+        assert(unresolved_parent_graph.observe(child_only));
+
+        const ProcessInstanceKey child_only_key{1292, 30'000, std::nullopt};
+        const auto child_only_node = unresolved_parent_graph.find(child_only_key);
+        assert(child_only_node);
+        assert(child_only_node->parent_pid == 1088);
+        assert(!child_only_node->parent);
+    }
+
     // Known privilege brokers are configured in PROC-003 and do not emit an unexpected-elevation finding.
     {
         ProcessGraph finding_graph; auto sudo = start_event(450, 11'000, 11'000); sudo.executable_path = "/usr/bin/sudo"; sudo.comm = "sudo"; sudo.elevated = false;
