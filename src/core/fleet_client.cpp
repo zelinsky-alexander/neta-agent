@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -136,6 +137,55 @@ void write_file(const std::filesystem::path& path, const std::string& content, m
     std::filesystem::rename(temp, path);
 }
 
+class SequenceSendLease {
+public:
+    explicit SequenceSendLease(const std::filesystem::path& state_dir) {
+        const auto lock_path = state_dir / "sequence.lock";
+        fd_ = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (fd_ < 0) throw std::runtime_error("cannot open sequence lock");
+        if (flock(fd_, LOCK_EX) != 0) {
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("cannot lock sequence state");
+        }
+
+        try {
+            const auto sequence_path = state_dir / "sequence";
+            std::uint64_t current = 0;
+            if (std::filesystem::exists(sequence_path)) {
+                const auto text = read_file(sequence_path);
+                if (!text.empty()) current = std::stoull(text);
+            }
+            if (current == std::numeric_limits<std::uint64_t>::max()) {
+                throw std::runtime_error("NAP sequence state is exhausted");
+            }
+            sequence_ = current + 1;
+            write_file(sequence_path, std::to_string(sequence_) + "\n", 0600);
+        } catch (...) {
+            release();
+            throw;
+        }
+    }
+
+    ~SequenceSendLease() { release(); }
+
+    SequenceSendLease(const SequenceSendLease&) = delete;
+    SequenceSendLease& operator=(const SequenceSendLease&) = delete;
+
+    std::uint64_t sequence() const noexcept { return sequence_; }
+
+private:
+    void release() noexcept {
+        if (fd_ < 0) return;
+        static_cast<void>(flock(fd_, LOCK_UN));
+        close(fd_);
+        fd_ = -1;
+    }
+
+    int fd_{-1};
+    std::uint64_t sequence_{0};
+};
+
 std::string bio_to_string(BIO* bio) { BUF_MEM* memory = nullptr; BIO_get_mem_ptr(bio, &memory); if (memory == nullptr) return {}; return std::string(memory->data, memory->length); }
 
 PkeyPtr generate_private_key() {
@@ -187,18 +237,24 @@ std::string random_uuid() {
 
 std::string iso8601(std::chrono::system_clock::time_point time) { const auto seconds = std::chrono::time_point_cast<std::chrono::seconds>(time); const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(time - seconds).count(); const auto tt = std::chrono::system_clock::to_time_t(seconds); std::tm tm{}; gmtime_r(&tt, &tm); std::ostringstream out; out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S") << '.' << std::setw(3) << std::setfill('0') << millis << 'Z'; return out.str(); }
 
-std::uint64_t next_sequence(const std::filesystem::path& state_dir) {
-    const auto lock_path = state_dir / "sequence.lock"; int fd = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600); if (fd < 0) throw std::runtime_error("cannot open sequence lock"); struct Guard { int fd; ~Guard() { if (fd >= 0) { flock(fd, LOCK_UN); close(fd); } } } guard{fd}; if (flock(fd, LOCK_EX) != 0) throw std::runtime_error("cannot lock sequence state");
-    const auto sequence_path = state_dir / "sequence"; std::uint64_t value = 0; if (std::filesystem::exists(sequence_path)) { const auto text = read_file(sequence_path); if (!text.empty()) value = std::stoull(text); } ++value; write_file(sequence_path, std::to_string(value) + "\n", 0600); return value;
-}
-
 std::string identity_config(const FleetIdentity& identity) { std::ostringstream out; out << "coordinator=" << identity.coordinator << '\n' << "fleet_id=" << identity.fleet_id << '\n' << "agent_id=" << identity.agent_id << '\n' << "certificate_sha256=" << identity.certificate_sha256 << '\n'; return out.str(); }
 std::string config_value(const std::string& text, const std::string& key) { const std::string prefix = key + "="; std::istringstream lines(text); std::string line; while (std::getline(lines, line)) if (line.starts_with(prefix)) return line.substr(prefix.size()); return {}; }
 
 std::string send_payload(const std::filesystem::path& state_dir, const std::string& type, const std::string& payload) {
-    const FleetIdentity identity = FleetClient::load_identity(state_dir); const auto now = std::chrono::system_clock::now(); const auto expires = now + std::chrono::minutes(5); const auto sequence = next_sequence(state_dir); const std::string payload_hash = "sha256:" + sha256_hex(payload); std::ostringstream envelope;
-    envelope << "{" << "\"protocol\":\"neta-agent/1\"," << "\"schema_version\":1," << "\"message_id\":\"" << random_uuid() << "\"," << "\"message_type\":\"" << type << "\"," << "\"agent_id\":\"" << json_escape(identity.agent_id) << "\"," << "\"created_at\":\"" << iso8601(now) << "\"," << "\"expires_at\":\"" << iso8601(expires) << "\"," << "\"sequence\":" << sequence << ',' << "\"correlation_id\":null," << "\"payload_hash\":\"" << payload_hash << "\"," << "\"payload\":" << payload << ',' << "\"signature\":{" << "\"algorithm\":\"UNSIGNED-NAP1-DRAFT\"," << "\"key_id\":\"" << json_escape(identity.certificate_sha256) << "\"," << "\"value\":\"transport-mtls-only\"}" << "}";
-    const auto response = https_post(identity.coordinator, state_dir / "fleet-ca.crt", state_dir / "agent.crt", state_dir / "agent.key", "/api/v1/messages", envelope.str()); if (response.status < 200 || response.status >= 300) throw std::runtime_error("coordinator rejected NAP message with HTTP " + std::to_string(response.status) + ": " + response.body); return response.body;
+    const FleetIdentity identity = FleetClient::load_identity(state_dir);
+    const std::string payload_hash = "sha256:" + sha256_hex(payload);
+
+    // The coordinator enforces a strictly increasing sequence per agent. Keep the
+    // interprocess sequence lock until the coordinator response is received so two
+    // local reporters cannot allocate N and N+1, then deliver N+1 before N.
+    SequenceSendLease sequence_lease(state_dir);
+    const auto now = std::chrono::system_clock::now();
+    const auto expires = now + std::chrono::minutes(5);
+    std::ostringstream envelope;
+    envelope << "{" << "\"protocol\":\"neta-agent/1\"," << "\"schema_version\":1," << "\"message_id\":\"" << random_uuid() << "\"," << "\"message_type\":\"" << type << "\"," << "\"agent_id\":\"" << json_escape(identity.agent_id) << "\"," << "\"created_at\":\"" << iso8601(now) << "\"," << "\"expires_at\":\"" << iso8601(expires) << "\"," << "\"sequence\":" << sequence_lease.sequence() << ',' << "\"correlation_id\":null," << "\"payload_hash\":\"" << payload_hash << "\"," << "\"payload\":" << payload << ',' << "\"signature\":{" << "\"algorithm\":\"UNSIGNED-NAP1-DRAFT\",\"key_id\":\"" << json_escape(identity.certificate_sha256) << "\",\"value\":\"transport-mtls-only\"}" << "}";
+    const auto response = https_post(identity.coordinator, state_dir / "fleet-ca.crt", state_dir / "agent.crt", state_dir / "agent.key", "/api/v1/messages", envelope.str());
+    if (response.status < 200 || response.status >= 300) throw std::runtime_error("coordinator rejected NAP message with HTTP " + std::to_string(response.status) + ": " + response.body);
+    return response.body;
 }
 
 std::string hello_payload(const std::filesystem::path& state_dir) { const auto build = current_build_identity(state_dir); return "{\"agent_version\":\"" + json_escape(build.version) + "\",\"platform\":\"" + json_escape(build.os) + "\",\"build\":" + build_identity_json(build) + "}"; }
