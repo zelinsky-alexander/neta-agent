@@ -93,7 +93,7 @@ bool ProcessGraph::observe(const ProcessExecEvent& event) {
     evict_if_needed();
     ProcessNode node;
     node.key = *key;
-    node.parent_pid = event.parent_pid ? event.parent_pid : event.parent_tgid;
+    node.parent_pid = event.parent_tgid ? event.parent_tgid : event.parent_pid;
     node.uid = event.uid; node.gid = event.gid;
     node.session_id = event.session_id; node.user_identity = event.user_identity;
     node.integrity_level = event.integrity_level; node.elevated = event.elevated; node.comm = event.comm;
