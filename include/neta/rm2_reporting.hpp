@@ -115,6 +115,7 @@ inline FindingAnnouncementInput context_announcement(const ContextRuleMatch& mat
     auto suffix = finding.evidence_root.substr(7); if (suffix.size() > 12) suffix.resize(12);
     finding.finding_id = "FINDING-RULE-" + match.rule_id + "-" + suffix;
     finding.changes.emplace_back("Rule: " + match.rule_id); finding.changes.emplace_back("Trusted engine: " + match.engine_rule_id);
+    finding.changes.emplace_back("Finding type: " + match.semantic_type);
     finding.changes.emplace_back("Severity: " + finding.severity); finding.changes.emplace_back(match.summary);
     return finding;
 }

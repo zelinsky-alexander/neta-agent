@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "id": "neta-default",
-  "revision": 5,
-  "version": "neta-rules/0.5.0",
+  "revision": 6,
+  "version": "neta-rules/0.6.0",
   "rules": [
     {"id":"PERF-001","engine_rule_id":"PERF-001","name":"Network path degradation","category":"performance","severity":"medium","enabled":true,"parameters":{"rtt_ratio":2.0,"rttvar_ratio":2.0,"retransmission_threshold":2,"rtt_weight":0.50,"rttvar_weight":0.20,"retransmission_weight":0.30,"degraded_threshold":0.50},"exclude":{}},
     {"id":"TRUST-001","engine_rule_id":"TRUST-001","name":"Outbound TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_chain_valid":true,"require_hostname_valid":true,"compare_spki":true},"exclude":{}},
@@ -17,6 +17,7 @@
     {"id":"NET-002","engine_rule_id":"NET-002","name":"TCP retransmission spike","category":"network","severity":"medium","enabled":true,"parameters":{"retransmission_threshold":5},"exclude":{}},
     {"id":"NET-003","engine_rule_id":"NET-003","name":"Unusual outbound destination port","category":"network","severity":"low","enabled":false,"parameters":{"allowed_ports":["22","25","53","80","110","123","143","443","465","587","853","993","995","3389"]},"exclude":{}},
     {"id":"NET-004","engine_rule_id":"NET-004","name":"Rare outbound destination","category":"network","severity":"medium","enabled":false,"parameters":{"maximum_prevalence":2},"exclude":{}},
+    {"id":"NET-005","engine_rule_id":"NET-005","name":"High outbound transfer asymmetry","category":"network","severity":"low","enabled":true,"parameters":{"minimum_bytes_sent":33554432,"minimum_sent_to_received_ratio":8.0,"received_bytes_floor":65536},"exclude":{}},
     {"id":"DNS-001","engine_rule_id":"DNS-001","name":"Repeated DNS resolution failures","category":"dns","severity":"medium","enabled":true,"parameters":{"minimum_failures":3},"exclude":{}},
     {"id":"DNS-002","engine_rule_id":"DNS-002","name":"DNS answer and connection mismatch","category":"dns","severity":"medium","enabled":true,"parameters":{"require_remote_ip_match":true},"exclude":{}},
     {"id":"DNS-003","engine_rule_id":"DNS-003","name":"DNS answer churn","category":"dns","severity":"low","enabled":false,"parameters":{"maximum_distinct_answers":12},"exclude":{}},

@@ -273,6 +273,7 @@ add_library(neta_core
     src/core/antimalware.cpp
     src/core/exec_antimalware_monitor.cpp
     src/core/process_graph.cpp
+    src/core/context_rule_engine.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     ${NETA_FLEET_CLIENT_SOURCE}
