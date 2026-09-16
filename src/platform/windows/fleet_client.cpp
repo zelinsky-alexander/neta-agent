@@ -29,6 +29,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace neta {
@@ -173,6 +174,12 @@ std::string heartbeat_payload(const std::filesystem::path& state_dir) { const au
 std::string accept_upgrade_response(const std::filesystem::path& state_dir, std::string response) { static_cast<void>(accept_upgrade_from_coordinator_response(state_dir, response)); return response; }
 } // namespace
 
+FleetHttpError::FleetHttpError(int status_code, std::string response_body)
+    : std::runtime_error("coordinator rejected NAP message with HTTP " +
+                         std::to_string(status_code) + ": " + response_body),
+      status_code_(status_code),
+      response_body_(std::move(response_body)) {}
+
 FleetIdentity FleetClient::enroll(const FleetEnrollmentOptions& options) {
     if (options.coordinator.empty()) throw std::runtime_error("--coordinator is required"); if (options.fleet_ca.empty()) throw std::runtime_error("--fleet-ca is required"); if (options.token.empty()) throw std::runtime_error("--token is required"); if (!std::filesystem::exists(options.fleet_ca)) throw std::runtime_error("Fleet CA file does not exist"); if (std::filesystem::exists(options.state_dir / "agent.key")) throw std::runtime_error("fleet identity already exists in " + options.state_dir.string());
     std::filesystem::create_directories(options.state_dir); auto key = generate_private_key(); const std::string key_pem = private_key_pem(key.get()); const std::string request_pem = csr_pem(key.get(), options.display_name); std::ostringstream body;
@@ -184,6 +191,7 @@ FleetIdentity FleetClient::enroll(const FleetEnrollmentOptions& options) {
 }
 
 FleetIdentity FleetClient::load_identity(const std::filesystem::path& state_dir) { const auto config = read_file(state_dir / "identity.conf"); FleetIdentity identity; identity.coordinator = config_value(config, "coordinator"); identity.fleet_id = config_value(config, "fleet_id"); identity.agent_id = config_value(config, "agent_id"); identity.certificate_sha256 = config_value(config, "certificate_sha256"); identity.state_dir = state_dir; if (identity.coordinator.empty() || identity.fleet_id.empty() || identity.agent_id.empty() || identity.certificate_sha256.empty()) throw std::runtime_error("fleet identity configuration is incomplete"); return identity; }
+std::string FleetClient::post_nap_envelope(const std::filesystem::path& state_dir, const std::string& envelope_json) { const FleetIdentity identity = load_identity(state_dir); const auto response = https_post(identity.coordinator, state_dir / "fleet-ca.crt", state_dir / "agent.crt", state_dir / "agent.key", "/api/v1/messages", envelope_json); if (response.status < 200 || response.status >= 300) throw FleetHttpError(response.status, response.body); return response.body; }
 std::string FleetClient::send_agent_hello(const std::filesystem::path& state_dir) { return accept_upgrade_response(state_dir, send_payload(state_dir, "AgentHello", hello_payload(state_dir))); }
 std::string FleetClient::send_heartbeat(const std::filesystem::path& state_dir) { return accept_upgrade_response(state_dir, send_payload(state_dir, "Heartbeat", heartbeat_payload(state_dir))); }
 

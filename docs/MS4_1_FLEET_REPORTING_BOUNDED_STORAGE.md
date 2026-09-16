@@ -32,6 +32,19 @@ Modes:
 
 The reporting cooldown is keyed by a stable logical finding key derived from direction, service target and verdict/hypothesis. The state is persisted in `reporting.state` under the fleet identity directory and is updated only after a successful coordinator send. A send failure does not fail the observation run.
 
+Reliable findings are first committed to the SQLite `outbound_messages` outbox.
+Connection, behavior, transfer, context-rule, process, lab and manual findings all
+use the same dispatcher. Artifact evidence summaries use the existing NAP/1
+`EvidenceSummary` type through the same path. Reporting cooldowns advance only
+after a matching application ACK. `NETA_OUTBOX_MAX_MB` bounds the logical pending
+payload/envelope budget independently; the default is 32 MB. Capacity pressure
+first removes acknowledged rows, then evicts only never-attempted low-priority
+events. Attempted or important events are never silently evicted. The dropped
+counter is durable and produces a high-priority NAP `EvidenceSummary` telemetry-gap
+marker once delivery capacity returns. Permanently malformed or oversized events
+enter the visible dead-letter state; connectivity, certificate, sequence and server
+failures remain retryable with bounded exponential backoff.
+
 Manual `fleet announce-connection` remains available for testing, forensic publication and operator override.
 
 ## Coordinator bounded storage

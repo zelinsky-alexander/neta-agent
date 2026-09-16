@@ -48,6 +48,7 @@ private:
     AntimalwareProviderSet artifact_providers_;
     std::unordered_map<std::string, std::vector<AntimalwareEvidence>> artifact_scan_cache_;
     std::unordered_map<std::string, std::uint64_t> artifact_reported_counts_;
+    std::filesystem::path database_;
 };
 
 }  // namespace neta

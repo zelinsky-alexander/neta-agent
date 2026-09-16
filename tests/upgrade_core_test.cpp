@@ -1,8 +1,10 @@
 #include "neta/behavior_detection.hpp"
+#include "neta/behavior_reporting.hpp"
 #include "neta/crypto.hpp"
 #include "neta/upgrade.hpp"
 #include "neta/upgrade_runtime.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -358,6 +360,11 @@ void test_periodic_outbound_behavior_detection() {
     assert(finding->evidence_root.starts_with("sha256:"));
     assert(finding->interpretation.find("Malicious intent is not established") !=
            std::string::npos);
+    const auto announcement =
+        neta::behavior_reporting_detail::announcement_from_finding(*finding);
+    assert(std::find(announcement.changes.begin(), announcement.changes.end(),
+                     "Finding type: PERIODIC_OUTBOUND_CONNECTION") !=
+           announcement.changes.end());
 
     const auto too_few = periodic_connections(2, 5'000'000'000ULL);
     assert(!neta::detect_periodic_outbound(too_few, 2));

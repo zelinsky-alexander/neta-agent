@@ -719,10 +719,11 @@ FROM lifecycle_events WHERE connection_id=? ORDER BY observed_ns,id;
 }
 
 std::vector<TcpSnapshot> HistoryStore::recent_samples_for_target(const std::string& host, std::uint16_t port, std::size_t limit) const {
-    Statement stmt(db_, "SELECT s.observed_ns,s.tcp_state,s.rtt_us,s.rttvar_us,s.total_retrans,s.lost,s.unacked,s.snd_cwnd,s.snd_ssthresh,s.snd_mss,s.rcv_mss,s.send_queue_bytes,s.recv_queue_bytes FROM transport_samples s JOIN connections c ON c.id=s.connection_id WHERE c.target_host=? AND c.remote_port=? ORDER BY s.observed_ns DESC LIMIT ?;");
+    Statement stmt(db_, "SELECT s.observed_ns,s.tcp_state,s.rtt_us,s.rttvar_us,s.total_retrans,s.lost,s.unacked,s.snd_cwnd,s.snd_ssthresh,s.snd_mss,s.rcv_mss,s.send_queue_bytes,s.recv_queue_bytes FROM transport_samples s JOIN connections c ON c.id=s.connection_id WHERE (c.target_host=? OR (c.target_host='' AND c.remote_ip=?)) AND c.remote_port=? ORDER BY s.observed_ns DESC LIMIT ?;");
     sqlite3_bind_text(stmt.get(), 1, host.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt.get(), 2, port);
-    sqlite3_bind_int64(stmt.get(), 3, static_cast<sqlite3_int64>(limit));
+    sqlite3_bind_text(stmt.get(), 2, host.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt.get(), 3, port);
+    sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(limit));
     std::vector<TcpSnapshot> out;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) out.push_back(sample_from_row(stmt.get()));
     std::reverse(out.begin(), out.end());

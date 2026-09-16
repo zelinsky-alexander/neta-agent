@@ -268,12 +268,18 @@ add_library(neta_core
     src/core/lifecycle.cpp
     src/core/crypto.cpp
     src/core/nap_sequence.cpp
+    src/core/outbound_message.cpp
+    src/core/outbound_queue.cpp
+    src/core/coordinator_ack.cpp
+    src/core/outbound_dispatcher.cpp
+    src/core/reliable_fleet_client.cpp
     src/core/upgrade.cpp
     src/core/upgrade_runtime.cpp
     src/core/antimalware.cpp
     src/core/exec_antimalware_monitor.cpp
     src/core/process_graph.cpp
     src/core/context_rule_engine.cpp
+    src/core/outbound_baseline.cpp
     src/core/verdict.cpp
     src/core/tls_probe.cpp
     ${NETA_FLEET_CLIENT_SOURCE}
@@ -360,6 +366,16 @@ if(NETA_ENABLE_TESTS)
     target_link_libraries(neta_process_graph_test PRIVATE neta_core)
     neta_enable_warnings(neta_process_graph_test)
     add_test(NAME neta_process_graph_test COMMAND neta_process_graph_test)
+
+    add_executable(neta_outbound_queue_test tests/outbound_queue_test.cpp)
+    target_link_libraries(neta_outbound_queue_test PRIVATE neta_core)
+    neta_enable_warnings(neta_outbound_queue_test)
+    add_test(NAME neta_outbound_queue_test COMMAND neta_outbound_queue_test)
+
+    add_executable(neta_outbound_baseline_test tests/outbound_baseline_test.cpp)
+    target_link_libraries(neta_outbound_baseline_test PRIVATE neta_core)
+    neta_enable_warnings(neta_outbound_baseline_test)
+    add_test(NAME neta_outbound_baseline_test COMMAND neta_outbound_baseline_test)
 
     if(WIN32)
         add_executable(neta_windows_platform_test tests/windows_platform_test.cpp)

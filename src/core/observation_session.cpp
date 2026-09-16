@@ -360,6 +360,10 @@ ObservationRunResult ObservationSession::run(
             if (result.lifecycle_events_active) {
                 if (const auto enrichment = tracker.observe_socket(
                         socket, ConnectionDirection::Unknown, false)) {
+                    if (callbacks.transport_observed) {
+                        callbacks.transport_observed(enrichment->connection_id,
+                                                     socket.transport);
+                    }
                     pending_snapshot_candidates.erase(snapshot_tuple_key(socket, process));
                     static_cast<void>(enrichment);
                     continue;
@@ -391,6 +395,10 @@ ObservationRunResult ObservationSession::run(
                     const auto admission = tracker.observe_socket(
                         candidate.socket, ConnectionDirection::Unknown, true, origin);
                     if (admission) {
+                        if (callbacks.transport_observed) {
+                            callbacks.transport_observed(admission->connection_id,
+                                                         candidate.socket.transport);
+                        }
                         record_admission(*admission, candidate.socket.remote_ip,
                                          ConnectionDirection::Unknown);
                     }
@@ -403,7 +411,12 @@ ObservationRunResult ObservationSession::run(
             const auto admission = tracker.observe_socket(
                 socket, decision.direction, decision.admit,
                 ConnectionObservationOrigin::SnapshotPreexisting);
-            if (admission) record_admission(*admission, socket.remote_ip, decision.direction);
+            if (admission) {
+                if (callbacks.transport_observed) {
+                    callbacks.transport_observed(admission->connection_id, socket.transport);
+                }
+                record_admission(*admission, socket.remote_ip, decision.direction);
+            }
         }
 
         if (result.lifecycle_events_active) {
@@ -419,6 +432,10 @@ ObservationRunResult ObservationSession::run(
                         candidate.socket, ConnectionDirection::Unknown, true,
                         ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss);
                     if (admission) {
+                        if (callbacks.transport_observed) {
+                            callbacks.transport_observed(admission->connection_id,
+                                                         candidate.socket.transport);
+                        }
                         record_admission(*admission, candidate.socket.remote_ip,
                                          ConnectionDirection::Unknown);
                     }

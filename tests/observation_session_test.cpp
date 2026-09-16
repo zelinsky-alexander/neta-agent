@@ -1,4 +1,5 @@
 #include "neta/observation_session.hpp"
+#include "neta/transfer_assurance.hpp"
 #include "neta/verdict.hpp"
 
 #include <cassert>
@@ -187,6 +188,10 @@ neta::SocketObservation socket(std::uint64_t cookie, std::uint16_t local_port,
     result.transport.observed_ns = 150;
     result.transport.state = 1;
     result.transport.rtt_us = 1000;
+    result.transport.bytes_sent = 40ULL * 1024ULL * 1024ULL;
+    result.transport.bytes_received = 64ULL * 1024ULL;
+    result.transport.transfer_source = "test:tcp-counters";
+    result.transport.transfer_fidelity = neta::EvidenceFidelity::Exact;
     return result;
 }
 
@@ -228,10 +233,16 @@ int main() {
         neta::ObservationSession session(
             store, sockets, lifecycle, processes, routes,
             neta::ConnectionAdmissionPolicy(config), "");
+        neta::TransferEvidenceStore transfer_store(path);
+        neta::ObservationRuntimeCallbacks callbacks;
+        callbacks.transport_observed = [&](std::int64_t connection_id,
+                                           const neta::TcpSnapshot& snapshot) {
+            transfer_store.observe(connection_id, snapshot);
+        };
 
         const auto result = session.run(std::chrono::seconds(1), 1ms, [&] {
             return lifecycle.polls() >= 2;
-        });
+        }, callbacks);
         assert(result.lifecycle_events_active);
         assert(result.admitted_connections == 2);
         assert(result.connection_ids.size() == 2);
@@ -242,6 +253,10 @@ int main() {
             assert(row.lifecycle_state == "CLOSED");
             assert(row.network_namespace_inode == 42);
             assert(!store.samples_for_connection(row.id).empty());
+            const auto transfer = transfer_store.latest(row.id);
+            assert(transfer);
+            assert(transfer->bytes_sent == 40ULL * 1024ULL * 1024ULL);
+            assert(transfer->bytes_received == 64ULL * 1024ULL);
             const auto route = store.route_for_connection(row.id);
             assert(route);
             if (row.direction == neta::ConnectionDirection::Outbound) {

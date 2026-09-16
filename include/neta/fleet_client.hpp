@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,18 @@ struct FindingAnnouncementInput {
     std::string evidence_root;
 };
 
+class FleetHttpError final : public std::runtime_error {
+public:
+    FleetHttpError(int status_code, std::string response_body);
+
+    [[nodiscard]] int status_code() const noexcept { return status_code_; }
+    [[nodiscard]] const std::string& response_body() const noexcept { return response_body_; }
+
+private:
+    int status_code_;
+    std::string response_body_;
+};
+
 class FleetClient {
 public:
     static FleetIdentity enroll(const FleetEnrollmentOptions& options);
@@ -62,6 +75,8 @@ public:
                                     const FindingAnnouncementInput& finding);
     static std::string send_evidence_summary(const std::filesystem::path& state_dir,
                                              const std::string& summary_json);
+    static std::string post_nap_envelope(const std::filesystem::path& state_dir,
+                                         const std::string& envelope_json);
 
     // RM1 central detection-policy plane. Both calls use the enrolled agent mTLS identity.
     static std::string fetch_rule_bundle(const std::filesystem::path& state_dir);

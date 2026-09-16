@@ -53,6 +53,9 @@ fi
 if [[ -f "$DB" && -x "$BIN" ]]; then
   echo "[OK]   local database: $DB"
   "$BIN" storage status --db "$DB" 2>&1 | sed 's/^/       /'
+  if [[ -f "$STATE_DIR/identity.conf" ]]; then
+    "$BIN" fleet outbox-status --db "$DB" --state-dir "$STATE_DIR" 2>&1 | sed 's/^/       /'
+  fi
 else
   echo "[WARN] local database not present yet"
 fi

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "neta/behavior_detection.hpp"
-#include "neta/fleet_client.hpp"
+#include "neta/reliable_fleet_client.hpp"
 #include "neta/fleet_reporting.hpp"
 #include "neta/history_store.hpp"
 
@@ -188,9 +188,6 @@ inline BehaviorReportingResult auto_report_periodic_behavior(
             behavior_reporting_detail::append_suffix(store.path(), ".findings.jsonl"),
             *finding, now_epoch);
         ++result.persisted;
-        cooldowns[finding->finding_key] = now_epoch;
-        behavior_reporting_detail::save_cooldowns(state_path, cooldowns);
-
         if (reporting_policy.mode == FleetReportingMode::Off ||
             finding->confidence < reporting_policy.minimum_confidence) {
             ++result.suppressed_policy;
@@ -201,9 +198,12 @@ inline BehaviorReportingResult auto_report_periodic_behavior(
             return result;
         }
 
-        FleetClient::send_finding(
-            reporting_policy.state_dir,
-            behavior_reporting_detail::announcement_from_finding(*finding));
+        if (!ReliableFleetClient::submit_finding(
+                store.path(), reporting_policy.state_dir,
+                behavior_reporting_detail::announcement_from_finding(*finding)))
+            throw std::runtime_error("behavior finding retained in outbound queue awaiting ACK");
+        cooldowns[finding->finding_key] = now_epoch;
+        behavior_reporting_detail::save_cooldowns(state_path, cooldowns);
         ++result.announced;
     } catch (const std::exception& error) {
         ++result.failed;
