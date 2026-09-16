@@ -38,6 +38,7 @@ struct ObservationRunResult {
 struct ObservationRuntimeCallbacks {
     std::function<void()> started;
     std::function<void()> periodic;
+    std::function<void(std::int64_t, const TcpSnapshot&)> transport_observed;
     std::function<void(std::int64_t)> connection_completed;
 };
 

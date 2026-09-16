@@ -127,6 +127,8 @@ ObservationRunResult ObservationSession::run(
     constexpr std::size_t max_name_resolution_observations = 4096;
     const NameResolutionCorrelationPolicy name_resolution_policy{};
     std::vector<NameResolutionObservation> name_resolution_observations;
+    std::set<std::int64_t> name_resolution_attached_connections;
+    std::set<std::int64_t> ambiguous_name_resolution_connections;
 
     constexpr std::size_t max_tls_session_observations = 4096;
     const TlsSessionCorrelationPolicy tls_session_policy{};
@@ -168,7 +170,8 @@ ObservationRunResult ObservationSession::run(
 
     const auto attach_name_resolution = [&](std::int64_t connection_id,
                                             ConnectionDirection direction) {
-        if (!result.name_resolution_events_active || direction != ConnectionDirection::Outbound) {
+        if (!result.name_resolution_events_active || direction != ConnectionDirection::Outbound ||
+            name_resolution_attached_connections.contains(connection_id)) {
             return;
         }
         const auto connection = store_.connection(connection_id);
@@ -176,13 +179,27 @@ ObservationRunResult ObservationSession::run(
         const auto correlation = correlate_name_resolution(
             *connection, name_resolution_observations, name_resolution_policy);
         if (correlation.status == NameResolutionCorrelationStatus::Ambiguous) {
-            ++result.ambiguous_name_resolution_matches;
+            if (ambiguous_name_resolution_connections.insert(connection_id).second) {
+                ++result.ambiguous_name_resolution_matches;
+            }
             return;
         }
         if (correlation.status == NameResolutionCorrelationStatus::Matched &&
             correlation.evidence) {
             store_.add_name_resolution_evidence(connection_id, *correlation.evidence);
+            name_resolution_attached_connections.insert(connection_id);
+            ambiguous_name_resolution_connections.erase(connection_id);
             ++result.name_resolution_evidence_attached;
+        }
+    };
+
+    const auto retry_name_resolution = [&] {
+        if (!result.name_resolution_events_active || name_resolution_observations.empty()) return;
+        for (const auto connection_id : connection_ids) {
+            if (name_resolution_attached_connections.contains(connection_id)) continue;
+            const auto connection = store_.connection(connection_id);
+            if (!connection) continue;
+            attach_name_resolution(connection_id, connection->direction);
         }
     };
 
@@ -338,6 +355,7 @@ ObservationRunResult ObservationSession::run(
 
     const auto sample_transport = [&](bool startup_snapshot) {
         drain_name_resolution();
+        retry_name_resolution();
         tracker.begin_snapshot();
         const bool lifecycle_degraded = result.lifecycle_events_active &&
             lifecycle_observer_.health().evidence_may_be_incomplete();
@@ -360,6 +378,10 @@ ObservationRunResult ObservationSession::run(
             if (result.lifecycle_events_active) {
                 if (const auto enrichment = tracker.observe_socket(
                         socket, ConnectionDirection::Unknown, false)) {
+                    if (callbacks.transport_observed) {
+                        callbacks.transport_observed(enrichment->connection_id,
+                                                     socket.transport);
+                    }
                     pending_snapshot_candidates.erase(snapshot_tuple_key(socket, process));
                     static_cast<void>(enrichment);
                     continue;
@@ -391,6 +413,10 @@ ObservationRunResult ObservationSession::run(
                     const auto admission = tracker.observe_socket(
                         candidate.socket, ConnectionDirection::Unknown, true, origin);
                     if (admission) {
+                        if (callbacks.transport_observed) {
+                            callbacks.transport_observed(admission->connection_id,
+                                                         candidate.socket.transport);
+                        }
                         record_admission(*admission, candidate.socket.remote_ip,
                                          ConnectionDirection::Unknown);
                     }
@@ -403,7 +429,12 @@ ObservationRunResult ObservationSession::run(
             const auto admission = tracker.observe_socket(
                 socket, decision.direction, decision.admit,
                 ConnectionObservationOrigin::SnapshotPreexisting);
-            if (admission) record_admission(*admission, socket.remote_ip, decision.direction);
+            if (admission) {
+                if (callbacks.transport_observed) {
+                    callbacks.transport_observed(admission->connection_id, socket.transport);
+                }
+                record_admission(*admission, socket.remote_ip, decision.direction);
+            }
         }
 
         if (result.lifecycle_events_active) {
@@ -419,6 +450,10 @@ ObservationRunResult ObservationSession::run(
                         candidate.socket, ConnectionDirection::Unknown, true,
                         ConnectionObservationOrigin::SnapshotReconciledAfterLifecycleLoss);
                     if (admission) {
+                        if (callbacks.transport_observed) {
+                            callbacks.transport_observed(admission->connection_id,
+                                                         candidate.socket.transport);
+                        }
                         record_admission(*admission, candidate.socket.remote_ip,
                                          ConnectionDirection::Unknown);
                     }
@@ -478,6 +513,7 @@ ObservationRunResult ObservationSession::run(
         ? std::optional{std::chrono::steady_clock::now() + *duration} : std::nullopt;
     if (callbacks.started) callbacks.started();
     drain_name_resolution();
+    retry_name_resolution();
     drain_tls_sessions();
 
     if (result.lifecycle_events_active) {
@@ -496,6 +532,7 @@ ObservationRunResult ObservationSession::run(
             timeout = std::min(timeout, completion_wait_time(now));
             const auto lifecycle_events = lifecycle_observer_.poll(timeout);
             drain_name_resolution();
+            retry_name_resolution();
             for (const auto& event : lifecycle_events) {
                 erase_candidate_for_lifecycle(event);
                 const auto decision = admission_policy_.evaluate(event);
@@ -537,6 +574,7 @@ ObservationRunResult ObservationSession::run(
     }
 
     drain_name_resolution();
+    retry_name_resolution();
     drain_tls_sessions();
     dispatch_completed(true);
     correlate_tls_sessions();

@@ -204,7 +204,33 @@ int main() {
     {
         const auto rm1 = rules::RuleSetLoader::rm1_built_in(); const auto rm2 = rules::RuleSetLoader::built_in();
         assert(rm1.version == kRm1RuleSetVersion); assert(rm1.definitions.size() == 8);
-        assert(rm2.version == kRuleSetVersion); assert(rm2.definitions.size() == 19);
+        assert(rm2.version == kRuleSetVersion); assert(rm2.definitions.size() == 20);
+    }
+
+    {
+        const RuleSet rules = rules::RuleSetLoader::built_in();
+        ConnectionRuleContext context;
+        context.connection.direction = ConnectionDirection::Outbound;
+        context.connection.remote_ip = "203.0.113.9";
+        context.connection.remote_port = 18447;
+        context.bytes_sent = 40ULL * 1024ULL * 1024ULL;
+        context.bytes_received = 64ULL * 1024ULL;
+        const auto matches = ContextRuleEngine(rules).evaluate(context);
+        assert(std::any_of(matches.begin(), matches.end(), [](const ContextRuleMatch& match) {
+            return match.rule_id == "NET-005" && match.engine_rule_id == "NET-005" &&
+                   match.severity == "low";
+        }));
+
+        context.bytes_sent = 1024ULL * 1024ULL;
+        const auto small_matches = ContextRuleEngine(rules).evaluate(context);
+        assert(std::none_of(small_matches.begin(), small_matches.end(),
+            [](const ContextRuleMatch& match) { return match.rule_id == "NET-005"; }));
+
+        context.connection.direction = ConnectionDirection::Inbound;
+        context.bytes_sent = 40ULL * 1024ULL * 1024ULL;
+        const auto inbound_matches = ContextRuleEngine(rules).evaluate(context);
+        assert(std::none_of(inbound_matches.begin(), inbound_matches.end(),
+            [](const ContextRuleMatch& match) { return match.rule_id == "NET-005"; }));
     }
 
     {

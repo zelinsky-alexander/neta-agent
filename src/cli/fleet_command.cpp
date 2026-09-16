@@ -3,6 +3,7 @@
 #include "neta/fleet_client.hpp"
 #include "neta/history_store.hpp"
 #include "neta/nap_sequence.hpp"
+#include "neta/reliable_fleet_client.hpp"
 #include "neta/rule_update.hpp"
 #include "neta/tls_session.hpp"
 #include "neta/upgrade.hpp"
@@ -152,7 +153,7 @@ FindingAnnouncementInput finding_from_connection(const std::filesystem::path& db
 } // namespace
 
 void run_fleet_command(int argc, char** argv) {
-    if (argc < 3) throw std::runtime_error("fleet requires enroll, status, hello, heartbeat, rules-status, rules-update, yarax-content-status, yarax-content-update, upgrade-status, upgrade-download, upgrade-run, upgrade-report, announce, or announce-connection");
+    if (argc < 3) throw std::runtime_error("fleet requires enroll, status, hello, heartbeat, outbox-status, rules-status, rules-update, yarax-content-status, yarax-content-update, upgrade-status, upgrade-download, upgrade-run, upgrade-report, announce, or announce-connection");
     const std::string action = argv[2];
 
     if (action == "enroll") {
@@ -166,6 +167,21 @@ void run_fleet_command(int argc, char** argv) {
 #ifdef _WIN32
         print_nap_sequence_status(dir);
 #endif
+        return;
+    }
+    if (action == "outbox-status") {
+        const auto status = ReliableFleetClient::status(
+            arg_value(argc, argv, "--db", "neta.db"), state_dir(argc, argv));
+        std::cout << "NAP outbound queue\n"
+                  << "Pending:                 " << status.pending << '\n'
+                  << "In flight:               " << status.in_flight << '\n'
+                  << "Acknowledged:            " << status.acknowledged << '\n'
+                  << "Dead letter:             " << status.dead_letter << '\n'
+                  << "Logical bytes:           " << status.logical_bytes << '\n'
+                  << "Coalesced:               " << status.coalesced << '\n'
+                  << "Dropped low priority:    " << status.dropped_low_priority << '\n'
+                  << "Oldest pending (ns):     " << status.oldest_pending_ns << '\n'
+                  << "Last ACK (ns):           " << status.last_ack_ns << '\n';
         return;
     }
     if (action == "hello") { print_response(FleetClient::send_agent_hello(state_dir(argc, argv))); return; }
@@ -226,14 +242,23 @@ void run_fleet_command(int argc, char** argv) {
         finding.transport = arg_value(argc, argv, "--transport", "tcp"); finding.performance_verdict = arg_value(argc, argv, "--performance", "UNKNOWN");
         finding.trust_verdict = arg_value(argc, argv, "--trust", "UNVERIFIED"); finding.evidence_root = arg_value(argc, argv, "--evidence-root");
         for (int i = 0; i + 1 < argc; ++i) if (std::string(argv[i]) == "--change") finding.changes.emplace_back(argv[i + 1]);
-        print_response(FleetClient::send_finding(state_dir(argc, argv), finding)); return;
+        const auto database = arg_value(argc, argv, "--db", "neta.db");
+        const bool acknowledged = ReliableFleetClient::submit_finding(
+            database, state_dir(argc, argv), finding);
+        std::cout << (acknowledged ? "Finding acknowledged by coordinator.\n"
+                                  : "Finding retained in outbound queue awaiting ACK.\n");
+        return;
     }
     if (action == "announce-connection") {
         if (argc < 4 || argv[3][0] == '-') throw std::runtime_error("fleet announce-connection requires a connection ID");
         const auto db_path = arg_value(argc, argv, "--db"); if (db_path.empty()) throw std::runtime_error("--db is required");
         const auto connection_id = std::stoll(argv[3]); const auto finding = finding_from_connection(db_path, connection_id);
         std::cout << "Announcing " << finding.finding_id << " from CONN-" << connection_id << " (" << finding.host << ':' << finding.port << ", " << finding.performance_verdict << " / " << finding.trust_verdict << ")\n";
-        print_response(FleetClient::send_finding(state_dir(argc, argv), finding)); return;
+        const bool acknowledged = ReliableFleetClient::submit_finding(
+            db_path, state_dir(argc, argv), finding);
+        std::cout << (acknowledged ? "Finding acknowledged by coordinator.\n"
+                                  : "Finding retained in outbound queue awaiting ACK.\n");
+        return;
     }
     throw std::runtime_error("unknown fleet action: " + action);
 }

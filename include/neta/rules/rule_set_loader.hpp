@@ -70,7 +70,7 @@ private:
         static const std::set<std::string> engines{
             "PERF-001","TRUST-001","TRUST-002",
             "PROC-001","PROC-002","PROC-003","PROC-004","PROC-005",
-            "BEH-001","NET-001","NET-002","NET-003","NET-004",
+            "BEH-001","NET-001","NET-002","NET-003","NET-004","NET-005",
             "DNS-001","DNS-002","DNS-003","TLS-001","TLS-002","ROUTE-001"};
         return engines.contains(id);
     }
@@ -200,6 +200,7 @@ private:
         else if (e=="NET-002") { require_category(d,"network"); ensure_parameter_keys(d,{"retransmission_threshold"}); (void)positive_integer(d,"retransmission_threshold"); }
         else if (e=="NET-003") { require_category(d,"network"); ensure_parameter_keys(d,{"allowed_ports"}); (void)d.string_list("allowed_ports"); }
         else if (e=="NET-004") { require_category(d,"network"); ensure_parameter_keys(d,{"maximum_prevalence"}); (void)positive_integer(d,"maximum_prevalence"); }
+        else if (e=="NET-005") { require_category(d,"network"); ensure_parameter_keys(d,{"minimum_bytes_sent","minimum_sent_to_received_ratio","received_bytes_floor"}); (void)positive_integer(d,"minimum_bytes_sent"); if (d.numeric("minimum_sent_to_received_ratio")<=1.0) throw std::runtime_error(d.id + " minimum_sent_to_received_ratio must be greater than 1"); (void)positive_integer(d,"received_bytes_floor"); }
         else if (e=="DNS-001") { require_category(d,"dns"); ensure_parameter_keys(d,{"minimum_failures"}); (void)positive_integer(d,"minimum_failures"); }
         else if (e=="DNS-002") { require_category(d,"dns"); ensure_parameter_keys(d,{"require_remote_ip_match"}); (void)d.boolean("require_remote_ip_match"); }
         else if (e=="DNS-003") { require_category(d,"dns"); ensure_parameter_keys(d,{"maximum_distinct_answers"}); (void)positive_integer(d,"maximum_distinct_answers"); }
@@ -238,7 +239,7 @@ private:
 {"id":"PROC-004","name":"Rapid child process fanout","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"window_ms":10000}},
 {"id":"PROC-005","name":"Short-lived process burst","category":"process","severity":"medium","enabled":true,"parameters":{"child_count":6,"max_lifetime_ms":2000,"window_ms":15000}}]})JSON"; }
 
-    static const char* default_document() { return R"JSON({"schema_version":2,"id":"neta-default","revision":5,"version":"neta-rules/0.5.0","rules":[
+    static const char* default_document() { return R"JSON({"schema_version":2,"id":"neta-default","revision":6,"version":"neta-rules/0.6.0","rules":[
 {"id":"PERF-001","engine_rule_id":"PERF-001","name":"Network path degradation","category":"performance","severity":"medium","enabled":true,"parameters":{"rtt_ratio":2.0,"rttvar_ratio":2.0,"retransmission_threshold":2,"rtt_weight":0.5,"rttvar_weight":0.2,"retransmission_weight":0.3,"degraded_threshold":0.5}},
 {"id":"TRUST-001","engine_rule_id":"TRUST-001","name":"Outbound TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_chain_valid":true,"require_hostname_valid":true,"compare_spki":true}},
 {"id":"TRUST-002","engine_rule_id":"TRUST-002","name":"Inbound authenticated TLS identity","category":"trust","severity":"high","enabled":true,"parameters":{"require_exact_evidence":true,"require_peer_certificate":true,"require_peer_authentication":true,"verification_failure_suspicious":true,"compare_spki":true,"compare_issuer":true}},
@@ -252,6 +253,7 @@ private:
 {"id":"NET-002","engine_rule_id":"NET-002","name":"TCP retransmission spike","category":"network","severity":"medium","enabled":true,"parameters":{"retransmission_threshold":5}},
 {"id":"NET-003","engine_rule_id":"NET-003","name":"Unusual outbound destination port","category":"network","severity":"low","enabled":false,"parameters":{"allowed_ports":["22","25","53","80","110","123","143","443","465","587","853","993","995","3389"]}},
 {"id":"NET-004","engine_rule_id":"NET-004","name":"Rare outbound destination","category":"network","severity":"medium","enabled":false,"parameters":{"maximum_prevalence":2}},
+{"id":"NET-005","engine_rule_id":"NET-005","name":"High outbound transfer asymmetry","category":"network","severity":"low","enabled":true,"parameters":{"minimum_bytes_sent":33554432,"minimum_sent_to_received_ratio":8.0,"received_bytes_floor":65536}},
 {"id":"DNS-001","engine_rule_id":"DNS-001","name":"Repeated DNS resolution failures","category":"dns","severity":"medium","enabled":true,"parameters":{"minimum_failures":3}},
 {"id":"DNS-002","engine_rule_id":"DNS-002","name":"DNS answer and connection mismatch","category":"dns","severity":"medium","enabled":true,"parameters":{"require_remote_ip_match":true}},
 {"id":"DNS-003","engine_rule_id":"DNS-003","name":"DNS answer churn","category":"dns","severity":"low","enabled":false,"parameters":{"maximum_distinct_answers":12}},

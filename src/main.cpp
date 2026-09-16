@@ -2,6 +2,7 @@
 #include "neta/cli/observation_command.hpp"
 #include "neta/cli/observation_options.hpp"
 #include "neta/history_store.hpp"
+#include "neta/outbound_baseline.hpp"
 #include "neta/platform.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/tls_session.hpp"
@@ -216,6 +217,7 @@ Usage:
   neta-agent history [--limit 50] [--db neta.db] [--json]
   neta-agent history show ID [--db neta.db] [--json]
   neta-agent baseline capture --target host:port [--db neta.db] [--ca file]
+  neta-agent baseline accept-connection ID [--db neta.db]
   neta-agent baseline show --target host:port [--db neta.db]
   neta-agent baseline accept-client ID [--db neta.db]
   neta-agent baseline show-client ID [--db neta.db]
@@ -362,9 +364,18 @@ void cmd_history(int argc, char** argv) {
 }
 
 void cmd_baseline(int argc, char** argv) {
-    if (argc < 3) throw std::runtime_error("baseline requires capture, show, accept-client, or show-client");
+    if (argc < 3) throw std::runtime_error("baseline requires capture, show, accept-connection, accept-client, or show-client");
     HistoryStore store(arg_value(argc, argv, "--db", default_db_path().string()));
     const std::string action = argv[2];
+
+    if (action == "accept-connection") {
+        if (argc < 4) throw std::runtime_error("accept-connection requires connection ID");
+        const auto baseline = accept_outbound_connection_baseline(store, std::stoll(argv[3]));
+        std::cout << "Accepted outbound baseline for " << baseline.target_host << ':'
+                  << baseline.target_port << " from " << baseline.sample_count
+                  << " samples. Hash " << baseline.sha256 << "\n";
+        return;
+    }
 
     if (action == "accept-client" || action == "show-client") {
         if (argc < 4) throw std::runtime_error("baseline client action requires connection ID");
