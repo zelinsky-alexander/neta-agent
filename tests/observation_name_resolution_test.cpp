@@ -77,8 +77,9 @@ private:
 
 class FakeNameResolutionObserver final : public neta::NameResolutionObserver {
 public:
-    explicit FakeNameResolutionObserver(std::vector<neta::NameResolutionObservation> observations)
-        : observations_(std::move(observations)) {
+    explicit FakeNameResolutionObserver(std::vector<neta::NameResolutionObservation> observations,
+                                        std::size_t delivery_poll = 1)
+        : observations_(std::move(observations)), delivery_poll_(delivery_poll) {
         capability_.built_in = true;
         capability_.application_resolver_api = true;
         capability_.glibc_getaddrinfo = true;
@@ -91,7 +92,8 @@ public:
     }
     neta::NameResolutionHealth health() const override { return neta::NameResolutionHealth{0}; }
     std::vector<neta::NameResolutionObservation> poll(std::chrono::milliseconds) override {
-        if (delivered_) return {};
+        ++polls_;
+        if (delivered_ || polls_ < delivery_poll_) return {};
         delivered_ = true;
         return observations_;
     }
@@ -99,6 +101,8 @@ public:
 private:
     neta::NameResolutionCapability capability_;
     std::vector<neta::NameResolutionObservation> observations_;
+    std::size_t delivery_poll_{1};
+    std::size_t polls_{0};
     bool delivered_{false};
 };
 
@@ -144,10 +148,11 @@ void remove_database(const std::filesystem::path& path) {
 }
 
 neta::ObservationRunResult run_session(const std::filesystem::path& path,
-                                       std::vector<neta::NameResolutionObservation> observations) {
+                                       std::vector<neta::NameResolutionObservation> observations,
+                                       std::size_t delivery_poll = 1) {
     FakeSocketObserver sockets;
     FakeLifecycleObserver lifecycle;
-    FakeNameResolutionObserver names(std::move(observations));
+    FakeNameResolutionObserver names(std::move(observations), delivery_poll);
     NoProcessResolver processes;
     FakeRouteObserver routes;
     neta::HistoryStore store(path);
@@ -184,6 +189,25 @@ void unique_lookup_attaches_to_connection() {
     remove_database(path);
 }
 
+void late_lookup_retries_after_connection_admission() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "neta-ms3-observation-name-late.sqlite";
+    remove_database(path);
+    const auto result = run_session(path, {lookup(9'500'000'000ULL)}, 4);
+    assert(result.name_resolution_events_observed == 1);
+    assert(result.name_resolution_evidence_attached == 1);
+    assert(result.ambiguous_name_resolution_matches == 0);
+    assert(result.connection_ids.size() == 1);
+    {
+        neta::HistoryStore store(path);
+        const auto evidence = store.name_resolution_evidence_for_connection(
+            result.connection_ids.front());
+        assert(evidence.size() == 1);
+        assert(evidence.front().observation.query_name == "api.example.test");
+    }
+    remove_database(path);
+}
+
 void ambiguous_lookup_remains_unresolved() {
     const auto path = std::filesystem::temp_directory_path() /
                       "neta-ms3-observation-name-ambiguous.sqlite";
@@ -205,6 +229,7 @@ void ambiguous_lookup_remains_unresolved() {
 
 int main() {
     unique_lookup_attaches_to_connection();
+    late_lookup_retries_after_connection_admission();
     ambiguous_lookup_remains_unresolved();
     std::cout << "Observation name-resolution tests passed\n";
 }

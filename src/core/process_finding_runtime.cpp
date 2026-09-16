@@ -1,7 +1,7 @@
 #include "neta/process_finding_runtime.hpp"
 
 #include "neta/crypto.hpp"
-#include "neta/fleet_client.hpp"
+#include "neta/reliable_fleet_client.hpp"
 #include "neta/rules/rule_set_loader.hpp"
 #ifndef _WIN32
 #include "neta/yara_x_provider.hpp"
@@ -141,7 +141,7 @@ std::string managed_yara_bundle_id(const std::filesystem::path& meta_path) {
 }  // namespace
 
 ProcessFindingRuntime::ProcessFindingRuntime(const std::filesystem::path& database)
-    : store_(database), artifact_store_(database) {
+    : store_(database), artifact_store_(database), database_(database) {
 #ifndef _WIN32
     std::filesystem::path selected_rules;
     std::string selected_ruleset;
@@ -266,7 +266,10 @@ bool ProcessFindingRuntime::report_artifact_evidence(const FleetReportingPolicy&
     }
     body << "]}";
 
-    static_cast<void>(FleetClient::send_evidence_summary(policy.state_dir, body.str()));
+    const auto summary = body.str();
+    if (!ReliableFleetClient::submit_evidence_summary(
+            database_, policy.state_dir, sha256_hex(summary), summary))
+        throw std::runtime_error("artifact evidence retained in outbound queue awaiting ACK");
     for (const auto& row : changed)
         artifact_reported_counts_[artifact_report_key(row)] = row.observation_count;
     return true;
@@ -282,7 +285,9 @@ ProcessFindingReportResult ProcessFindingRuntime::report_pending(
         ++result.considered;
         store_.mark_report_attempt(finding.finding_id, current_ns);
         try {
-            static_cast<void>(FleetClient::send_finding(policy.state_dir, announcement(finding)));
+            if (!ReliableFleetClient::submit_finding(
+                    database_, policy.state_dir, announcement(finding)))
+                throw std::runtime_error("process finding retained in outbound queue awaiting ACK");
             store_.mark_reported(finding.finding_id, now_ns());
             ++result.announced;
         } catch (const std::exception& error) {

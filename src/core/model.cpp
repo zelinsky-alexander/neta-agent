@@ -54,3 +54,4 @@ TrustState trust_state_from_string(const std::string& value) {
 #include "process_finding_runtime.cpp"
 #include "artifact_evidence_transport.cpp"
 #include "yarax_runtime_update.cpp"
+#include "rule_convergence.cpp"

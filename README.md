@@ -80,6 +80,7 @@ neta-agent run [--outbound|--inbound|--all] [filters] [--db neta.db]
 neta-agent history [--limit 50] [--json]
 neta-agent history show ID [--json]
 neta-agent baseline capture --target host:port [--ca file]
+neta-agent baseline accept-connection ID [--db neta.db]
 neta-agent baseline show --target host:port
 neta-agent baseline accept-client ID [--db neta.db]
 neta-agent baseline show-client ID [--db neta.db]

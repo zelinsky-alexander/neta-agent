@@ -13,11 +13,11 @@ inline constexpr const char* kLegacyRuleSetVersion = "neta-rules/0.1.0";
 inline constexpr const char* kPreviousRuleSetVersion = "neta-rules/0.2.0";
 inline constexpr const char* kRm1RuleSetVersion = "neta-rules/0.3.0";
 inline constexpr const char* kRm2RuleSetVersion = "neta-rules/0.4.0";
-inline constexpr const char* kRuleSetVersion = "neta-rules/0.5.0";
+inline constexpr const char* kRuleSetVersion = "neta-rules/0.6.0";
 
 struct RuleSet {
     std::string id{"neta-default"};
-    std::uint64_t revision{5};
+    std::uint64_t revision{6};
     std::uint64_t schema_version{2};
     std::string version{kRuleSetVersion};
 

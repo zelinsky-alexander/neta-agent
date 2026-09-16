@@ -398,17 +398,18 @@ inline TransferReportingResult auto_report_large_ingress(
         transfer_detail::persist(
             transfer_detail::suffix(history.path(), ".findings.jsonl"), *finding, now_epoch);
         ++result.persisted;
-        cooldowns[finding->finding_key] = now_epoch;
-        transfer_detail::save_cooldowns(state_path, cooldowns);
-
         if (reporting_policy.mode == FleetReportingMode::Off ||
             finding->confidence < reporting_policy.minimum_confidence ||
             !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) {
             ++result.suppressed_policy;
             return result;
         }
-        FleetClient::send_finding(reporting_policy.state_dir,
-                                  transfer_detail::announcement(*finding));
+        if (!ReliableFleetClient::submit_finding(
+                history.path(), reporting_policy.state_dir,
+                transfer_detail::announcement(*finding)))
+            throw std::runtime_error("transfer finding retained in outbound queue awaiting ACK");
+        cooldowns[finding->finding_key] = now_epoch;
+        transfer_detail::save_cooldowns(state_path, cooldowns);
         ++result.announced;
     } catch (const std::exception& error) {
         ++result.failed;

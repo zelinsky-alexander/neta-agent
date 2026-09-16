@@ -1,7 +1,7 @@
 #pragma once
 
 #include "neta/crypto.hpp"
-#include "neta/fleet_client.hpp"
+#include "neta/reliable_fleet_client.hpp"
 #include "neta/history_store.hpp"
 #include "neta/tls_session.hpp"
 
@@ -258,7 +258,8 @@ inline FleetReportingResult auto_report_connections(
                 continue;
             }
 
-            FleetClient::send_finding(policy.state_dir, finding);
+            if (!ReliableFleetClient::submit_finding(store.path(), policy.state_dir, finding))
+                throw std::runtime_error("finding retained in outbound queue awaiting ACK");
             cooldowns[finding.finding_key] = now_epoch;
             state_changed = true;
             ++result.announced;

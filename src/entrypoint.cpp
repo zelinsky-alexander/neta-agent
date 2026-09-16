@@ -176,6 +176,7 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet status [--state-dir DIR]\n"
             << "  neta-agent fleet hello [--state-dir DIR]\n"
             << "  neta-agent fleet heartbeat [--state-dir DIR]\n"
+            << "  neta-agent fleet outbox-status [--db FILE] [--state-dir DIR]\n"
             << "  neta-agent fleet rules-status [--state-dir DIR]\n"
             << "  neta-agent fleet rules-update [--state-dir DIR]\n"
             << "  neta-agent fleet yarax-update [--state-dir DIR]\n"
@@ -184,7 +185,7 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet upgrade-status [--state-dir DIR]\n"
             << "  neta-agent fleet upgrade-download [--state-dir DIR]\n"
             << "  neta-agent health --upgrade --state-dir DIR\n"
-            << "  neta-agent fleet announce --finding-id ID --host HOST --port PORT [--change CHANGE] [--performance VERDICT] [--trust VERDICT] [--evidence-root HASH] [--state-dir DIR]\n";
+            << "  neta-agent fleet announce --finding-id ID --host HOST --port PORT [--change CHANGE] [--performance VERDICT] [--trust VERDICT] [--evidence-root HASH] [--db FILE] [--state-dir DIR]\n";
 #ifndef _WIN32
         std::cout << "\nLarge-scale simulator / Phase 1:\n"
                   << "  neta-agent sensor-broker --map SLOT:NETNS_INODE:CGROUP_ID [--map ...] [--socket PATH] [--queue-capacity N]\n"

@@ -586,6 +586,39 @@ The receiving side should reject or quarantine messages that are:
 - outside permitted protocol/schema policy;
 - inconsistent with expected correlation state.
 
+### 17.1 Reliable-delivery extension
+
+NAP/1 reliable agent-to-coordinator messages add an `idempotency_key` to the
+existing envelope. The key identifies one logical event across transport retries;
+it is distinct from `finding_key`, which groups separate occurrences of the same
+logical issue.
+
+The agent durably stores the logical event and its payload hash in the local
+SQLite outbox before network I/O. A transport attempt has its own `message_id`,
+sequence, creation time and expiry. An unexpired attempt is retried byte-for-byte.
+After expiry, the agent creates a fresh attempt for the same idempotency key and
+payload hash.
+
+The coordinator authenticates the agent first, then checks the durable receipt for
+the idempotency key. The first transaction returns `ACCEPTED`; a retry with the
+same message type and payload hash returns `ALREADY_ACCEPTED`. Reusing the key for
+different content is a protocol conflict.
+
+An HTTP success status is not sufficient acknowledgement. The NAP response is an
+`Ack` object carrying the NAP protocol/schema discriminator plus `ackVersion`,
+`messageId`, `sequence`, `idempotencyKey`, `payloadHash`, `status`, and the
+coordinator `receivedAt` commit time. The agent marks the local row acknowledged
+only after every field matches the persisted attempt.
+
+The outbox uses SQLite WAL mode with a busy timeout so observation writers do not
+serialize behind network delivery reads. Capacity enforcement drops only
+never-attempted low-priority events and later emits a durable telemetry-gap
+`EvidenceSummary`; ambiguous attempts are retained. Non-retryable schema or size
+rejections are quarantined as dead letters for operator visibility.
+
+Heartbeat and AgentHello remain current-state messages and are not accumulated in
+the reliable finding outbox.
+
 ---
 
 ## 18. Rule and schema provenance

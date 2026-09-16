@@ -193,6 +193,11 @@ struct TokenEvidence {
     std::optional<bool> elevated;
 };
 
+struct ActiveProcessIdentity {
+    std::uint64_t platform_key{0};
+    std::optional<std::uint64_t> start_time_ns;
+};
+
 TokenEvidence process_token_evidence(DWORD pid) {
     TokenEvidence result;
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -384,19 +389,6 @@ private:
         event.pid = static_cast<std::int64_t>(*pid);
         event.tgid = static_cast<std::int64_t>(*pid);
 
-        const auto parent = parent_process_id(record);
-        if (parent && *parent != 0) {
-            event.parent_pid = static_cast<std::int64_t>(*parent);
-            event.parent_tgid = static_cast<std::int64_t>(*parent);
-            if (const auto known = active_process_keys_.find(*parent);
-                known != active_process_keys_.end()) {
-                event.parent_platform_process_key = known->second;
-            } else if (const auto creation = process_creation_key(*parent)) {
-                event.parent_platform_process_key = *creation;
-                event.parent_process_start_time_ns = filetime_to_ns(*creation);
-            }
-        }
-
         if (start) {
             const auto creation = process_creation_key(*pid);
             if (creation) {
@@ -405,7 +397,42 @@ private:
             } else if (const auto unique = unique_process_key(record)) {
                 event.platform_process_key = *unique;
             }
-            if (event.platform_process_key) active_process_keys_[*pid] = *event.platform_process_key;
+
+            const auto parent = parent_process_id(record);
+            if (parent && *parent != 0) {
+                event.parent_pid = static_cast<std::int64_t>(*parent);
+
+                std::optional<ActiveProcessIdentity> parent_identity;
+                if (const auto parent_creation = process_creation_key(*parent)) {
+                    parent_identity = ActiveProcessIdentity{
+                        *parent_creation,
+                        filetime_to_ns(*parent_creation),
+                    };
+                } else if (const auto known = active_process_keys_.find(*parent);
+                           known != active_process_keys_.end()) {
+                    parent_identity = known->second;
+                }
+
+                if (parent_identity) {
+                    std::optional<std::uint64_t> child_start = event.process_start_time_ns;
+                    if (!child_start && event.timestamp_ns != 0) child_start = event.timestamp_ns;
+                    const bool impossible =
+                        child_start && parent_identity->start_time_ns &&
+                        *parent_identity->start_time_ns > *child_start;
+                    if (!impossible) {
+                        event.parent_tgid = static_cast<std::int64_t>(*parent);
+                        event.parent_platform_process_key = parent_identity->platform_key;
+                        event.parent_process_start_time_ns = parent_identity->start_time_ns;
+                    }
+                }
+            }
+
+            if (event.platform_process_key) {
+                active_process_keys_[*pid] = ActiveProcessIdentity{
+                    *event.platform_process_key,
+                    event.process_start_time_ns,
+                };
+            }
 
             event.executable_path = process_image(*pid);
             if (event.executable_path.empty()) event.executable_path = text_property(record, L"ImageFileName");
@@ -419,7 +446,8 @@ private:
             event.elevated = token.elevated;
         } else {
             if (const auto known = active_process_keys_.find(*pid); known != active_process_keys_.end()) {
-                event.platform_process_key = known->second;
+                event.platform_process_key = known->second.platform_key;
+                event.process_start_time_ns = known->second.start_time_ns;
                 active_process_keys_.erase(known);
             } else if (const auto unique = unique_process_key(record)) {
                 event.platform_process_key = *unique;
@@ -450,7 +478,7 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<ProcessExecEvent> queue_;
-    std::unordered_map<std::uint32_t, std::uint64_t> active_process_keys_;
+    std::unordered_map<std::uint32_t, ActiveProcessIdentity> active_process_keys_;
     bool stopping_{false};
     std::atomic<std::uint64_t> locally_dropped_{0};
 };

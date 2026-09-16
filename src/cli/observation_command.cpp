@@ -4,9 +4,12 @@
 #include "neta/cli/observation_options.hpp"
 #include "neta/fleet_reporting.hpp"
 #include "neta/history_store.hpp"
+#include "neta/outbound_baseline.hpp"
 #include "neta/platform.hpp"
 #include "neta/process_finding_runtime.hpp"
+#include "neta/reliable_fleet_client.hpp"
 #include "neta/rm2_reporting.hpp"
+#include "neta/rule_convergence.hpp"
 #include "neta/storage_maintenance.hpp"
 #include "neta/tls_probe.hpp"
 #include "neta/transfer_assurance.hpp"
@@ -100,6 +103,17 @@ void maybe_launch_upgrade(const std::filesystem::path& state_dir) {
         }
     } catch (const std::exception& error) {
         std::cerr << "Fleet service upgrade launch failed; observation continues: "
+                  << error.what() << std::endl;
+    }
+}
+
+void accept_rule_control(const std::filesystem::path& state_dir, const std::string& response) {
+    try {
+        if (accept_rule_control_from_coordinator_response(state_dir, response)) {
+            std::cout << "Fleet service: detached rule-update worker launched" << std::endl;
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "Fleet service rule convergence failed; observation continues: "
                   << error.what() << std::endl;
     }
 }
@@ -203,7 +217,6 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     auto process_events = platform::make_process_exec_observer();
     ProcessFindingRuntime process_runtime(options.database);
     std::size_t process_events_observed = 0;
-    TransferSampler transfer_sampler(transfer_store);
     const bool lifecycle_active = lifecycle_supports(lifecycle->capability(), options.mode);
 
     if (options.mode != ObservationMode::Target && !lifecycle_active) {
@@ -271,8 +284,10 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     auto next_heartbeat = std::chrono::steady_clock::now() +
                           jittered_heartbeat_delay(heartbeat_interval,
                                                    heartbeat_jitter_percent);
+    auto next_outbox_dispatch = std::chrono::steady_clock::now();
 
     const auto transport_interval = options.transport_interval.value_or(
+        service_mode ? std::chrono::milliseconds(100) :
         lifecycle_active ? std::chrono::milliseconds(1000) : std::chrono::milliseconds(100));
     ObservationSession session(store, *sockets, *lifecycle, *processes, *routes,
                                ConnectionAdmissionPolicy(std::move(policy_config)),
@@ -281,6 +296,10 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     std::future<TlsObservation> tls_probe;
 
     ObservationRuntimeCallbacks callbacks;
+    callbacks.transport_observed = [&](std::int64_t connection_id,
+                                       const TcpSnapshot& snapshot) {
+        transfer_store.observe(connection_id, snapshot);
+    };
     callbacks.started = [&] {
         drain_process_graph();
         if (options.target) {
@@ -298,33 +317,50 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         }
         if (service_mode && fleet_identity_available) {
             try {
-                static_cast<void>(FleetClient::send_agent_hello(reporting_policy.state_dir));
+                const auto response = FleetClient::send_agent_hello(reporting_policy.state_dir);
                 std::cout << "Fleet service: AgentHello accepted" << std::endl;
+                accept_rule_control(reporting_policy.state_dir, response);
                 maybe_launch_upgrade(reporting_policy.state_dir);
             } catch (const std::exception& error) {
                 std::cerr << "Fleet service AgentHello failed; observation continues: "
                           << error.what() << std::endl;
             }
             report_process_findings();
+            try {
+                const auto dispatch = ReliableFleetClient::drain(
+                    options.database, reporting_policy.state_dir);
+                if (dispatch.acknowledged != 0 || dispatch.failed != 0)
+                    std::cout << "Fleet outbox: " << dispatch.acknowledged
+                              << " acknowledged, " << dispatch.failed << " deferred" << std::endl;
+            } catch (const std::exception& error) {
+                std::cerr << "Fleet outbox startup dispatch failed; observation continues: "
+                          << error.what() << std::endl;
+            }
         }
     };
     callbacks.periodic = [&] {
         drain_process_graph();
         report_process_findings();
-        if (service_mode) {
-            try {
-                transfer_sampler.capture(*sockets, store);
-            } catch (const std::exception& error) {
-                std::cerr << "Transfer sampling failed; observation continues: "
-                          << error.what() << std::endl;
-            }
-        }
         if (!service_mode || !fleet_identity_available) return;
         const auto now = std::chrono::steady_clock::now();
+        if (now >= next_outbox_dispatch) {
+            try {
+                const auto dispatch = ReliableFleetClient::drain(
+                    options.database, reporting_policy.state_dir);
+                if (dispatch.acknowledged != 0 || dispatch.failed != 0)
+                    std::cout << "Fleet outbox: " << dispatch.acknowledged
+                              << " acknowledged, " << dispatch.failed << " deferred" << std::endl;
+            } catch (const std::exception& error) {
+                std::cerr << "Fleet outbox dispatch failed; observation continues: "
+                          << error.what() << std::endl;
+            }
+            next_outbox_dispatch = now + std::chrono::seconds(5);
+        }
         if (now < next_heartbeat) return;
         try {
-            static_cast<void>(FleetClient::send_heartbeat(reporting_policy.state_dir));
+            const auto response = FleetClient::send_heartbeat(reporting_policy.state_dir);
             std::cout << "Fleet service: heartbeat accepted" << std::endl;
+            accept_rule_control(reporting_policy.state_dir, response);
             maybe_launch_upgrade(reporting_policy.state_dir);
         } catch (const std::exception& error) {
             std::cerr << "Fleet service heartbeat failed; observation continues: "
@@ -338,11 +374,12 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         if (!service_mode) return;
 
         try {
-            transfer_sampler.capture(*sockets, store, true);
+            static_cast<void>(evaluate_outbound_connection(store, connection_id));
         } catch (const std::exception& error) {
-            std::cerr << "Final transfer sampling failed for CONN-" << connection_id
+            std::cerr << "Outbound assurance finalization failed for CONN-" << connection_id
                       << "; observation continues: " << error.what() << std::endl;
         }
+
         const auto transfer_reporting = auto_report_rule_large_ingress(
             store, transfer_store, connection_id, reporting_policy);
         log_transfer_reporting_result(transfer_reporting);
@@ -356,7 +393,11 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
         log_reporting_result(context_reporting, "RM2 context rules");
 
         try {
-            if (!finalize_inbound_connection(connection_id, store)) return;
+            const auto connection = store.connection(connection_id);
+            if (connection && connection->direction == ConnectionDirection::Inbound) {
+                static_cast<void>(finalize_inbound_connection(connection_id, store));
+            }
+            if (!store.verdict_for_connection(connection_id)) return;
             const auto reporting = auto_report_connections(
                 store, std::vector<std::int64_t>{connection_id}, reporting_policy);
             log_reporting_result(reporting, "Fleet live reporting");

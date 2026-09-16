@@ -115,6 +115,7 @@ inline FindingAnnouncementInput context_announcement(const ContextRuleMatch& mat
     auto suffix = finding.evidence_root.substr(7); if (suffix.size() > 12) suffix.resize(12);
     finding.finding_id = "FINDING-RULE-" + match.rule_id + "-" + suffix;
     finding.changes.emplace_back("Rule: " + match.rule_id); finding.changes.emplace_back("Trusted engine: " + match.engine_rule_id);
+    finding.changes.emplace_back("Finding type: " + match.semantic_type);
     finding.changes.emplace_back("Severity: " + finding.severity); finding.changes.emplace_back(match.summary);
     return finding;
 }
@@ -134,18 +135,20 @@ inline BehaviorReportingResult auto_report_rule_periodic_behavior(HistoryStore& 
             const auto policy = rm2_reporting_detail::periodic_policy(rule);
             auto finding = detect_periodic_outbound(store.recent_connections(policy.recent_connection_limit), trigger_connection_id, policy);
             if (!finding) continue;
-            ++result.detected; finding->type = rule.id; finding->severity = rm2_reporting_detail::upper(rule.severity);
+            ++result.detected; finding->severity = rm2_reporting_detail::upper(rule.severity);
             finding->finding_key = "sha256:" + sha256_hex(rule.id + "|" + finding->process_identity + "|" + finding->host + ":" + std::to_string(finding->port));
             auto suffix = finding->evidence_root.substr(7); if (suffix.size() > 12) suffix.resize(12);
             finding->finding_id = "FINDING-BEHAVIOR-" + rule.id + "-" + suffix;
             if (!rm2_reporting_detail::cooldown_allows(finding->finding_key, cooldowns, now, reporting_policy)) { ++result.suppressed_cooldown; continue; }
             behavior_reporting_detail::persist_finding(behavior_reporting_detail::append_suffix(store.path(), ".findings.jsonl"), *finding, now);
-            ++result.persisted; cooldowns[finding->finding_key] = now; changed = true;
+            ++result.persisted;
             if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
             auto announcement = behavior_reporting_detail::announcement_from_finding(*finding);
             announcement.severity = finding->severity; announcement.rule_id = rule.id; announcement.rule_set_id = rules.id;
             announcement.rule_set_version = rules.version; announcement.interpretation = finding->interpretation;
-            FleetClient::send_finding(reporting_policy.state_dir, announcement); ++result.announced;
+            if (!ReliableFleetClient::submit_finding(store.path(), reporting_policy.state_dir, announcement))
+                throw std::runtime_error("behavior finding retained in outbound queue awaiting ACK");
+            cooldowns[finding->finding_key] = now; changed = true; ++result.announced;
         } catch (const std::exception& error) { ++result.failed; std::cerr << "RM2 periodic rule reporting failed for CONN-" << trigger_connection_id << ": " << error.what() << '\n'; }
     }
     if (changed) rm2_reporting_detail::save_cooldowns(rm2_reporting_detail::state_path(store), cooldowns);
@@ -164,18 +167,20 @@ inline TransferReportingResult auto_report_rule_large_ingress(HistoryStore& hist
         try {
             LargeIngressPolicy policy; policy.minimum_bytes_received = static_cast<std::uint64_t>(rule.numeric("minimum_bytes_received"));
             auto finding = detect_large_ingress(history, transfer_store, connection_id, policy); if (!finding) continue;
-            ++result.detected; finding->type = rule.id; finding->severity = rm2_reporting_detail::upper(rule.severity);
+            ++result.detected; finding->severity = rm2_reporting_detail::upper(rule.severity);
             finding->finding_key = "sha256:" + sha256_hex(rule.id + "|" + finding->process_identity + "|" + finding->host + ":" + std::to_string(finding->port));
             auto suffix = finding->evidence_root.substr(7); if (suffix.size() > 12) suffix.resize(12);
             finding->finding_id = "FINDING-TRANSFER-" + rule.id + "-" + suffix;
             if (!rm2_reporting_detail::cooldown_allows(finding->finding_key, cooldowns, now, reporting_policy)) { ++result.suppressed_cooldown; continue; }
             transfer_detail::persist(transfer_detail::suffix(history.path(), ".findings.jsonl"), *finding, now);
-            ++result.persisted; cooldowns[finding->finding_key] = now; changed = true;
+            ++result.persisted;
             if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
             auto announcement = transfer_detail::announcement(*finding);
             announcement.severity = finding->severity; announcement.rule_id = rule.id; announcement.rule_set_id = rules.id;
             announcement.rule_set_version = rules.version; announcement.interpretation = finding->interpretation;
-            FleetClient::send_finding(reporting_policy.state_dir, announcement); ++result.announced;
+            if (!ReliableFleetClient::submit_finding(history.path(), reporting_policy.state_dir, announcement))
+                throw std::runtime_error("transfer finding retained in outbound queue awaiting ACK");
+            cooldowns[finding->finding_key] = now; changed = true; ++result.announced;
         } catch (const std::exception& error) { ++result.failed; std::cerr << "RM2 transfer rule reporting failed for CONN-" << connection_id << ": " << error.what() << '\n'; }
     }
     if (changed) rm2_reporting_detail::save_cooldowns(rm2_reporting_detail::state_path(history), cooldowns);
@@ -189,6 +194,10 @@ inline FleetReportingResult auto_report_context_rules(HistoryStore& store, Trans
     ConnectionRuleContext context; context.connection = *connection;
     context.metrics = aggregate_metrics(store.samples_for_connection(connection_id));
     const auto exported = store.export_data(connection_id); context.baseline = exported.baseline;
+    if (!context.baseline && connection->direction == ConnectionDirection::Outbound) {
+        context.baseline = store.baseline_for(
+            rm2_reporting_detail::target_host(*connection), connection->remote_port);
+    }
     context.name_resolution = store.name_resolution_evidence_for_connection(connection_id);
     context.tls_sessions = store.tls_session_evidence_for_connection(connection_id);
     context.route = store.route_for_connection(connection_id);
@@ -203,7 +212,9 @@ inline FleetReportingResult auto_report_context_rules(HistoryStore& store, Trans
             auto finding = rm2_reporting_detail::context_announcement(match, context, rules);
             if (!rm2_reporting_detail::cooldown_allows(finding.finding_key, cooldowns, now, reporting_policy)) { ++result.suppressed_cooldown; continue; }
             if (reporting_policy.mode == FleetReportingMode::Off || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
-            FleetClient::send_finding(reporting_policy.state_dir, finding); cooldowns[finding.finding_key] = now; changed = true; ++result.announced;
+            if (!ReliableFleetClient::submit_finding(store.path(), reporting_policy.state_dir, finding))
+                throw std::runtime_error("context finding retained in outbound queue awaiting ACK");
+            cooldowns[finding.finding_key] = now; changed = true; ++result.announced;
         } catch (const std::exception& error) { ++result.failed; std::cerr << "RM2 context rule reporting failed for CONN-" << connection_id << ": " << error.what() << '\n'; }
     }
     if (changed) rm2_reporting_detail::save_cooldowns(rm2_reporting_detail::state_path(store), cooldowns);

@@ -145,16 +145,20 @@ std::vector<ProcessExecEvent> snapshot_processes() {
         event.pid = static_cast<std::int64_t>(entry.th32ProcessID);
         event.tgid = static_cast<std::int64_t>(entry.th32ProcessID);
         event.parent_pid = static_cast<std::int64_t>(entry.th32ParentProcessID);
-        event.parent_tgid = static_cast<std::int64_t>(entry.th32ParentProcessID);
         event.platform_process_key = *key;
         event.process_start_time_ns = *started_at_ns;
         event.timestamp_ns = *started_at_ns;
         event.comm = wide_to_utf8(entry.szExeFile, std::wcslen(entry.szExeFile));
         event.executable_path = process_image(entry.th32ProcessID);
         if (entry.th32ParentProcessID != 0) {
-            event.parent_platform_process_key = creation_key(entry.th32ParentProcessID);
-            if (event.parent_platform_process_key) {
-                event.parent_process_start_time_ns = filetime_to_unix_ns(*event.parent_platform_process_key);
+            const auto parent_key = creation_key(entry.th32ParentProcessID);
+            const auto parent_started_at_ns =
+                parent_key ? filetime_to_unix_ns(*parent_key) : std::nullopt;
+            if (parent_key && parent_started_at_ns &&
+                *parent_started_at_ns <= *started_at_ns) {
+                event.parent_tgid = static_cast<std::int64_t>(entry.th32ParentProcessID);
+                event.parent_platform_process_key = *parent_key;
+                event.parent_process_start_time_ns = *parent_started_at_ns;
             }
         }
         DWORD session = 0;

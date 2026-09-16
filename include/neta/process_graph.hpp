@@ -50,6 +50,7 @@ struct ProcessNode {
 struct ProcessGraphHealth {
     std::uint64_t rejected_without_stable_identity{0};
     std::uint64_t ambiguous_parent_links{0};
+    std::uint64_t rejected_invalid_parent_links{0};
     std::uint64_t ambiguous_exit_events{0};
     std::uint64_t evicted_nodes{0};
 };
