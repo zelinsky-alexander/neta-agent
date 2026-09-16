@@ -1,4 +1,5 @@
 #include "neta/platform.hpp"
+#include "neta/sensor_broker.hpp"
 
 #include <chrono>
 #include <memory>
@@ -24,6 +25,9 @@ private:
 }  // namespace
 
 std::unique_ptr<ProcessExecObserver> make_process_exec_observer() {
+    if (sensor_broker::sensor_mode_from_environment() == sensor_broker::SensorMode::Broker) {
+        return sensor_broker::make_broker_process_exec_observer();
+    }
     return std::make_unique<UnavailableProcessExecObserver>();
 }
 

@@ -9,6 +9,8 @@
 
 #ifdef _WIN32
 #include "neta/windows_service.hpp"
+#else
+#include "neta/sensor_broker.hpp"
 #endif
 
 #include <cstdlib>
@@ -85,6 +87,13 @@ int windows_capabilities() {
 } // namespace
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+    if (argc >= 2 && std::string(argv[1]) == "sensor-broker") {
+        try { return neta::sensor_broker::run_linux_sensor_broker(argc, argv); }
+        catch (const std::exception& e) { std::cerr << "Error: " << e.what() << '\n'; return 1; }
+    }
+#endif
+
     if (argc >= 3 && std::string(argv[1]) == "fleet" && std::string(argv[2]) == "yarax-update") {
         try {
             const auto result = neta::update_yarax_runtime_from_coordinator(fleet_state_dir(argc, argv));
@@ -177,6 +186,11 @@ int main(int argc, char** argv) {
             << "  neta-agent fleet upgrade-download [--state-dir DIR]\n"
             << "  neta-agent health --upgrade --state-dir DIR\n"
             << "  neta-agent fleet announce --finding-id ID --host HOST --port PORT [--change CHANGE] [--performance VERDICT] [--trust VERDICT] [--evidence-root HASH] [--db FILE] [--state-dir DIR]\n";
+#ifndef _WIN32
+        std::cout << "\nLarge-scale simulator / Phase 1:\n"
+                  << "  neta-agent sensor-broker --map SLOT:NETNS_INODE:CGROUP_ID [--map ...] [--socket PATH] [--queue-capacity N]\n"
+                  << "  Broker-mode agents set NETA_SENSOR_MODE=broker, NETA_ENDPOINT_SLOT and optionally NETA_SENSOR_BROKER.\n";
+#endif
 #ifdef _WIN32
         std::cout << "\nWindows service:\n"
                   << "  neta-agent service [--all|--outbound|--inbound] [filters] [--db FILE] [--state-dir DIR] [--max-db-mb 200]\n"

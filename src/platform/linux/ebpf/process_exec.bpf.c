@@ -31,6 +31,7 @@ static __always_inline struct neta_process_exec_wire_event *reserve_event(__u16 
     struct neta_process_exec_wire_event *event;
     const __u64 pid_tgid = bpf_get_current_pid_tgid();
     const __u64 uid_gid = bpf_get_current_uid_gid();
+    const __u64 cgroup_id = bpf_get_current_cgroup_id();
     struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
     struct task_struct *leader = 0;
     struct task_struct *parent = 0;
@@ -52,6 +53,10 @@ static __always_inline struct neta_process_exec_wire_event *reserve_event(__u16 
     event->uid = (__u32)uid_gid;
     event->gid = (__u32)(uid_gid >> 32);
     event->availability |= NETA_EXEC_HAS_PID | NETA_EXEC_HAS_UID | NETA_EXEC_HAS_GID;
+    if (cgroup_id != 0) {
+        event->cgroup_id = cgroup_id;
+        event->availability |= NETA_EXEC_HAS_CGROUP_ID;
+    }
     bpf_get_current_comm(event->comm, sizeof(event->comm));
 
     if (task) {
