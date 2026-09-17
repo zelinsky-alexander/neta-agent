@@ -36,6 +36,16 @@ void clear_capture_time(const std::filesystem::path& path, std::int64_t id) {
     assert(sqlite3_close(db) == SQLITE_OK);
 }
 
+void set_capture_time(const std::filesystem::path& path, std::int64_t id,
+                      std::uint64_t captured_at_ns) {
+    sqlite3* db = nullptr;
+    assert(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
+    const auto sql = "UPDATE connections SET captured_at_ns=" +
+                     std::to_string(captured_at_ns) + " WHERE id=" + std::to_string(id) + ";";
+    assert(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    assert(sqlite3_close(db) == SQLITE_OK);
+}
+
 std::string format_capture_time(std::uint64_t timestamp_ns, bool include_timezone) {
     const auto timestamp = static_cast<std::time_t>(timestamp_ns / 1'000'000'000ULL);
     std::tm local{};
@@ -76,16 +86,18 @@ std::int64_t add_connection(neta::HistoryStore& store, std::uint64_t cookie,
                                   neta::ConnectionDirection::Outbound);
 }
 
-void history_output_includes_capture_time(const char* binary) {
+void linux_history_uses_wall_clock_across_boot_epochs(const char* binary) {
     const auto database = test_path("database.sqlite");
     const auto output = test_path("output.txt");
     remove_database(database);
     std::optional<std::uint64_t> newer_capture_ns;
     {
         neta::HistoryStore store(database);
-        add_connection(store, 1, kOlderFirstSeenNs);
-        const auto newer_id = add_connection(store, 2, kNewerFirstSeenNs);
-        newer_capture_ns = store.connection(newer_id)->captured_at_ns;
+        add_connection(store, 1, kNewerFirstSeenNs);
+        const auto newer_id = add_connection(store, 2, kOlderFirstSeenNs);
+        set_capture_time(database, 1, kOlderFirstSeenNs);
+        set_capture_time(database, newer_id, kNewerFirstSeenNs);
+        newer_capture_ns = kNewerFirstSeenNs;
     }
     assert(newer_capture_ns);
 
@@ -131,6 +143,6 @@ void history_output_includes_capture_time(const char* binary) {
 
 int main(int argc, char** argv) {
     assert(argc == 2);
-    history_output_includes_capture_time(argv[1]);
+    linux_history_uses_wall_clock_across_boot_epochs(argv[1]);
     std::cout << "History CLI tests passed\n";
 }

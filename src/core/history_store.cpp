@@ -271,6 +271,8 @@ CREATE TABLE IF NOT EXISTS verdicts(
                                   "network_namespace_inode INTEGER");
     history_schema::ensure_column(db_, "connections", "captured_at_ns",
                                   "captured_at_ns INTEGER");
+    exec("CREATE INDEX IF NOT EXISTS idx_connections_captured_recent "
+         "ON connections(COALESCE(captured_at_ns,first_seen_ns) DESC,id DESC);");
     history_schema::ensure_column(db_, "routes", "relation",
                                   "relation TEXT NOT NULL DEFAULT 'UNKNOWN'");
     history_schema::ensure_column(db_, "lifecycle_events", "agent_pid", "agent_pid INTEGER");
@@ -583,7 +585,7 @@ void HistoryStore::save_verdict(std::int64_t connection_id, const AssuranceVerdi
 }
 
 std::vector<ConnectionSummary> HistoryStore::recent_connections(std::size_t limit) const {
-    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,c.captured_at_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id ORDER BY c.first_seen_ns DESC LIMIT ?;)SQL");
+    Statement stmt(db_, R"SQL(SELECT c.id,c.first_seen_ns,c.last_seen_ns,c.captured_at_ns,COALESCE(p.pid,-1),COALESCE(p.uid,0),p.start_ticks_observed,COALESCE(p.comm,''),COALESCE(p.executable_path,''),c.local_ip,c.local_port,c.remote_ip,c.remote_port,c.target_host,c.lifecycle_state,c.performance_state,c.trust_state,c.direction,c.socket_cookie,c.socket_inode,c.network_namespace_inode FROM connections c LEFT JOIN processes p ON p.id=c.process_id ORDER BY COALESCE(c.captured_at_ns,c.first_seen_ns) DESC,c.id DESC LIMIT ?;)SQL");
     sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(limit));
     std::vector<ConnectionSummary> out;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {

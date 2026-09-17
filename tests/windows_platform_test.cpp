@@ -8,6 +8,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <sqlite3.h>
 
 #include <cassert>
 #include <chrono>
@@ -236,6 +237,36 @@ void verify_reconciliation_tracker() {
     std::filesystem::remove(path.string() + "-shm", ignored);
 }
 
+void verify_cross_reboot_history_ordering() {
+    const auto path = reconciliation_db_path().replace_filename(L"neta-windows-history-ordering.sqlite");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    {
+        neta::HistoryStore store(path);
+        neta::SocketObservation socket = reconciliation_socket(9'000);
+        const auto old_boot = store.begin_connection(socket, std::nullopt, "old-boot.test", 9'000,
+                neta::ConnectionDirection::Outbound);
+        socket.transport.observed_ns = 100;
+        socket.local_port++;
+        const auto new_boot = store.begin_connection(socket, std::nullopt, "new-boot.test", 100,
+                neta::ConnectionDirection::Outbound);
+        sqlite3* db = nullptr;
+        assert(sqlite3_open(path.string().c_str(), &db) == SQLITE_OK);
+        const auto sql = "UPDATE connections SET captured_at_ns=1000 WHERE id=" +
+                std::to_string(old_boot) + "; UPDATE connections SET captured_at_ns=2000 WHERE id=" +
+                std::to_string(new_boot) + ";";
+        assert(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        assert(sqlite3_close(db) == SQLITE_OK);
+        const auto history = store.recent_connections(2);
+        assert(history.size() == 2);
+        assert(history[0].id == new_boot);
+        assert(history[1].id == old_boot);
+    }
+    std::filesystem::remove(path, ignored);
+    std::filesystem::remove(path.string() + "-wal", ignored);
+    std::filesystem::remove(path.string() + "-shm", ignored);
+}
+
 void verify_real_etw_lifecycle() {
     auto lifecycle = neta::platform::make_lifecycle_observer();
     if (!lifecycle->capability().available()) {
@@ -380,6 +411,7 @@ int main() {
     verify_dns_decoder_helpers();
     verify_direction_semantics();
     verify_reconciliation_tracker();
+    verify_cross_reboot_history_ordering();
 
     const auto capabilities = neta::platform::capabilities();
     assert(capabilities.connection_discovery);

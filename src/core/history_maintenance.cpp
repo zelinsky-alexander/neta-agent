@@ -234,7 +234,7 @@ WHERE id IN (
     SELECT id FROM connections
     WHERE performance_state NOT IN ('DEGRADED','FAILED')
       AND trust_state NOT IN ('CHANGED','SUSPICIOUS')
-    ORDER BY first_seen_ns ASC,id ASC LIMIT 64
+    ORDER BY COALESCE(captured_at_ns,first_seen_ns) ASC,id ASC LIMIT 64
 );
 )SQL");
         normal.step_done();
@@ -252,7 +252,7 @@ WHERE id IN (
     SELECT id FROM connections
     WHERE performance_state IN ('DEGRADED','FAILED')
        OR trust_state IN ('CHANGED','SUSPICIOUS')
-    ORDER BY first_seen_ns ASC,id ASC LIMIT 8
+    ORDER BY COALESCE(captured_at_ns,first_seen_ns) ASC,id ASC LIMIT 8
 );
 )SQL");
             anomalous.step_done();

@@ -52,6 +52,16 @@ std::int64_t scalar_query(const std::filesystem::path& path, const char* sql) {
     return value;
 }
 
+void set_capture_time(const std::filesystem::path& path, std::int64_t id,
+                      std::uint64_t captured_at_ns) {
+    sqlite3* db = nullptr;
+    assert(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
+    const auto sql = "UPDATE connections SET captured_at_ns=" + std::to_string(captured_at_ns) +
+                     " WHERE id=" + std::to_string(id) + ";";
+    assert(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    assert(sqlite3_close(db) == SQLITE_OK);
+}
+
 SocketObservation make_socket(std::uint64_t index, std::uint64_t observed_ns) {
     SocketObservation socket;
     socket.socket_cookie = 10'000 + index;
@@ -307,6 +317,10 @@ void test_bounded_retention_policy() {
                                             latest.sha256));
             normal_ids.push_back(connection_id);
         }
+        // Simulate two boot epochs: the later inserted/high-monotonic row is older in wall time,
+        // while the low-monotonic row belongs to the newer boot and must be retained longer.
+        set_capture_time(path, normal_ids.front(), 8'000'000'000'000'000'000ULL);
+        set_capture_time(path, normal_ids.back(), 1ULL);
 
         std::vector<std::int64_t> protected_ids;
         const std::vector<std::pair<PerformanceState, TrustState>> protected_states{
@@ -345,8 +359,8 @@ void test_bounded_retention_policy() {
         const auto after = store.status(max_bytes);
         assert(after.bytes <= target_bytes);
         assert(after.connection_count < before.connection_count);
-        assert(!store.connection(normal_ids.front()));
-        assert(store.connection(normal_ids.back()));
+        assert(store.connection(normal_ids.front()));
+        assert(!store.connection(normal_ids.back()));
 
         for (const auto id : protected_ids) {
             assert(store.connection(id));
