@@ -1,5 +1,6 @@
 #include "neta/outbound_baseline.hpp"
 #include "neta/tls_session.hpp"
+#include "neta/verdict.hpp"
 
 #include <cassert>
 #include <filesystem>
