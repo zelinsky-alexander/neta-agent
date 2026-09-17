@@ -63,6 +63,17 @@ std::int64_t add_connection(neta::HistoryStore& store, std::uint16_t local_port,
 } // namespace
 
 int main() {
+    {
+        neta::TcpSnapshot first;
+        first.observed_ns = 1;
+        first.rtt_us = 1'000;
+        first.total_retrans = 2;
+        auto second = first;
+        second.observed_ns = 2;
+        second.total_retrans = 9;
+        const auto metrics = neta::aggregate_metrics({first, second});
+        assert(metrics.retransmission_delta == 7);
+    }
     const auto path = std::filesystem::temp_directory_path() /
                       "neta-outbound-baseline-test.sqlite";
     remove_database(path);

@@ -151,6 +151,19 @@ void partial_observation_caps_fidelity() {
     assert(result.evidence->correlation_fidelity == neta::EvidenceFidelity::Supporting);
 }
 
+void stable_identity_session_matches_current_cookie_not_prior_target_connection() {
+    auto prior = connection(neta::ConnectionDirection::Outbound, 6, 899);
+    prior.lifecycle_state = "CLOSED";
+    prior.last_seen_ns = 4'000;
+    auto current = connection(neta::ConnectionDirection::Outbound, 7, 900);
+    const auto result = neta::correlate_tls_session(
+        outbound_event(900), {prior, current});
+    assert(result.status == neta::TlsSessionCorrelationStatus::Matched);
+    assert(result.connection_id == 7);
+    assert(result.evidence);
+    assert(result.evidence->correlation_fidelity == neta::EvidenceFidelity::Exact);
+}
+
 } // namespace
 
 int main() {
@@ -162,5 +175,6 @@ int main() {
     tuple_ambiguity_is_not_guessed();
     direction_and_inbound_identity_are_explicit();
     partial_observation_caps_fidelity();
+    stable_identity_session_matches_current_cookie_not_prior_target_connection();
     std::cout << "TLS session correlation tests passed\n";
 }

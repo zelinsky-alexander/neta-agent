@@ -222,6 +222,12 @@ struct LargeIngressFinding {
     std::string finding_id;
     std::string evidence_root;
     std::string interpretation;
+    std::string rule_id;
+    std::string semantic_type{"LARGE_INGRESS_TRANSFER"};
+    std::string rule_set_id;
+    std::string rule_set_version;
+    std::uint64_t rule_set_revision{0};
+    std::uint64_t minimum_bytes_received{0};
 };
 
 inline std::optional<LargeIngressFinding> detect_large_ingress(
@@ -340,6 +346,12 @@ inline void persist(const std::filesystem::path& path, const LargeIngressFinding
            << "\"transfer_fidelity\":\"" << to_string(finding.fidelity) << "\","
            << "\"evidence_root\":\"" << finding.evidence_root << "\","
            << "\"interpretation\":\"" << json_escape(finding.interpretation) << "\","
+           << "\"rule_id\":\"" << json_escape(finding.rule_id) << "\","
+           << "\"semantic_type\":\"" << json_escape(finding.semantic_type) << "\","
+           << "\"rule_set_id\":\"" << json_escape(finding.rule_set_id) << "\","
+           << "\"rule_set_version\":\"" << json_escape(finding.rule_set_version) << "\","
+           << "\"rule_set_revision\":" << finding.rule_set_revision << ','
+           << "\"minimum_bytes_received\":" << finding.minimum_bytes_received << ','
            << "\"created_epoch\":" << created_epoch << "}\n";
     if (!output) throw std::runtime_error("cannot flush transfer finding");
 }
@@ -354,6 +366,9 @@ inline FindingAnnouncementInput announcement(const LargeIngressFinding& finding)
     input.performance_verdict = "INSUFFICIENT_EVIDENCE";
     input.trust_verdict = "UNVERIFIED";
     input.evidence_root = finding.evidence_root;
+    input.rule_id = finding.rule_id;
+    input.rule_set_id = finding.rule_set_id;
+    input.rule_set_version = finding.rule_set_version;
     input.changes.emplace_back("Finding type: " + finding.type);
     input.changes.emplace_back("Severity: " + finding.severity);
     std::ostringstream confidence;

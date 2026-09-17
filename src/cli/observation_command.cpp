@@ -25,6 +25,7 @@
 #include <iostream>
 #include <optional>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -193,6 +194,17 @@ void log_process_reporting_result(const ProcessFindingReportResult& reporting) {
               << reporting.failed << " retained for retry" << std::endl;
 }
 
+std::optional<std::uint64_t> minimum_large_ingress_threshold(const RuleSet& rules) {
+    std::optional<std::uint64_t> minimum;
+    for (const auto& rule : rules.definitions) {
+        if (!rule.enabled || rule.engine_rule_id != "NET-001") continue;
+        const auto threshold = static_cast<std::uint64_t>(
+            rule.numeric("minimum_bytes_received"));
+        if (!minimum || threshold < *minimum) minimum = threshold;
+    }
+    return minimum;
+}
+
 } // namespace
 
 void request_observation_stop() noexcept {
@@ -296,9 +308,22 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
     std::future<TlsObservation> tls_probe;
 
     ObservationRuntimeCallbacks callbacks;
+    std::set<std::int64_t> live_large_ingress_reported;
     callbacks.transport_observed = [&](std::int64_t connection_id,
                                        const TcpSnapshot& snapshot) {
         transfer_store.observe(connection_id, snapshot);
+        if (!service_mode || !snapshot.bytes_received ||
+            live_large_ingress_reported.contains(connection_id)) {
+            return;
+        }
+        const auto rules = current_rule_set();
+        const auto threshold = minimum_large_ingress_threshold(rules);
+        if (!threshold || *snapshot.bytes_received < *threshold) return;
+
+        const auto reporting = auto_report_rule_large_ingress(
+            store, transfer_store, connection_id, reporting_policy, rules);
+        log_transfer_reporting_result(reporting);
+        if (reporting.detected != 0) live_large_ingress_reported.insert(connection_id);
     };
     callbacks.started = [&] {
         drain_process_graph();
@@ -380,9 +405,12 @@ void run_observation_command(int argc, char** argv, bool service_mode) {
                       << "; observation continues: " << error.what() << std::endl;
         }
 
-        const auto transfer_reporting = auto_report_rule_large_ingress(
-            store, transfer_store, connection_id, reporting_policy);
-        log_transfer_reporting_result(transfer_reporting);
+        if (!live_large_ingress_reported.contains(connection_id)) {
+            const auto transfer_reporting = auto_report_rule_large_ingress(
+                store, transfer_store, connection_id, reporting_policy);
+            log_transfer_reporting_result(transfer_reporting);
+        }
+        live_large_ingress_reported.erase(connection_id);
 
         const auto behavior_reporting = auto_report_rule_periodic_behavior(
             store, connection_id, reporting_policy);

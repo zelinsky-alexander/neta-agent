@@ -168,6 +168,9 @@ inline TransferReportingResult auto_report_rule_large_ingress(HistoryStore& hist
             LargeIngressPolicy policy; policy.minimum_bytes_received = static_cast<std::uint64_t>(rule.numeric("minimum_bytes_received"));
             auto finding = detect_large_ingress(history, transfer_store, connection_id, policy); if (!finding) continue;
             ++result.detected; finding->severity = rm2_reporting_detail::upper(rule.severity);
+            finding->rule_id = rule.id; finding->rule_set_id = rules.id;
+            finding->rule_set_version = rules.version; finding->rule_set_revision = rules.revision;
+            finding->minimum_bytes_received = policy.minimum_bytes_received;
             finding->finding_key = "sha256:" + sha256_hex(rule.id + "|" + finding->process_identity + "|" + finding->host + ":" + std::to_string(finding->port));
             auto suffix = finding->evidence_root.substr(7); if (suffix.size() > 12) suffix.resize(12);
             finding->finding_id = "FINDING-TRANSFER-" + rule.id + "-" + suffix;
@@ -176,8 +179,7 @@ inline TransferReportingResult auto_report_rule_large_ingress(HistoryStore& hist
             ++result.persisted;
             if (reporting_policy.mode == FleetReportingMode::Off || finding->confidence < reporting_policy.minimum_confidence || !std::filesystem::exists(reporting_policy.state_dir / "identity.conf")) { ++result.suppressed_policy; continue; }
             auto announcement = transfer_detail::announcement(*finding);
-            announcement.severity = finding->severity; announcement.rule_id = rule.id; announcement.rule_set_id = rules.id;
-            announcement.rule_set_version = rules.version; announcement.interpretation = finding->interpretation;
+            announcement.severity = finding->severity; announcement.interpretation = finding->interpretation;
             if (!ReliableFleetClient::submit_finding(history.path(), reporting_policy.state_dir, announcement))
                 throw std::runtime_error("transfer finding retained in outbound queue awaiting ACK");
             cooldowns[finding->finding_key] = now; changed = true; ++result.announced;

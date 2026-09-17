@@ -377,6 +377,11 @@ if(NETA_ENABLE_TESTS)
     neta_enable_warnings(neta_outbound_baseline_test)
     add_test(NAME neta_outbound_baseline_test COMMAND neta_outbound_baseline_test)
 
+    add_executable(neta_large_ingress_reporting_test tests/large_ingress_reporting_test.cpp)
+    target_link_libraries(neta_large_ingress_reporting_test PRIVATE neta_core)
+    neta_enable_warnings(neta_large_ingress_reporting_test)
+    add_test(NAME neta_large_ingress_reporting_test COMMAND neta_large_ingress_reporting_test)
+
     if(WIN32)
         add_executable(neta_windows_platform_test tests/windows_platform_test.cpp)
         target_link_libraries(neta_windows_platform_test PRIVATE neta_core)
